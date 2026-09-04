@@ -2,7 +2,7 @@ import "dotenv/config";
 
 export type LLMProviderName = "anthropic" | "openai" | "openrouter" | "ollama" | "mock";
 export type EmbeddingProviderName = "local" | "openai" | "voyage";
-export type WebSearchProviderName = "brave" | "none";
+export type WebSearchProviderName = "brave" | "duckduckgo" | "none";
 
 function int(value: string | undefined, fallback: number): number {
   const n = Number(value);
