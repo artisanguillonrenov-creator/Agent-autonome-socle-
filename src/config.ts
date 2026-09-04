@@ -1,6 +1,6 @@
 import "dotenv/config";
 
-export type LLMProviderName = "anthropic" | "openai" | "ollama" | "mock";
+export type LLMProviderName = "anthropic" | "openai" | "openrouter" | "ollama" | "mock";
 export type EmbeddingProviderName = "local" | "openai" | "voyage";
 export type WebSearchProviderName = "brave" | "none";
 
@@ -15,6 +15,7 @@ export const config = {
     model: process.env.LLM_MODEL || "claude-sonnet-5",
     anthropicApiKey: process.env.ANTHROPIC_API_KEY || "",
     openaiApiKey: process.env.OPENAI_API_KEY || "",
+    openrouterApiKey: process.env.OPENROUTER_API_KEY || "",
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL || "http://localhost:11434",
   },
   embeddings: {

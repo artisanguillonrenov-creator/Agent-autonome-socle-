@@ -2,6 +2,7 @@ import { config } from "../../config.js";
 import type { LLMProvider } from "../provider.js";
 import { AnthropicProvider } from "./anthropic.js";
 import { OpenAIProvider } from "./openai.js";
+import { OpenRouterProvider } from "./openrouter.js";
 import { OllamaProvider } from "./ollama.js";
 import { MockProvider } from "./mock.js";
 
@@ -12,6 +13,8 @@ export function createLLMProvider(): LLMProvider {
       return new AnthropicProvider({ apiKey: config.llm.anthropicApiKey, model: config.llm.model });
     case "openai":
       return new OpenAIProvider({ apiKey: config.llm.openaiApiKey, model: config.llm.model });
+    case "openrouter":
+      return new OpenRouterProvider({ apiKey: config.llm.openrouterApiKey, model: config.llm.model });
     case "ollama":
       return new OllamaProvider({ baseUrl: config.llm.ollamaBaseUrl, model: config.llm.model });
     case "mock":

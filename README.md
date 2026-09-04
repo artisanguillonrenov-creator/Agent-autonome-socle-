@@ -7,9 +7,9 @@ en neuf briques communes.
 
 ## Principes
 
-- **LLM-agnostique** : Anthropic, OpenAI, Ollama ou un fournisseur `mock` (hors-ligne,
-  sans clé API) sont interchangeables via `LLM_PROVIDER`. Aucun SDK propriétaire :
-  les fournisseurs parlent en HTTP brut derrière l'interface `LLMProvider`.
+- **LLM-agnostique** : Anthropic, OpenAI, OpenRouter, Ollama ou un fournisseur `mock`
+  (hors-ligne, sans clé API) sont interchangeables via `LLM_PROVIDER`. Aucun SDK
+  propriétaire : les fournisseurs parlent en HTTP brut derrière l'interface `LLMProvider`.
 - **100% local par défaut** : stockage SQLite (fichier unique, `better-sqlite3`),
   aucun service externe à faire tourner. La mémoire vectorielle utilise un
   embedding local par feature hashing (déterministe, zéro dépendance) ; des
