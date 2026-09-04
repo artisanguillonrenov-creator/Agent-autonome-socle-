@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Agent } from "../core/agent.js";
 import { config } from "../config.js";
+import { getChatPageHtml } from "./chatPage.js";
 
 async function readBody(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
@@ -28,6 +29,12 @@ function isAuthorized(req: IncomingMessage): boolean {
  */
 export function startHttpApi(agent: Agent, port: number): void {
   const server = createServer(async (req, res) => {
+    if (req.method === "GET" && req.url === "/") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(getChatPageHtml());
+      return;
+    }
+
     if (!isAuthorized(req)) {
       sendJson(res, 401, { error: "unauthorized" });
       return;
