@@ -39,6 +39,17 @@ export interface PlanNode {
   createdAt: number;
 }
 
+export type TaskStatus = "pending" | "done";
+
+export interface TaskItem {
+  id: string;
+  title: string;
+  status: TaskStatus;
+  /** Timestamp epoch ms de l'échéance/rappel, ou null si aucune. */
+  dueAt: number | null;
+  createdAt: number;
+}
+
 export interface SkillDefinition {
   name: string;
   description: string;

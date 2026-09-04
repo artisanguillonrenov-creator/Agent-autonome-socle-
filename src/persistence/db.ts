@@ -53,6 +53,14 @@ export function getDb(): Database.Database {
       created_at INTEGER NOT NULL,
       state TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS tasks (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      status TEXT NOT NULL,
+      due_at INTEGER,
+      created_at INTEGER NOT NULL
+    );
   `);
 
   instance = db;

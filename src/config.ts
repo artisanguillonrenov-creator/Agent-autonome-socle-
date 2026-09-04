@@ -2,6 +2,7 @@ import "dotenv/config";
 
 export type LLMProviderName = "anthropic" | "openai" | "ollama" | "mock";
 export type EmbeddingProviderName = "local" | "openai" | "voyage";
+export type WebSearchProviderName = "brave" | "none";
 
 function int(value: string | undefined, fallback: number): number {
   const n = Number(value);
@@ -21,8 +22,28 @@ export const config = {
     openaiApiKey: process.env.OPENAI_API_KEY || "",
     voyageApiKey: process.env.VOYAGE_API_KEY || "",
   },
+  webSearch: {
+    provider: (process.env.WEB_SEARCH_PROVIDER as WebSearchProviderName) || "none",
+    braveApiKey: process.env.BRAVE_SEARCH_API_KEY || "",
+  },
+  codeExecution: {
+    enabled: process.env.ENABLE_CODE_EXECUTION === "true",
+    timeoutMs: int(process.env.CODE_EXECUTION_TIMEOUT_MS, 5000),
+  },
   db: {
     path: process.env.AGENT_DB_PATH || "./data/agent.db",
+  },
+  interface: {
+    /** Liste séparée par des virgules : "cli", "http", ou les deux à la fois. */
+    modes: (process.env.AGENT_INTERFACE || "cli")
+      .split(",")
+      .map((m) => m.trim())
+      .filter(Boolean),
+  },
+  api: {
+    port: int(process.env.API_PORT, 3000),
+    /** Si vide, l'API n'est pas protégée — à ne jamais exposer publiquement dans ce cas. */
+    token: process.env.API_TOKEN || "",
   },
   agent: {
     maxIterations: int(process.env.AGENT_MAX_ITERATIONS, 5),
