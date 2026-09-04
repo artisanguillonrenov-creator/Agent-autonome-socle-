@@ -1,0 +1,26 @@
+{
+  "name": "agent-autonome-socle",
+  "version": "0.1.0",
+  "description": "Socle générique pour agent IA autonome — boucle agent, mémoire multi-niveaux, réflexion, planification hiérarchique, bibliothèque de compétences, orchestration de rôles, budget de contexte, façade CLI, persistance locale.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "agent": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "test": "node --import tsx --test src/llm/embeddings.test.ts src/context/contextBudgetManager.test.ts src/core/agent.test.ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^20.14.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.4"
+  }
+}
