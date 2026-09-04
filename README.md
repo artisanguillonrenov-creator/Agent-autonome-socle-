@@ -45,6 +45,11 @@ un vrai fournisseur.
 Pour utiliser Claude : `LLM_PROVIDER=anthropic`, `ANTHROPIC_API_KEY=...`,
 `LLM_MODEL=claude-sonnet-5` (voir `.env.example` pour toutes les options).
 
+> Derrière un proxy HTTP(S) (ex: `HTTPS_PROXY` défini, environnements sandboxés) :
+> `npm run dev`/`npm start` activent déjà `NODE_USE_ENV_PROXY=1`, requis par le
+> `fetch` natif de Node pour respecter la variable de proxy (Node ≥ 22.21).
+> Sans proxy configuré, ce réglage n'a aucun effet.
+
 ## Commandes CLI
 
 ```

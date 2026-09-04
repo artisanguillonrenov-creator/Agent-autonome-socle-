@@ -9,8 +9,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "dev": "tsx src/index.ts",
-    "start": "node dist/index.js",
+    "dev": "NODE_USE_ENV_PROXY=1 tsx src/index.ts",
+    "start": "NODE_USE_ENV_PROXY=1 node dist/index.js",
     "test": "node --import tsx --test src/llm/embeddings.test.ts src/context/contextBudgetManager.test.ts src/core/agent.test.ts src/tasks/taskStore.test.ts src/skills/builtin/executeCode.test.ts"
   },
   "dependencies": {
