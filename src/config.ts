@@ -42,7 +42,8 @@ export const config = {
       .filter(Boolean),
   },
   api: {
-    port: int(process.env.API_PORT, 3000),
+    // La plupart des hébergeurs (Render, Railway...) imposent leur port via PORT.
+    port: int(process.env.PORT || process.env.API_PORT, 3000),
     /** Si vide, l'API n'est pas protégée — à ne jamais exposer publiquement dans ce cas. */
     token: process.env.API_TOKEN || "",
   },

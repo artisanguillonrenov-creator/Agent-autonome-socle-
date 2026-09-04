@@ -4,6 +4,9 @@
   "description": "Socle générique pour agent IA autonome — boucle agent, mémoire multi-niveaux, réflexion, planification hiérarchique, bibliothèque de compétences, orchestration de rôles, budget de contexte, façade CLI, persistance locale.",
   "type": "module",
   "main": "dist/index.js",
+  "engines": {
+    "node": ">=20"
+  },
   "bin": {
     "agent": "dist/index.js"
   },

@@ -76,6 +76,24 @@ Pour utiliser Claude : `LLM_PROVIDER=anthropic`, `ANTHROPIC_API_KEY=...`,
   `RoleOrchestrator` avec une liste de `Role` (nom + prompt système) —
   pertinent seulement passé un certain niveau de complexité.
 
+## Déployer un accès public (ex: Render, gratuit)
+
+Le serveur HTTP (`AGENT_INTERFACE=http`) sert aussi une page de chat à la racine (`/`) —
+utile pour discuter avec l'agent depuis un navigateur sans passer par la CLI.
+
+1. Compte gratuit sur [render.com](https://render.com), connecté à GitHub
+2. **New > Web Service**, sélectionner ce dépôt
+3. Build command : `npm install && npm run build`
+4. Start command : `npm start`
+5. Variables d'environnement (Environment) : au minimum `LLM_PROVIDER`, la clé du
+   fournisseur choisi, `LLM_MODEL`, et `AGENT_INTERFACE=http`
+6. Déployer — l'URL publique (`https://....onrender.com`) sert la page de chat
+
+Limites du tier gratuit à connaître : le service peut se mettre en veille après
+inactivité (premier message plus lent le temps du réveil), et le disque n'est pas
+garanti persistant d'un déploiement à l'autre — la mémoire/les tâches peuvent donc
+repartir de zéro après une mise à jour du code.
+
 ## Tests
 
 ```bash
