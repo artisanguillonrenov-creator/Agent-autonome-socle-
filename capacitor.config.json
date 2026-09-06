@@ -1,0 +1,9 @@
+{
+  "appId": "com.jarvis.commandcenter",
+  "appName": "Jarvis Command Center",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https",
+    "cleartext": true
+  }
+}
