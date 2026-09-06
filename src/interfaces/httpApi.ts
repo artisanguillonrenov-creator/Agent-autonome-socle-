@@ -66,6 +66,22 @@ export function startHttpApi(agent: Agent, port: number): void {
         return;
       }
 
+      if (req.method === "GET" && req.url === "/operations") {
+        sendJson(res, 200, agent.serviceOrchestrator.store.listOperations());
+        return;
+      }
+
+      if (req.method === "GET" && req.url?.startsWith("/operations/")) {
+        const taskId = req.url.split("/")[2];
+        const op = agent.serviceOrchestrator.store.getOperation(taskId);
+        if (op) {
+          sendJson(res, 200, op);
+        } else {
+          sendJson(res, 404, { error: "opération non trouvée" });
+        }
+        return;
+      }
+
       if (req.method === "GET" && req.url === "/checkpoints") {
         sendJson(res, 200, agent.listCheckpoints());
         return;

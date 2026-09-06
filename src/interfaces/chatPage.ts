@@ -119,7 +119,14 @@ export function getChatPageHtml(): string {
 </style>
 </head>
 <body>
-<header>🤖 Jarvis</header>
+<header style="display:flex; justify-content:space-between; align-items:center;">
+  <span>🤖 Jarvis Command Center V1</span>
+  <button id="toggle-ops" style="font-size:0.8rem; padding:4px 8px; background:transparent; color:var(--accent); border:1px solid var(--accent);">Opérations</button>
+</header>
+<div id="operations-panel" style="display:none; padding:12px; background:var(--card); border-bottom:1px solid rgba(128,128,128,0.2); max-height:200px; overflow-y:auto; font-size:0.85rem;">
+  <strong>Opérations externes en cours / passées :</strong>
+  <div id="operations-list" style="margin-top:8px;">Aucune opération.</div>
+</div>
 <div id="messages"></div>
 <div id="error" hidden></div>
 <form id="form">
@@ -184,6 +191,39 @@ export function getChatPageHtml(): string {
       errorEl.textContent = 'Erreur réseau : ' + err.message;
     } finally {
       sendEl.disabled = false;
+    }
+  }
+
+  document.getElementById('toggle-ops').addEventListener('click', async () => {
+    const panel = document.getElementById('operations-panel');
+    const isHidden = panel.style.display === 'none';
+    panel.style.display = isHidden ? 'block' : 'none';
+    if (isHidden) {
+      await loadOperations();
+    }
+  });
+
+  async function loadOperations() {
+    try {
+      const headers = {};
+      const token = getToken();
+      if (token) headers['authorization'] = 'Bearer ' + token;
+      const res = await fetch('/operations', { headers });
+      const ops = await res.json();
+      const listEl = document.getElementById('operations-list');
+      if (!Array.isArray(ops) || ops.length === 0) {
+        listEl.textContent = 'Aucune opération.';
+        return;
+      }
+      listEl.innerHTML = ops.map(op =>
+        '<div style="padding:6px; margin-bottom:4px; border-radius:4px; background:var(--bg);">' +
+          '<strong>[' + op.status + ']</strong> ' + op.capability + ' - ' + op.objective + ' (Service: ' + op.selectedService + ')' +
+          (op.result ? '<div style="color:var(--muted); font-size:0.8rem;">Résultat: ' + op.result + '</div>' : '') +
+          (op.error ? '<div style="color:#c0392b; font-size:0.8rem;">Erreur: ' + op.error + '</div>' : '') +
+        '</div>'
+      ).join('');
+    } catch (err) {
+      document.getElementById('operations-list').textContent = 'Erreur lors du chargement des opérations.';
     }
   }
 
