@@ -3,9 +3,6 @@ import assert from "node:assert/strict";
 import type { ChatMessage } from "../types.js";
 import type { CompletionOptions, LLMProvider } from "../llm/provider.js";
 
-// Base de données en mémoire, isolée par exécution : les modules qui lisent
-// process.env (config, db) doivent être importés dynamiquement APRÈS ces
-// affectations, sinon leurs valeurs par défaut sont déjà figées (imports ESM hissés).
 process.env.AGENT_DB_PATH = ":memory:";
 process.env.LLM_PROVIDER = "mock";
 process.env.EMBEDDING_PROVIDER = "local";
@@ -38,6 +35,141 @@ test("l'agent exécute une compétence puis répond au tour suivant", async () =
   const result = await agent.step("Quelle heure est-il ?");
   assert.equal(result.response, "Voici l'heure demandée.");
   assert.equal(result.iterations, 2);
+});
+
+test("l'agent intercepte CALL_SKILL web_search, exécute la recherche et synthétise la réponse", async () => {
+  let calls = 0;
+  let receivedToolMessage = false;
+
+  const scriptedSearchProvider: LLMProvider = {
+    name: "scripted_search",
+    async complete(messages: ChatMessage[], _options?: CompletionOptions) {
+      calls += 1;
+      if (calls === 1) {
+        return JSON.stringify({
+          action: "CALL_SKILL",
+          skill: "web_search",
+          input: { query: "actualités france" },
+        });
+      }
+      // Second call: check if tool output was passed back
+      const toolMsg = messages.find((m) => m.role === "tool" && m.name === "web_search");
+      if (toolMsg) receivedToolMessage = true;
+
+      return JSON.stringify({
+        action: "RESPOND",
+        response: "Voici les dernières actualités en France suite à la recherche web.",
+      });
+    },
+  };
+
+  const agent = new Agent({ llm: scriptedSearchProvider, embeddings: new LocalHashingEmbeddingProvider() });
+  for (const skill of builtinSkills) agent.skills.register(skill);
+
+  const result = await agent.step("Quelles sont les actualités en France ce mois-ci ?");
+  assert.equal(result.iterations, 2);
+  assert.equal(receivedToolMessage, true);
+  assert.equal(result.response, "Voici les dernières actualités en France suite à la recherche web.");
+  // Verify no raw tool_call tags or JSON syntax in response
+  assert.equal(result.response.includes("CALL_SKILL"), false);
+});
+
+test("Test obligatoire : Interception format Nemotron / OpenRouter <tool_call> pour recherche de films au cinéma", async () => {
+  let calls = 0;
+  let receivedSearchData = false;
+
+  const nemotronProvider: LLMProvider = {
+    name: "openrouter_nemotron",
+    async complete(messages: ChatMessage[]) {
+      calls += 1;
+      if (calls === 1) {
+        // Nemotron / OpenRouter style tool call output
+        return '<tool_call>{"name": "web_search", "arguments": {"query": "films au cinema en france ce mois-ci"}}</tool_call>';
+      }
+
+      // Second pass: verify web_search results were received in messages
+      const toolMsg = messages.find((m) => m.role === "tool" && m.name === "web_search");
+      if (toolMsg && toolMsg.content) {
+        receivedSearchData = true;
+      }
+
+      return '{"action": "RESPOND", "response": "Voici les principaux films à l\'affiche au cinéma en France ce mois-ci : Film A, Film B, Film C."}';
+    },
+  };
+
+  const agent = new Agent({ llm: nemotronProvider, embeddings: new LocalHashingEmbeddingProvider() });
+  for (const skill of builtinSkills) agent.skills.register(skill);
+
+  const query = "Trouve-moi les films qui sortent au cinéma en France ce mois-ci.";
+  const result = await agent.step(query);
+
+  assert.equal(calls, 2);
+  assert.equal(receivedSearchData, true);
+  assert.equal(result.iterations, 2);
+  assert.equal(result.response.includes("<tool_call>"), false);
+  assert.equal(result.response.includes("CALL_SKILL"), false);
+  assert.match(result.response, /cinéma/i);
+});
+
+test("Test Format Réel XML : <tool_call>CALL_SKILL <arg_key>...</arg_key><arg_value>...</arg_value></tool_call>", async () => {
+  let calls = 0;
+  let receivedSearchData = false;
+
+  const xmlToolCallProvider: LLMProvider = {
+    name: "xml_tool_call",
+    async complete(messages: ChatMessage[]) {
+      calls += 1;
+      if (calls === 1) {
+        return `<tool_call>CALL_SKILL
+<arg_key>skill</arg_key>
+<arg_value>web_search</arg_value>
+<arg_key>input</arg_key>
+<arg_value>{"query":"films au cinéma en france ce mois-ci"}</arg_value>
+</tool_call>`;
+      }
+
+      const toolMsg = messages.find((m) => m.role === "tool" && m.name === "web_search");
+      if (toolMsg && toolMsg.content) {
+        receivedSearchData = true;
+      }
+
+      return '{"action": "RESPOND", "response": "Voici les films à l\'affiche ce mois-ci."}';
+    },
+  };
+
+  const agent = new Agent({ llm: xmlToolCallProvider, embeddings: new LocalHashingEmbeddingProvider() });
+  for (const skill of builtinSkills) agent.skills.register(skill);
+
+  const result = await agent.step("Trouve-moi les films qui sortent au cinéma en France ce mois-ci.");
+
+  assert.equal(calls, 2);
+  assert.equal(receivedSearchData, true);
+  assert.equal(result.iterations, 2);
+  assert.equal(result.response, "Voici les films à l'affiche ce mois-ci.");
+  assert.equal(result.response.includes("<arg_key>"), false);
+  assert.equal(result.response.includes("<arg_value>"), false);
+  assert.equal(result.response.includes("CALL_SKILL"), false);
+});
+
+test("le prompt système contient la date actuelle et les instructions d'accès Internet", async () => {
+  let capturedSystemPrompt = "";
+
+  const promptCheckProvider: LLMProvider = {
+    name: "prompt_check",
+    async complete(messages: ChatMessage[]) {
+      const sysMsg = messages.find((m) => m.role === "system");
+      if (sysMsg) capturedSystemPrompt = sysMsg.content;
+      return "OK";
+    },
+  };
+
+  const agent = new Agent({ llm: promptCheckProvider, embeddings: new LocalHashingEmbeddingProvider() });
+  await agent.step("Test date et internet");
+
+  const isoYear = new Date().getFullYear().toString();
+  assert.match(capturedSystemPrompt, new RegExp(isoYear));
+  assert.match(capturedSystemPrompt, /ACCÈS INTERNET/i);
+  assert.match(capturedSystemPrompt, /web_search/i);
 });
 
 test("un checkpoint restaure la mémoire de travail et le plan", async () => {

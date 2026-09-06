@@ -22,11 +22,7 @@ export interface AgentOptions {
 }
 
 /**
- * Brique 1 : la boucle agent centrale. Un cycle perception → mémoire →
- * décision → action qui se répète jusqu'à une réponse finale (ou jusqu'à
- * épuisement des itérations autorisées, garde-fou contre les boucles infinies).
- * Toutes les autres briques viennent se greffer ici sans que la boucle
- * elle-même ne connaisse leur détail d'implémentation.
+ * Brique 1 : la boucle agent centrale.
  */
 export class Agent {
   readonly memory: MemoryManager;
@@ -87,6 +83,7 @@ export class Agent {
 
       if (decision) {
         if (decision.action === "RESPOND") {
+          console.log(`[Agent] Décision RESPOND reçue au tour ${iterations}.`);
           finalResponse = decision.response;
           await this.memory.recordTurn({ role: "assistant", content: finalResponse });
           break;
@@ -94,15 +91,21 @@ export class Agent {
 
         if (decision.action === "CALL_SKILL") {
           lastActionOrStep = `Appel compétence: ${decision.skill}`;
+          console.log(`[Agent] Décision CALL_SKILL interceptée -> Skill: '${decision.skill}', Input:`, decision.input);
+
           const result = await this.skills.execute(decision.skill, decision.input, {
             rememberFact: (entity, attribute, value) => this.memory.facts.set(entity, attribute, value),
           });
+
+          console.log(`[Agent] Skill '${decision.skill}' exécuté. Résultat (${result.length} chars). Réinjection dans la mémoire.`);
           await this.memory.recordTurn({ role: "tool", name: decision.skill, content: result });
           continue;
         }
 
         if (decision.action === "DISPATCH_CAPABILITY") {
           lastActionOrStep = `Délégation de capacité externe: ${decision.capability} (${decision.objective})`;
+          console.log(`[Agent] Décision DISPATCH_CAPABILITY -> Capacité: '${decision.capability}'`);
+
           const orchResult = await this.serviceOrchestrator.dispatchCapability(decision);
 
           let outcomeMsg = "";
@@ -125,6 +128,8 @@ export class Agent {
       const skillCall = parseSkillCall(raw);
       if (skillCall) {
         lastActionOrStep = `Appel compétence balisée: ${skillCall.name}`;
+        console.log(`[Agent] Décision balisée <<SKILL>> interceptée -> Skill: '${skillCall.name}'`);
+
         const result = await this.skills.execute(skillCall.name, skillCall.input, {
           rememberFact: (entity, attribute, value) => this.memory.facts.set(entity, attribute, value),
         });
@@ -133,8 +138,8 @@ export class Agent {
       }
 
       // 3. Sinon réponse texte normale
-      finalResponse = raw;
-      await this.memory.recordTurn({ role: "assistant", content: raw });
+      finalResponse = this.cleanRawTextResponse(raw);
+      await this.memory.recordTurn({ role: "assistant", content: finalResponse });
       break;
     }
 
@@ -151,18 +156,49 @@ export class Agent {
     };
   }
 
+  private cleanRawTextResponse(raw: string): string {
+    let clean = raw.trim();
+    // Strip raw tool call tags, JSON action blobs, or function call markup if model leaked them
+    clean = clean.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "").trim();
+    clean = clean.replace(/<function_call>[\s\S]*?<\/function_call>/gi, "").trim();
+    clean = clean.replace(/<<SKILL[\s\S]*?<\/SKILL>>/gi, "").trim();
+    clean = clean.replace(/CALL_SKILL\s*:\s*[a-z_]+[\s\S]*/gi, "").trim();
+
+    if (clean.startsWith("```json") && clean.endsWith("```")) {
+      try {
+        const parsed = JSON.parse(clean.replace(/^```json\n?/, "").replace(/\n?```$/, "").trim());
+        if (parsed?.response) return parsed.response;
+      } catch {}
+    }
+
+    return clean || "Je suis à votre disposition.";
+  }
+
   private buildInstructions(relevantSkills: SkillDefinition[]): string {
+    const now = new Date();
+    const dateStr = now.toLocaleDateString("fr-FR", {
+      weekday: "long",
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    });
+    const isoDate = now.toISOString().split("T")[0];
+
     const skillsText = relevantSkills.length
       ? relevantSkills.map((s) => `- ${s.name}: ${s.description} (args: ${s.argsHint})`).join("\n")
       : "(aucune compétence jugée pertinente pour cette requête)";
 
     return [
+      `Date et heure actuelles : ${dateStr} (${isoDate}).`,
+      "ACCÈS INTERNET : Jarvis possède un accès Internet fonctionnel grâce à la compétence 'web_search'.",
+      "RÈGLE IMPÉRATIVE : Lorsque la demande de l'utilisateur nécessite des informations récentes, actuelles ou externes (ex: météo, actualités, films au cinéma 'ce mois-ci' ou 'cette année'), tu DOIS obligatoirement appeler 'web_search'. Ne dis JAMAIS que tu n'as pas accès à Internet.",
+      "",
       "Tu es Jarvis Command Center V1. Tu peux décider entre 3 types d'actions :",
       "",
       '1. RESPOND : Répondre directement à l\'utilisateur en JSON :',
-      '{"action": "RESPOND", "response": "ton texte de réponse"}',
+      '{"action": "RESPOND", "response": "ton texte de réponse rédigé en français"}',
       "",
-      '2. CALL_SKILL : Exécuter une compétence interne :',
+      '2. CALL_SKILL : Exécuter une compétence interne (ex: web_search) :',
       '{"action": "CALL_SKILL", "skill": "nom_skill", "input": {...}}',
       "",
       '3. DISPATCH_CAPABILITY : Demander une capacité exécutée par un service externe (ex: développement de logiciel) :',

@@ -8,9 +8,7 @@ interface OpenRouterOptions {
 
 /**
  * OpenRouter expose une API compatible OpenAI mais route vers des dizaines de
- * modèles (Claude, GPT, Llama, Mistral...) avec une seule clé. Les noms de
- * modèle sont préfixés par le fournisseur, ex: "anthropic/claude-sonnet-5",
- * "openai/gpt-4o" — voir https://openrouter.ai/models.
+ * modèles (Claude, GPT, Llama, Mistral...) avec une seule clé.
  */
 export class OpenRouterProvider implements LLMProvider {
   readonly name = "openrouter";
@@ -43,7 +41,26 @@ export class OpenRouterProvider implements LLMProvider {
     if (!res.ok) {
       throw new Error(`OpenRouter API ${res.status}: ${await res.text()}`);
     }
-    const data = (await res.json()) as { choices: Array<{ message: { content: string } }> };
-    return data.choices[0]?.message.content ?? "";
+
+    const data = (await res.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+      error?: { message?: string; code?: number } | string;
+    };
+
+    if (data.error) {
+      const errMsg = typeof data.error === "object" ? data.error.message || JSON.stringify(data.error) : String(data.error);
+      throw new Error(`OpenRouter API error: ${errMsg}`);
+    }
+
+    if (!Array.isArray(data.choices) || data.choices.length === 0) {
+      throw new Error("OpenRouter API a renvoyé une réponse sans choix ('choices' manquant ou vide).");
+    }
+
+    const content = data.choices[0]?.message?.content;
+    if (typeof content !== "string") {
+      throw new Error("OpenRouter API a renvoyé un contenu de message invalide.");
+    }
+
+    return content;
   }
 }
