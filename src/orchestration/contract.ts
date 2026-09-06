@@ -142,7 +142,44 @@ function validateAndMapDecision(parsed: any): CoreDecision | null {
 export function parseCoreDecision(rawText: string): CoreDecision | null {
   const trimmed = rawText.trim();
 
-  // 1. Direct JSON or markdown block
+  // 1. XML <arg_key> / <arg_value> format parser:
+  // <tool_call>CALL_SKILL
+  // <arg_key>skill</arg_key>
+  // <arg_value>web_search</arg_value>
+  // <arg_key>input</arg_key>
+  // <arg_value>{"query":"..."}</arg_value>
+  // </tool_call>
+  if (trimmed.includes("<arg_key>") && trimmed.includes("<arg_value>")) {
+    const keyValRegex = /<arg_key>([\s\S]*?)<\/arg_key>\s*<arg_value>([\s\S]*?)<\/arg_value>/gi;
+    let match: RegExpExecArray | null;
+    let skillName = "";
+    let inputObj: Record<string, unknown> = {};
+
+    while ((match = keyValRegex.exec(trimmed)) !== null) {
+      const key = match[1].trim().toLowerCase();
+      const val = match[2].trim();
+
+      if (key === "skill" || key === "name" || key === "tool") {
+        skillName = val;
+      } else if (key === "input" || key === "arguments") {
+        try {
+          inputObj = JSON.parse(val);
+        } catch {
+          inputObj = { query: val };
+        }
+      } else if (key === "query") {
+        inputObj["query"] = val;
+      } else {
+        inputObj[key] = val;
+      }
+    }
+
+    if (skillName) {
+      return { action: "CALL_SKILL", skill: skillName, input: inputObj };
+    }
+  }
+
+  // 2. Direct JSON or markdown block
   let cleanJsonStr = trimmed;
   if (cleanJsonStr.includes("```")) {
     const match = cleanJsonStr.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
@@ -157,7 +194,7 @@ export function parseCoreDecision(rawText: string): CoreDecision | null {
     // Continue
   }
 
-  // 2. Extract <tool_call> ... </tool_call> (Nemotron / Llama / DeepSeek / OpenRouter)
+  // 3. Extract <tool_call> ... </tool_call> (Nemotron / Llama / DeepSeek / OpenRouter)
   const toolCallMatch = trimmed.match(/<tool_call>([\s\S]*?)<\/tool_call>/i) || trimmed.match(/<function_call>([\s\S]*?)<\/function_call>/i);
   if (toolCallMatch) {
     try {
@@ -169,7 +206,7 @@ export function parseCoreDecision(rawText: string): CoreDecision | null {
     }
   }
 
-  // 3. Extract embedded JSON object with "action", "name", "skill", or "tool"
+  // 4. Extract embedded JSON object with "action", "name", "skill", or "tool"
   const jsonMatch = trimmed.match(/\{[\s\S]*?"(?:action|name|skill|tool)"\s*:\s*"(?:RESPOND|CALL_SKILL|DISPATCH_CAPABILITY|web_search|get_current_time|remember_fact|manage_tasks|execute_code)"[\s\S]*?\}/i);
   if (jsonMatch) {
     try {
@@ -181,7 +218,7 @@ export function parseCoreDecision(rawText: string): CoreDecision | null {
     }
   }
 
-  // 4. CALL_SKILL textual format e.g. CALL_SKILL: web_search query="..."
+  // 5. CALL_SKILL textual format e.g. CALL_SKILL: web_search query="..."
   const callSkillTextMatch = trimmed.match(/CALL_SKILL\s*:\s*([a-z_]+)\s*(\([\s\S]*?\)|[\s\S]*)/i) || trimmed.match(/CALL_SKILL\s+([a-z_]+)([\s\S]*)/i);
   if (callSkillTextMatch) {
     const skillName = callSkillTextMatch[1].trim();

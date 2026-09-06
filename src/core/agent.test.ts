@@ -111,6 +111,46 @@ test("Test obligatoire : Interception format Nemotron / OpenRouter <tool_call> p
   assert.match(result.response, /cinéma/i);
 });
 
+test("Test Format Réel XML : <tool_call>CALL_SKILL <arg_key>...</arg_key><arg_value>...</arg_value></tool_call>", async () => {
+  let calls = 0;
+  let receivedSearchData = false;
+
+  const xmlToolCallProvider: LLMProvider = {
+    name: "xml_tool_call",
+    async complete(messages: ChatMessage[]) {
+      calls += 1;
+      if (calls === 1) {
+        return `<tool_call>CALL_SKILL
+<arg_key>skill</arg_key>
+<arg_value>web_search</arg_value>
+<arg_key>input</arg_key>
+<arg_value>{"query":"films au cinéma en france ce mois-ci"}</arg_value>
+</tool_call>`;
+      }
+
+      const toolMsg = messages.find((m) => m.role === "tool" && m.name === "web_search");
+      if (toolMsg && toolMsg.content) {
+        receivedSearchData = true;
+      }
+
+      return '{"action": "RESPOND", "response": "Voici les films à l\'affiche ce mois-ci."}';
+    },
+  };
+
+  const agent = new Agent({ llm: xmlToolCallProvider, embeddings: new LocalHashingEmbeddingProvider() });
+  for (const skill of builtinSkills) agent.skills.register(skill);
+
+  const result = await agent.step("Trouve-moi les films qui sortent au cinéma en France ce mois-ci.");
+
+  assert.equal(calls, 2);
+  assert.equal(receivedSearchData, true);
+  assert.equal(result.iterations, 2);
+  assert.equal(result.response, "Voici les films à l'affiche ce mois-ci.");
+  assert.equal(result.response.includes("<arg_key>"), false);
+  assert.equal(result.response.includes("<arg_value>"), false);
+  assert.equal(result.response.includes("CALL_SKILL"), false);
+});
+
 test("le prompt système contient la date actuelle et les instructions d'accès Internet", async () => {
   let capturedSystemPrompt = "";
 

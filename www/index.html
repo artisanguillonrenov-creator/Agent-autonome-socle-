@@ -117,6 +117,47 @@
     </div>
   </div>
 
-  <script src="app.js"></script>
+  <!-- EXECUTABLE OTA BOOTLOADER -->
+  <script>
+    (function() {
+      try {
+        var activeBundleStr = localStorage.getItem('jarvis_ota_active_bundle');
+        if (activeBundleStr) {
+          var bundle = JSON.parse(activeBundleStr);
+          if (bundle && bundle.files) {
+            // Inject dynamic style
+            if (bundle.files['style.css']) {
+              var styleEl = document.createElement('style');
+              styleEl.id = 'ota-injected-style';
+              styleEl.textContent = bundle.files['style.css'];
+              document.head.appendChild(styleEl);
+            }
+
+            // Inject dynamic script execution
+            if (bundle.files['app.js']) {
+              window.__JARVIS_OTA_BOOTSTRAPPED__ = true;
+              var scriptEl = document.createElement('script');
+              scriptEl.id = 'ota-injected-app';
+              scriptEl.textContent = bundle.files['app.js'];
+              document.body.appendChild(scriptEl);
+            }
+          }
+        }
+      } catch (err) {
+        console.error('[OTA Bootloader] Error loading OTA bundle. Rolling back to base app:', err);
+        localStorage.removeItem('jarvis_ota_active_bundle');
+        localStorage.removeItem('jarvis_ota_active_version');
+      }
+    })();
+  </script>
+
+  <!-- FALLBACK BASE APPLICATION LOADER -->
+  <script>
+    if (!window.__JARVIS_OTA_BOOTSTRAPPED__) {
+      var defaultScript = document.createElement('script');
+      defaultScript.src = 'app.js';
+      document.body.appendChild(defaultScript);
+    }
+  </script>
 </body>
 </html>
