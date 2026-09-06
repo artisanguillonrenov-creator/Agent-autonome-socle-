@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>JARVIS COMMAND CENTER</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- SIDEBAR OVERLAY FOR PORTRAIT MOBILE/TABLET -->
+    <div id="sidebar-overlay" class="sidebar-overlay"></div>
+
+    <!-- SIDEBAR NAVIGATION -->
+    <aside id="sidebar" class="sidebar">
+      <div class="sidebar-header">
+        <span class="sidebar-logo">🤖 JARVIS</span>
+      </div>
+      <nav class="sidebar-nav">
+        <a class="nav-item active" data-view="accueil">
+          <span class="nav-icon">🏠</span>
+          <span>Accueil</span>
+        </a>
+        <a class="nav-item" data-view="chat">
+          <span class="nav-icon">💬</span>
+          <span>Chat</span>
+        </a>
+        <a class="nav-item" data-view="operations">
+          <span class="nav-icon">⚡</span>
+          <span>Opérations</span>
+        </a>
+        <a class="nav-item" data-view="services">
+          <span class="nav-icon">🔌</span>
+          <span>Services</span>
+        </a>
+        <a class="nav-item" data-view="tasks">
+          <span class="nav-icon">📋</span>
+          <span>Tâches & Plans</span>
+        </a>
+        <a class="nav-item" data-view="memory">
+          <span class="nav-icon">🧠</span>
+          <span>Mémoire</span>
+        </a>
+        <a class="nav-item" data-view="skills">
+          <span class="nav-icon">🛠️</span>
+          <span>Skills</span>
+        </a>
+        <a class="nav-item" data-view="models">
+          <span class="nav-icon">🤖</span>
+          <span>Modèles IA</span>
+        </a>
+        <a class="nav-item" data-view="reflection">
+          <span class="nav-icon">🔍</span>
+          <span>Réflexion</span>
+        </a>
+        <a class="nav-item" data-view="system">
+          <span class="nav-icon">🖥️</span>
+          <span>Système</span>
+        </a>
+        <a class="nav-item" data-view="settings">
+          <span class="nav-icon">⚙️</span>
+          <span>Paramètres</span>
+        </a>
+      </nav>
+    </aside>
+
+    <!-- MAIN CONTENT AREA -->
+    <div class="main-wrapper">
+      <header class="top-header">
+        <div class="header-left">
+          <button id="btn-hamburger" class="btn-hamburger" aria-label="Menu">☰</button>
+          <h1 id="header-title" class="header-title">Accueil</h1>
+        </div>
+        <div id="status-badge" class="status-badge">
+          <span class="status-dot"></span>
+          <span id="status-text">En ligne</span>
+        </div>
+      </header>
+
+      <main class="content-area">
+        <!-- 1. ACCUEIL -->
+        <section id="view-accueil" class="view-section active"></section>
+
+        <!-- 2. CHAT -->
+        <section id="view-chat" class="view-section"></section>
+
+        <!-- 3. OPÉRATIONS -->
+        <section id="view-operations" class="view-section"></section>
+
+        <!-- 4. SERVICES -->
+        <section id="view-services" class="view-section"></section>
+
+        <!-- 5. TÂCHES & PLANS -->
+        <section id="view-tasks" class="view-section"></section>
+
+        <!-- 6. MÉMOIRE -->
+        <section id="view-memory" class="view-section"></section>
+
+        <!-- 7. SKILLS -->
+        <section id="view-skills" class="view-section"></section>
+
+        <!-- 8. MODÈLES IA -->
+        <section id="view-models" class="view-section"></section>
+
+        <!-- 9. RÉFLEXION -->
+        <section id="view-reflection" class="view-section"></section>
+
+        <!-- 10. SYSTÈME -->
+        <section id="view-system" class="view-section"></section>
+
+        <!-- 11. PARAMÈTRES -->
+        <section id="view-settings" class="view-section"></section>
+      </main>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
