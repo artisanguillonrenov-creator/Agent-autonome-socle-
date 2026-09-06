@@ -2,9 +2,11 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { existsSync, readFileSync } from "node:fs";
 import { join, extname } from "node:path";
 import type { Agent } from "../core/agent.js";
-import { config } from "../config.js";
+import { config, type LLMProviderName } from "../config.js";
 import { TaskStore } from "../tasks/taskStore.js";
 import { getChatPageHtml } from "./chatPage.js";
+import { createLLMProvider } from "../llm/providers/index.js";
+import { saveLLMConfig } from "../persistence/llmConfigStore.js";
 
 const taskStore = new TaskStore();
 let lastServerError: string | null = null;
@@ -61,10 +63,35 @@ function serveStaticFile(res: ServerResponse, filePath: string): boolean {
   return false;
 }
 
+const DEFAULT_PRESET_MODELS: Record<string, Array<{ id: string; name: string; isFree?: boolean }>> = {
+  anthropic: [
+    { id: "claude-sonnet-5", name: "Claude Sonnet 5" },
+    { id: "claude-3-7-sonnet-20250219", name: "Claude 3.7 Sonnet" },
+    { id: "claude-3-5-sonnet-20241022", name: "Claude 3.5 Sonnet" },
+    { id: "claude-3-5-haiku-20241022", name: "Claude 3.5 Haiku" },
+    { id: "claude-3-opus-20240229", name: "Claude 3 Opus" },
+  ],
+  openai: [
+    { id: "gpt-4o", name: "GPT-4o" },
+    { id: "gpt-4o-mini", name: "GPT-4o Mini" },
+    { id: "o1", name: "o1" },
+    { id: "o3-mini", name: "o3-Mini" },
+  ],
+  infermatic: [
+    { id: "llama-3.3-70b-instruct", name: "Llama 3.3 70B Instruct" },
+    { id: "mistral-large-2411", name: "Mistral Large 2411" },
+    { id: "qwen2.5-72b-instruct", name: "Qwen 2.5 72B Instruct" },
+  ],
+  ollama: [
+    { id: "llama3", name: "Llama 3" },
+    { id: "mistral", name: "Mistral" },
+    { id: "qwen2.5", name: "Qwen 2.5" },
+  ],
+  mock: [{ id: "mock-model", name: "Mock Model (Offline)" }],
+};
+
 /**
  * Façade HTTP du Jarvis Command Center.
- * Expose les endpoints REST pour l'application Web & Tablette Android,
- * et sert l'interface utilisateur statique.
  */
 export function startHttpApi(agent: Agent, port: number): ReturnType<typeof createServer> {
   const server = createServer(async (req, res) => {
@@ -90,7 +117,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
     }
 
     try {
-      // 1. Static Web Files Serving (Command Center Frontend)
+      // 1. Static Web Files Serving
       if (req.method === "GET") {
         if (pathname === "/") {
           const distIndexPath = join(process.cwd(), "www", "index.html");
@@ -98,7 +125,6 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
             serveStaticFile(res, distIndexPath);
             return;
           } else {
-            // Fallback HTML page
             res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
             res.end(getChatPageHtml());
             return;
@@ -111,7 +137,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         }
       }
 
-      // 2. Chat Endpoint (Legacy & Standard)
+      // 2. Chat Endpoint
       if (req.method === "POST" && (pathname === "/chat" || pathname === "/api/chat")) {
         const body = JSON.parse((await readBody(req)) || "{}") as { message?: string };
         const message = (body.message ?? "").trim();
@@ -332,13 +358,140 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         return;
       }
 
-      // 10. AI Models Info Endpoint (No secrets exposed!)
+      // 10. AI Models Control Panel Endpoints (No secrets exposed!)
       if (req.method === "GET" && pathname === "/api/models") {
+        const providers = [
+          { id: "openrouter", name: "OpenRouter", available: Boolean(config.llm.openrouterApiKey) },
+          { id: "infermatic", name: "Infermatic", available: Boolean(config.llm.infermaticApiKey) },
+          { id: "anthropic", name: "Anthropic", available: Boolean(config.llm.anthropicApiKey) },
+          { id: "openai", name: "OpenAI", available: Boolean(config.llm.openaiApiKey) },
+          { id: "ollama", name: "Ollama", available: Boolean(config.llm.ollamaBaseUrl) },
+          { id: "mock", name: "Mock (Offline)", available: true },
+        ];
+
         sendJson(res, 200, {
           activeProvider: config.llm.provider,
           activeModel: config.llm.model,
-          supportedProviders: ["anthropic", "openai", "openrouter", "ollama", "infermatic", "mock"],
+          providers,
         });
+        return;
+      }
+
+      if (req.method === "GET" && pathname === "/api/models/openrouter") {
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 5000);
+          const response = await fetch("https://openrouter.ai/api/v1/models", { signal: controller.signal });
+          clearTimeout(timeout);
+
+          if (response.ok) {
+            const data = (await response.json()) as {
+              data: Array<{ id: string; name?: string; pricing?: { prompt?: string; completion?: string } }>;
+            };
+            const models = (data.data || []).map((m) => {
+              const promptPrice = Number(m.pricing?.prompt || 0);
+              const compPrice = Number(m.pricing?.completion || 0);
+              const isFree = promptPrice === 0 && compPrice === 0 || m.id.endsWith(":free");
+              return {
+                id: m.id,
+                name: m.name || m.id,
+                isFree,
+              };
+            });
+            sendJson(res, 200, models);
+            return;
+          }
+        } catch {
+          // Fallback if network unavailable
+        }
+
+        // Fallback OpenRouter models
+        sendJson(res, 200, [
+          { id: "anthropic/claude-3.5-sonnet", name: "Claude 3.5 Sonnet", isFree: false },
+          { id: "meta-llama/llama-3.3-70b-instruct:free", name: "Llama 3.3 70B Instruct (Free)", isFree: true },
+          { id: "google/gemini-2.0-flash-001", name: "Gemini 2.0 Flash", isFree: false },
+          { id: "deepseek/deepseek-r1:free", name: "DeepSeek R1 (Free)", isFree: true },
+        ]);
+        return;
+      }
+
+      if (req.method === "GET" && pathname.startsWith("/api/models/catalog/")) {
+        const parts = pathname.split("/");
+        const prov = parts[parts.length - 1];
+        sendJson(res, 200, DEFAULT_PRESET_MODELS[prov] || []);
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/models/test") {
+        const body = JSON.parse((await readBody(req)) || "{}") as { provider?: LLMProviderName; model?: string };
+        if (!body.provider || !body.model) {
+          sendJson(res, 400, { error: "provider et model requis" });
+          return;
+        }
+
+        try {
+          const testProviderInstance = createLLMProvider({ provider: body.provider, model: body.model });
+          const response = await testProviderInstance.complete([{ role: "user", content: "Test ping" }]);
+          sendJson(res, 200, {
+            ok: true,
+            provider: body.provider,
+            model: body.model,
+            responsePreview: response.slice(0, 100),
+            message: "Modèle accessible et fonctionnel !",
+          });
+        } catch (err) {
+          sendJson(res, 200, {
+            ok: false,
+            provider: body.provider,
+            model: body.model,
+            error: (err as Error).message,
+          });
+        }
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/models/select") {
+        const body = JSON.parse((await readBody(req)) || "{}") as { provider?: LLMProviderName; model?: string };
+        if (!body.provider || !body.model) {
+          sendJson(res, 400, { error: "provider et model requis" });
+          return;
+        }
+
+        const currentProv = config.llm.provider;
+        const currentModel = config.llm.model;
+
+        try {
+          // 1. Create & test new provider
+          const newProviderInstance = createLLMProvider({ provider: body.provider, model: body.model });
+          await newProviderInstance.complete([{ role: "user", content: "Validation du modèle" }]);
+
+          // 2. If test passes, update Agent in-memory & persist
+          agent.setLLMProvider(newProviderInstance);
+          saveLLMConfig(body.provider, body.model);
+
+          config.llm.provider = body.provider;
+          config.llm.model = body.model;
+
+          sendJson(res, 200, {
+            ok: true,
+            activeProvider: body.provider,
+            activeModel: body.model,
+            message: `Modèle actif mis à jour : ${body.model}`,
+          });
+        } catch (err) {
+          // Fallback to previous functional model
+          const fallbackInstance = createLLMProvider({ provider: currentProv, model: currentModel });
+          agent.setLLMProvider(fallbackInstance);
+          config.llm.provider = currentProv;
+          config.llm.model = currentModel;
+
+          sendJson(res, 200, {
+            ok: false,
+            activeProvider: currentProv,
+            activeModel: currentModel,
+            error: `Le modèle sélectionné n'est pas disponible (${(err as Error).message}). ${currentModel} reste actif.`,
+          });
+        }
         return;
       }
 
@@ -357,7 +510,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         return;
       }
 
-      // 12. Checkpoints Endpoints (Legacy & Standard)
+      // 12. Checkpoints Endpoints
       if (req.method === "GET" && (pathname === "/checkpoints" || pathname === "/api/checkpoints")) {
         sendJson(res, 200, agent.listCheckpoints());
         return;

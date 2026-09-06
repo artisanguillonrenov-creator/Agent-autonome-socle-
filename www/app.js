@@ -18,6 +18,7 @@ const state = {
   reflection: null,
   system: null,
   settings: null,
+  rawCatalogModels: [],
 };
 
 // --- DOM ELEMENTS ---
@@ -717,48 +718,219 @@ async function renderSkillsView() {
   }
 }
 
-// 8. MODÈLES IA VIEW
+// 8. MODÈLES IA VIEW (INTERACTIVE CONTROL PANEL)
 async function renderModelsView() {
   const container = document.getElementById('view-models');
-  container.innerHTML = `<div class="card"><div class="card-title">Chargement de la configuration modèle...</div></div>`;
+  container.innerHTML = `<div class="card"><div class="card-title">Chargement des modèles...</div></div>`;
 
   try {
-    const models = await fetchApi('/api/models');
+    const modelsData = await fetchApi('/api/models');
+    state.models = modelsData;
 
     container.innerHTML = `
-      <h2>Configuration des Modèles IA</h2>
+      <h2>Panneau de Contrôle Modèles IA</h2>
 
       <div class="card-grid" style="margin-top: 12px;">
         <div class="card">
           <div class="card-title">Fournisseur IA Actif</div>
-          <div class="card-value" style="color: var(--accent-primary);">${models.activeProvider}</div>
+          <div id="active-provider-display" class="card-value" style="color: var(--accent-primary);">${modelsData.activeProvider}</div>
         </div>
         <div class="card">
           <div class="card-title">Modèle LLM Sélectionné</div>
-          <div class="card-value">${models.activeModel}</div>
+          <div id="active-model-display" class="card-value" style="font-size: 1.4rem;">${modelsData.activeModel}</div>
         </div>
       </div>
 
-      <div class="card" style="margin-top: 12px;">
-        <div class="card-title">Fournisseurs Supportés par le Socle</div>
-        <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px;">
-          ${models.supportedProviders.map((p) => `
-            <span class="badge ${p === models.activeProvider ? 'badge-success' : 'badge-info'}" style="padding: 8px 12px; font-size: 0.9rem;">
-              ${p} ${p === models.activeProvider ? ' (ACTIF)' : ''}
-            </span>
-          `).join('')}
+      <div class="card" style="margin-top: 16px;">
+        <div class="card-title">Sélection du Fournisseur & du Modèle</div>
+
+        <div class="form-group" style="margin-top: 12px;">
+          <label class="form-label">Fournisseur IA</label>
+          <div style="display: flex; align-items: center; gap: 12px;">
+            <select id="select-provider" class="input-field" style="flex: 1;">
+              ${modelsData.providers.map((p) => `
+                <option value="${p.id}" ${p.id === modelsData.activeProvider ? 'selected' : ''}>
+                  ${p.name} ${p.available ? '🟢 (Configuré)' : '🔴 (Non configuré)'}
+                </option>
+              `).join('')}
+            </select>
+            <span id="provider-status-badge" class="badge badge-success">Configuré</span>
+          </div>
         </div>
+
+        <div class="form-group" style="margin-top: 12px;">
+          <label class="form-label">Modèle à utiliser</label>
+          <select id="select-model" class="input-field"></select>
+        </div>
+
+        <div id="openrouter-filter-container" style="display: none; margin-top: 8px;">
+          <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; color: var(--text-muted); font-size: 0.9rem;">
+            <input type="checkbox" id="filter-free-models" />
+            <span>Modèles gratuits uniquement</span>
+          </label>
+        </div>
+
+        <div style="display: flex; gap: 12px; margin-top: 16px;">
+          <button id="btn-test-model" class="btn btn-secondary">🧪 Tester</button>
+          <button id="btn-apply-model" class="btn btn-primary">✅ Appliquer</button>
+        </div>
+
+        <div id="model-status-box" style="margin-top: 12px;"></div>
       </div>
 
-      <div class="card" style="margin-top: 12px; border-color: var(--border-color);">
-        <div class="card-title">Sécurité & Clés API</div>
+      <div class="card" style="margin-top: 16px; border-color: var(--border-color);">
+        <div class="card-title">Sécurité des Identifiants</div>
         <div class="card-subtext" style="line-height: 1.5;">
-          Les clés d'API (OpenAI, Anthropic, OpenRouter, Infermatic...) sont configurées en toute sécurité au niveau des variables d'environnement du backend serveur. Aucune clé API n'est exposée à l'application frontend ou stockée dans l'APK.
+          Les clés API restent exclusivement stockées côté backend (variables d'environnement Render ou serveur). Aucun secret n'est transmis au navigateur ou à l'application Android.
         </div>
       </div>
     `;
+
+    const selectProv = document.getElementById('select-provider');
+    const selectMod = document.getElementById('select-model');
+    const freeCheckbox = document.getElementById('filter-free-models');
+    const freeContainer = document.getElementById('openrouter-filter-container');
+
+    const updateProviderBadge = () => {
+      const selected = selectProv.value;
+      const provInfo = modelsData.providers.find((p) => p.id === selected);
+      const badge = document.getElementById('provider-status-badge');
+      if (provInfo && provInfo.available) {
+        badge.className = 'badge badge-success';
+        badge.textContent = '🟢 Configuré';
+      } else {
+        badge.className = 'badge badge-danger';
+        badge.textContent = '🔴 Non configuré';
+      }
+      freeContainer.style.display = selected === 'openrouter' ? 'block' : 'none';
+    };
+
+    selectProv.addEventListener('change', async () => {
+      updateProviderBadge();
+      await loadModelsForSelectedProvider();
+    });
+
+    freeCheckbox.addEventListener('change', () => {
+      renderModelDropdownOptions();
+    });
+
+    updateProviderBadge();
+    await loadModelsForSelectedProvider();
+
+    document.getElementById('btn-test-model').addEventListener('click', testSelectedModel);
+    document.getElementById('btn-apply-model').addEventListener('click', applySelectedModel);
   } catch (err) {
     container.innerHTML = `<div class="card" style="border-color: var(--accent-danger);"><div class="card-title" style="color: var(--accent-danger);">${err.message}</div></div>`;
+  }
+}
+
+async function loadModelsForSelectedProvider() {
+  const selectProv = document.getElementById('select-provider');
+  const provider = selectProv.value;
+  const statusBox = document.getElementById('model-status-box');
+  statusBox.textContent = '';
+
+  if (provider === 'openrouter') {
+    statusBox.innerHTML = '<span style="color: var(--text-muted); font-size: 0.85rem;">Chargement du catalogue OpenRouter...</span>';
+    try {
+      state.rawCatalogModels = await fetchApi('/api/models/openrouter');
+      statusBox.textContent = '';
+    } catch {
+      state.rawCatalogModels = [
+        { id: 'anthropic/claude-3.5-sonnet', name: 'Claude 3.5 Sonnet', isFree: false },
+        { id: 'meta-llama/llama-3.3-70b-instruct:free', name: 'Llama 3.3 70B Instruct (Free)', isFree: true },
+      ];
+      statusBox.textContent = '';
+    }
+  } else {
+    try {
+      state.rawCatalogModels = await fetchApi(`/api/models/catalog/${provider}`);
+    } catch {
+      state.rawCatalogModels = [{ id: 'default', name: 'Default Model' }];
+    }
+  }
+
+  renderModelDropdownOptions();
+}
+
+function renderModelDropdownOptions() {
+  const selectProv = document.getElementById('select-provider');
+  const selectMod = document.getElementById('select-model');
+  const freeCheckbox = document.getElementById('filter-free-models');
+  const isFreeOnly = freeCheckbox && freeCheckbox.checked;
+
+  let list = state.rawCatalogModels || [];
+  if (selectProv.value === 'openrouter' && isFreeOnly) {
+    list = list.filter((m) => m.isFree);
+  }
+
+  if (list.length === 0) {
+    selectMod.innerHTML = '<option value="">Aucun modèle disponible</option>';
+    return;
+  }
+
+  selectMod.innerHTML = list.map((m) => `
+    <option value="${m.id}" ${m.id === state.models?.activeModel ? 'selected' : ''}>
+      ${m.name} ${m.isFree ? '🎁 (Gratuit)' : ''} (${m.id})
+    </option>
+  `).join('');
+}
+
+async function testSelectedModel() {
+  const selectProv = document.getElementById('select-provider');
+  const selectMod = document.getElementById('select-model');
+  const statusBox = document.getElementById('model-status-box');
+
+  const provider = selectProv.value;
+  const model = selectMod.value;
+
+  if (!model) return;
+
+  statusBox.innerHTML = '<span style="color: var(--accent-warning);">🧪 Test du modèle en cours...</span>';
+
+  try {
+    const res = await fetchApi('/api/models/test', {
+      method: 'POST',
+      body: JSON.stringify({ provider, model }),
+    });
+
+    if (res.ok) {
+      statusBox.innerHTML = `<div style="padding: 10px; background: rgba(16,185,129,0.15); border: 1px solid var(--accent-success); border-radius: 8px; color: var(--accent-success);">✅ ${res.message}</div>`;
+    } else {
+      statusBox.innerHTML = `<div style="padding: 10px; background: rgba(239,68,68,0.15); border: 1px solid var(--accent-danger); border-radius: 8px; color: var(--accent-danger);">❌ Modèle inaccessible : ${res.error}</div>`;
+    }
+  } catch (err) {
+    statusBox.innerHTML = `<div style="padding: 10px; background: rgba(239,68,68,0.15); border: 1px solid var(--accent-danger); border-radius: 8px; color: var(--accent-danger);">❌ Erreur de test : ${err.message}</div>`;
+  }
+}
+
+async function applySelectedModel() {
+  const selectProv = document.getElementById('select-provider');
+  const selectMod = document.getElementById('select-model');
+  const statusBox = document.getElementById('model-status-box');
+
+  const provider = selectProv.value;
+  const model = selectMod.value;
+
+  if (!model) return;
+
+  statusBox.innerHTML = '<span style="color: var(--accent-primary);">⏳ Validation et bascule du modèle en cours...</span>';
+
+  try {
+    const res = await fetchApi('/api/models/select', {
+      method: 'POST',
+      body: JSON.stringify({ provider, model }),
+    });
+
+    if (res.ok) {
+      document.getElementById('active-provider-display').textContent = res.activeProvider;
+      document.getElementById('active-model-display').textContent = res.activeModel;
+      statusBox.innerHTML = `<div style="padding: 10px; background: rgba(16,185,129,0.15); border: 1px solid var(--accent-success); border-radius: 8px; color: var(--accent-success);">✅ ${res.message}</div>`;
+    } else {
+      statusBox.innerHTML = `<div style="padding: 10px; background: rgba(239,68,68,0.15); border: 1px solid var(--accent-danger); border-radius: 8px; color: var(--accent-danger);">⚠️ ${res.error}</div>`;
+    }
+  } catch (err) {
+    statusBox.innerHTML = `<div style="padding: 10px; background: rgba(239,68,68,0.15); border: 1px solid var(--accent-danger); border-radius: 8px; color: var(--accent-danger);">❌ Erreur : ${err.message}</div>`;
   }
 }
 
