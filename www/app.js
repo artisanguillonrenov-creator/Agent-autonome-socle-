@@ -967,11 +967,33 @@ function saveConnectionSettings() {
 }
 
 // --- INITIALIZATION ---
-document.addEventListener('DOMContentLoaded', () => {
+let jarvisInitialized = false;
+
+function bootstrapJarvis() {
+  if (jarvisInitialized) return;
+  jarvisInitialized = true;
+
   initNavigation();
   switchView('accueil');
 
-  if (state.ota.autoCheck) {
+  if (state.ota && state.ota.autoCheck) {
     setTimeout(() => checkOtaUpdates(false), 2000);
   }
-});
+}
+
+if (typeof window !== 'undefined') {
+  window.bootstrapJarvis = bootstrapJarvis;
+  window.jarvisInitialized = () => jarvisInitialized;
+}
+
+if (typeof document !== 'undefined') {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bootstrapJarvis, { once: true });
+  } else {
+    bootstrapJarvis();
+  }
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { bootstrapJarvis, state, switchView };
+}

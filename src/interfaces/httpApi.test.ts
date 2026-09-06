@@ -6,6 +6,65 @@ import { LocalHashingEmbeddingProvider } from "../llm/embeddings.js";
 import { startHttpApi } from "./httpApi.js";
 import { loadLLMConfig } from "../persistence/llmConfigStore.js";
 
+import fs from "node:fs";
+import vm from "node:vm";
+
+test("Android / Capacitor post-DOMContentLoaded bootstrap timing test", async () => {
+  let addEventListenerCalledCount = 0;
+  let activeViewSwitched = false;
+
+  const dummyElement = {
+    addEventListener: () => {
+      addEventListenerCalledCount++;
+    },
+    classList: { add: () => {}, remove: () => {}, toggle: () => {} },
+    getAttribute: () => "accueil",
+    querySelector: () => ({ textContent: "Accueil" }),
+    innerHTML: "",
+    style: {},
+  };
+
+  const fakeDocument = {
+    readyState: "interactive", // Simulating document already loaded before app.js script injection
+    getElementById: () => dummyElement,
+    querySelectorAll: () => [dummyElement],
+    addEventListener: (event: string, cb: () => void) => {
+      if (event === "DOMContentLoaded") {
+        cb();
+      }
+    },
+  };
+
+  const contextObj = {
+    document: fakeDocument,
+    localStorage: {
+      getItem: () => null,
+      setItem: () => {},
+      removeItem: () => {},
+    },
+    fetch: async () => ({ ok: true, json: async () => ({}) }),
+    console,
+    setTimeout,
+    clearTimeout,
+    window: {},
+  };
+
+  vm.createContext(contextObj);
+
+  const appJsCode = fs.readFileSync("./www/app.js", "utf-8");
+  vm.runInContext(appJsCode, contextObj);
+
+  // Check that bootstrapJarvis function exists in executed context on window
+  assert.equal(typeof contextObj.window.bootstrapJarvis, "function");
+
+  // Verify initialization ran immediately since document.readyState !== 'loading'
+  assert.equal(contextObj.window.jarvisInitialized(), true);
+
+  // Verify calling bootstrapJarvis again is idempotent and returns without re-initializing
+  contextObj.window.bootstrapJarvis();
+  assert.equal(contextObj.window.jarvisInitialized(), true);
+});
+
 test("Safe Array Contract Test for Models View - Prevents undefined.map error", () => {
   // Case 1: modelsData contains error or lacks providers property
   const modelsDataError: any = { error: "unauthorized" };
