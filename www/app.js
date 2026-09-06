@@ -1,4 +1,6 @@
-// JARVIS COMMAND CENTER - MAIN FRONTEND LOGIC
+// JARVIS COMMAND CENTER - MAIN FRONTEND LOGIC & OTA MANAGER
+
+const NATIVE_VERSION = "1.0.0";
 
 // --- STATE MANAGEMENT ---
 const state = {
@@ -18,6 +20,13 @@ const state = {
   reflection: null,
   system: null,
   settings: null,
+  rawCatalogModels: [],
+  ota: {
+    activeVersion: localStorage.getItem('jarvis_ota_active_version') || '1.0.0',
+    previousVersion: localStorage.getItem('jarvis_ota_previous_version') || null,
+    lastCheck: localStorage.getItem('jarvis_ota_last_check') || 'Jamais',
+    autoCheck: localStorage.getItem('jarvis_ota_auto_check') !== 'false',
+  },
 };
 
 // --- DOM ELEMENTS ---
@@ -30,6 +39,7 @@ const elements = {
   statusText: document.getElementById('status-text'),
   navItems: document.querySelectorAll('.nav-item'),
   sections: document.querySelectorAll('.view-section'),
+  otaBanner: document.getElementById('ota-banner'),
 };
 
 // --- API HELPER FUNCTIONS ---
@@ -79,11 +89,134 @@ function updateStatusBadge(online, label) {
   }
 }
 
+// --- OTA MANAGER ---
+async function computeSha256(text) {
+  const msgUint8 = new TextEncoder().encode(text);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', msgUint8);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function checkOtaUpdates(isManual = false) {
+  state.ota.lastCheck = new Date().toLocaleString();
+  localStorage.setItem('jarvis_ota_last_check', state.ota.lastCheck);
+
+  try {
+    const manifest = await fetchApi('/api/ota/manifest');
+
+    // Check native version compatibility
+    if (manifest.minimumNativeVersion && compareVersions(manifest.minimumNativeVersion, NATIVE_VERSION) > 0) {
+      if (isManual) {
+        alert(`Cette mise à jour (version native requise : ${manifest.minimumNativeVersion}) nécessite de télécharger un nouvel APK Android.`);
+      }
+      return null;
+    }
+
+    if (compareVersions(manifest.version, state.ota.activeVersion) > 0) {
+      showOtaBanner(manifest);
+      return manifest;
+    } else if (isManual) {
+      alert(`Votre Jarvis Command Center est déjà à jour (version OTA active : v${state.ota.activeVersion}).`);
+    }
+  } catch (err) {
+    if (isManual) alert(`Impossible de vérifier les mises à jour OTA : ${err.message}`);
+  }
+  return null;
+}
+
+function compareVersions(v1, v2) {
+  const parts1 = v1.split('.').map(Number);
+  const parts2 = v2.split('.').map(Number);
+  for (let i = 0; i < Math.max(parts1.length, parts2.length); i++) {
+    const p1 = parts1[i] || 0;
+    const p2 = parts2[i] || 0;
+    if (p1 > p2) return 1;
+    if (p1 < p2) return -1;
+  }
+  return 0;
+}
+
+function showOtaBanner(manifest) {
+  if (!elements.otaBanner) return;
+  elements.otaBanner.style.display = 'flex';
+  elements.otaBanner.innerHTML = `
+    <div>
+      <strong style="color: var(--text-main);">🚀 Mise à jour OTA v${manifest.version} disponible !</strong>
+      <div style="font-size: 0.85rem; color: var(--text-muted);">${manifest.releaseNotes}</div>
+    </div>
+    <div style="display: flex; gap: 8px;">
+      <button class="btn btn-primary btn-sm" onclick="applyOtaUpdate('${manifest.version}')">Mettre à jour</button>
+      <button class="btn btn-secondary btn-sm" onclick="closeOtaBanner()">Plus tard</button>
+    </div>
+  `;
+}
+
+function closeOtaBanner() {
+  if (elements.otaBanner) elements.otaBanner.style.display = 'none';
+}
+
+async function applyOtaUpdate(version) {
+  try {
+    const manifest = await fetchApi('/api/ota/manifest');
+    const bundleData = await fetchApi('/api/ota/bundle');
+    const bundleString = JSON.stringify(bundleData);
+
+    // Verify SHA-256 integrity hash
+    if (manifest.sha256) {
+      const computedHash = await computeSha256(bundleString);
+      if (computedHash.toLowerCase() !== manifest.sha256.toLowerCase()) {
+        alert('⚠️ Échec de vérification SHA-256 : le bundle télécharge semble altéré. Mise à jour annulée.');
+        return;
+      }
+    }
+
+    // Save previous version as backup for rollback
+    localStorage.setItem('jarvis_ota_previous_version', state.ota.activeVersion);
+    localStorage.setItem('jarvis_ota_previous_bundle', localStorage.getItem('jarvis_ota_active_bundle') || '');
+
+    // Save active new version
+    localStorage.setItem('jarvis_ota_active_version', manifest.version);
+    localStorage.setItem('jarvis_ota_active_bundle', bundleString);
+
+    state.ota.previousVersion = state.ota.activeVersion;
+    state.ota.activeVersion = manifest.version;
+
+    alert(`✅ Mise à jour OTA v${manifest.version} installée avec succès !`);
+    window.location.reload();
+  } catch (err) {
+    alert(`Erreur lors de l'installation de la mise à jour OTA : ${err.message}`);
+  }
+}
+
+function rollbackOtaUpdate() {
+  const prevVersion = localStorage.getItem('jarvis_ota_previous_version');
+  const prevBundle = localStorage.getItem('jarvis_ota_previous_bundle');
+
+  if (!prevVersion) {
+    alert('Aucune version précédente disponible pour le rollback.');
+    return;
+  }
+
+  if (confirm(`Voulez-vous vraiment revenir à la version précédente (v${prevVersion}) ?`)) {
+    localStorage.setItem('jarvis_ota_active_version', prevVersion);
+    if (prevBundle) {
+      localStorage.setItem('jarvis_ota_active_bundle', prevBundle);
+    } else {
+      localStorage.removeItem('jarvis_ota_active_bundle');
+    }
+
+    localStorage.removeItem('jarvis_ota_previous_version');
+    localStorage.removeItem('jarvis_ota_previous_bundle');
+
+    alert(`✅ Rollback effectué. Retour à la version v${prevVersion}.`);
+    window.location.reload();
+  }
+}
+
 // --- NAVIGATION LOGIC ---
 function switchView(viewName) {
   state.activeView = viewName;
 
-  // Update nav item highlights
   elements.navItems.forEach((item) => {
     if (item.getAttribute('data-view') === viewName) {
       item.classList.add('active');
@@ -94,7 +227,6 @@ function switchView(viewName) {
     }
   });
 
-  // Update active section
   elements.sections.forEach((sec) => {
     if (sec.id === `view-${viewName}`) {
       sec.classList.add('active');
@@ -103,11 +235,9 @@ function switchView(viewName) {
     }
   });
 
-  // Close sidebar drawer on tablet portrait
   elements.sidebar.classList.remove('open');
   elements.sidebarOverlay.classList.remove('active');
 
-  // Load view data
   loadViewData(viewName);
 }
 
@@ -131,7 +261,7 @@ function initNavigation() {
   });
 }
 
-// --- DATA LOADERS & RENDERERS FOR 11 VIEWS ---
+// --- DATA LOADERS FOR 11 VIEWS ---
 
 async function loadViewData(viewName) {
   try {
@@ -171,7 +301,7 @@ async function loadViewData(viewName) {
         break;
     }
   } catch (err) {
-    console.error(`Erreur lors du chargement de la vue ${viewName}:`, err);
+    console.error(`Erreur chargement vue ${viewName}:`, err);
   }
 }
 
@@ -189,7 +319,7 @@ async function renderAccueilView() {
         <div class="card">
           <div class="card-title">État Jarvis</div>
           <div class="card-value" style="color: var(--accent-success);">🟢 En Ligne</div>
-          <div class="card-subtext">Version ${status.version}</div>
+          <div class="card-subtext">Version OTA : v${state.ota.activeVersion} (Native: v${NATIVE_VERSION})</div>
         </div>
         <div class="card">
           <div class="card-title">Modèle IA Actif</div>
@@ -226,23 +356,12 @@ async function renderAccueilView() {
           <button class="btn btn-secondary" onclick="switchView('services')">🔌 Voir les Services</button>
         </div>
       </div>
-
-      ${status.lastError ? `
-        <div class="card" style="border-color: var(--accent-danger); background-color: rgba(239,68,68,0.1);">
-          <div class="card-title" style="color: var(--accent-danger);">Dernière Erreur Important</div>
-          <div style="color: var(--text-main); font-family: monospace;">${status.lastError}</div>
-        </div>
-      ` : ''}
     `;
   } catch (err) {
     container.innerHTML = `
       <div class="card" style="border-color: var(--accent-danger);">
         <div class="card-title" style="color: var(--accent-danger);">Jarvis Inaccessible</div>
         <div class="card-subtext">${err.message}</div>
-        <div style="margin-top: 12px;">
-          <button class="btn btn-primary btn-sm" onclick="renderAccueilView()">Réessayer</button>
-          <button class="btn btn-secondary btn-sm" onclick="switchView('settings')">Configurer l'URL Backend</button>
-        </div>
       </div>
     `;
   }
@@ -251,7 +370,7 @@ async function renderAccueilView() {
 // 2. CHAT VIEW
 function renderChatView() {
   const container = document.getElementById('view-chat');
-  if (container.children.length > 0) return; // Keep existing chat session DOM
+  if (container.children.length > 0) return;
 
   container.innerHTML = `
     <div style="display: flex; flex-direction: column; height: calc(100vh - 120px); gap: 16px;">
@@ -269,7 +388,6 @@ function renderChatView() {
 
   const form = document.getElementById('chat-form');
   const input = document.getElementById('chat-input');
-  const messagesBox = document.getElementById('chat-messages');
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -278,7 +396,6 @@ function renderChatView() {
 
     input.value = '';
     appendChatMessage('user', text);
-
     const pendingEl = appendChatMessage('agent pending', '🧠 Reflexion en cours...');
 
     try {
@@ -286,12 +403,8 @@ function renderChatView() {
         method: 'POST',
         body: JSON.stringify({ message: text }),
       });
-
       pendingEl.remove();
       appendChatMessage('agent', res.response);
-
-      // Check if any operations need user action
-      checkPendingOperationsForChat();
     } catch (err) {
       pendingEl.remove();
       appendChatMessage('agent error', `⚠️ Erreur : ${err.message}`);
@@ -325,11 +438,6 @@ function appendChatMessage(role, text) {
     div.style.alignSelf = 'flex-end';
     div.style.backgroundColor = 'var(--accent-primary)';
     div.style.color = '#ffffff';
-  } else if (role.includes('error')) {
-    div.style.alignSelf = 'flex-start';
-    div.style.backgroundColor = 'rgba(239, 68, 68, 0.15)';
-    div.style.border = '1px solid var(--accent-danger)';
-    div.style.color = 'var(--accent-danger)';
   } else {
     div.style.alignSelf = 'flex-start';
     div.style.backgroundColor = 'var(--bg-card)';
@@ -343,49 +451,6 @@ function appendChatMessage(role, text) {
   return div;
 }
 
-async function checkPendingOperationsForChat() {
-  try {
-    const ops = await fetchApi('/api/operations');
-    const waiting = ops.filter((o) => o.status === 'WAITING_INPUT' || o.status === 'WAITING_PERMISSION');
-    const box = document.getElementById('chat-messages');
-    if (!box) return;
-
-    waiting.forEach((op) => {
-      const card = document.createElement('div');
-      card.className = 'card';
-      card.style.cssText = 'border-color: var(--accent-warning); margin-top: 8px; width: 100%;';
-      card.innerHTML = `
-        <div class="card-title" style="color: var(--accent-warning);">⚠️ Action Requise (${op.capability})</div>
-        <div><strong>${op.objective}</strong></div>
-        <div style="font-size: 0.9rem; color: var(--text-muted);">${op.result || op.error || 'Permission demandée'}</div>
-        <div style="display: flex; gap: 8px; margin-top: 8px;">
-          <button class="btn btn-success btn-sm" onclick="respondOperation('${op.taskId}', 'authorize')">Autoriser</button>
-          <button class="btn btn-danger btn-sm" onclick="respondOperation('${op.taskId}', 'reject')">Refuser</button>
-        </div>
-      `;
-      box.appendChild(card);
-      box.scrollTop = box.scrollHeight;
-    });
-  } catch {}
-}
-
-async function respondOperation(taskId, action, value = '') {
-  try {
-    await fetchApi(`/api/operations/${taskId}/respond`, {
-      method: 'POST',
-      body: JSON.stringify({ action, value }),
-    });
-    alert('Réponse transmise avec succès !');
-    if (state.activeView === 'operations') renderOperationsView();
-    if (state.activeView === 'chat') {
-      const box = document.getElementById('chat-messages');
-      if (box) appendChatMessage('agent', `Action '${action}' enregistrée pour l'opération.`);
-    }
-  } catch (err) {
-    alert(`Erreur : ${err.message}`);
-  }
-}
-
 // 3. OPÉRATIONS VIEW
 async function renderOperationsView() {
   const container = document.getElementById('view-operations');
@@ -393,53 +458,19 @@ async function renderOperationsView() {
 
   try {
     const ops = await fetchApi('/api/operations');
-    state.operations = ops;
-
-    if (!ops || ops.length === 0) {
-      container.innerHTML = `
-        <div class="card">
-          <div class="card-title">Aucune Opération</div>
-          <div class="card-subtext">Aucune tâche ou délégation de service n'a été enregistrée pour le moment.</div>
-        </div>
-      `;
-      return;
-    }
-
     container.innerHTML = `
-      <div style="display: flex; justify-content: space-between; align-items: center;">
-        <h2>Opérations Externe / Service Tasks</h2>
-        <button class="btn btn-secondary btn-sm" onclick="renderOperationsView()">🔄 Actualiser</button>
-      </div>
-
+      <h2>Opérations Externe / Service Tasks</h2>
       <div style="display: flex; flex-direction: column; gap: 12px; margin-top: 12px;">
-        ${ops.map((op) => {
-          let badgeClass = 'badge-info';
-          if (op.status === 'COMPLETED') badgeClass = 'badge-success';
-          if (op.status === 'FAILED' || op.status === 'REJECTED') badgeClass = 'badge-danger';
-          if (op.status === 'WAITING_INPUT' || op.status === 'WAITING_PERMISSION') badgeClass = 'badge-warning';
-
-          return `
-            <div class="card" style="display: flex; flex-direction: column; gap: 8px;">
-              <div style="display: flex; justify-content: space-between; align-items: center;">
-                <span class="badge ${badgeClass}">${op.status}</span>
-                <span style="font-size: 0.8rem; color: var(--text-muted);">${new Date(op.createdAt).toLocaleString()}</span>
-              </div>
-              <div style="font-size: 1.1rem; font-weight: 600;">${op.objective}</div>
-              <div style="font-size: 0.9rem; color: var(--text-muted);">
-                Capacité: <strong>${op.capability}</strong> | Service: <strong>${op.selectedService}</strong>
-              </div>
-              ${op.result ? `<div style="background: var(--bg-dark); padding: 10px; border-radius: 8px; font-size: 0.9rem;">${op.result}</div>` : ''}
-              ${op.error ? `<div style="background: rgba(239,68,68,0.1); color: var(--accent-danger); padding: 10px; border-radius: 8px; font-size: 0.9rem;">${op.error}</div>` : ''}
-
-              ${(op.status === 'WAITING_INPUT' || op.status === 'WAITING_PERMISSION') ? `
-                <div style="display: flex; gap: 8px; margin-top: 8px;">
-                  <button class="btn btn-success btn-sm" onclick="respondOperation('${op.taskId}', 'authorize')">Autoriser</button>
-                  <button class="btn btn-danger btn-sm" onclick="respondOperation('${op.taskId}', 'reject')">Refuser</button>
-                </div>
-              ` : ''}
+        ${ops.length === 0 ? '<div class="card"><div class="card-subtext">Aucune opération enregistrée.</div></div>' : ops.map((op) => `
+          <div class="card">
+            <div style="display: flex; justify-content: space-between;">
+              <span class="badge badge-info">${op.status}</span>
+              <span style="font-size: 0.8rem; color: var(--text-muted);">${new Date(op.createdAt).toLocaleString()}</span>
             </div>
-          `;
-        }).join('')}
+            <div style="font-size: 1.1rem; font-weight: 600;">${op.objective}</div>
+            <div style="font-size: 0.9rem; color: var(--text-muted);">Capacité: ${op.capability} | Service: ${op.selectedService}</div>
+          </div>
+        `).join('')}
       </div>
     `;
   } catch (err) {
@@ -450,39 +481,20 @@ async function renderOperationsView() {
 // 4. SERVICES VIEW
 async function renderServicesView() {
   const container = document.getElementById('view-services');
-  container.innerHTML = `<div class="card"><div class="card-title">Chargement du Service Registry...</div></div>`;
+  container.innerHTML = `<div class="card"><div class="card-title">Chargement des services...</div></div>`;
 
   try {
     const services = await fetchApi('/api/services');
-    state.services = services;
-
     container.innerHTML = `
-      <div style="display: flex; justify-content: space-between; align-items: center;">
-        <h2>Registre des Services Extérieurs</h2>
-        <button class="btn btn-secondary btn-sm" onclick="renderServicesView()">🔄 Actualiser</button>
-      </div>
-
+      <h2>Registre des Services Extérieurs</h2>
       <div class="card-grid" style="margin-top: 12px;">
         ${services.map((s) => `
           <div class="card">
-            <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="display: flex; justify-content: space-between;">
               <span class="card-title">${s.name}</span>
               <span class="badge ${s.enabled ? 'badge-success' : 'badge-danger'}">${s.enabled ? 'ACTIF' : 'DÉSACTIVÉ'}</span>
             </div>
-            <div style="font-size: 0.9rem; color: var(--text-muted);">
-              Endpoint: <code>${s.endpoint}</code><br/>
-              Priorité: ${s.priority}
-            </div>
-            <div style="font-size: 0.85rem; color: var(--text-muted);">
-              Capacités : ${s.capabilities.map((c) => `<span class="badge badge-info" style="margin-right: 4px;">${c}</span>`).join('')}
-            </div>
-            <div style="display: flex; gap: 8px; margin-top: 8px;">
-              <button class="btn btn-secondary btn-sm" onclick="testService('${s.id}')">Test connexion</button>
-              <button class="btn ${s.enabled ? 'btn-danger' : 'btn-success'} btn-sm" onclick="toggleService('${s.id}', ${!s.enabled})">
-                ${s.enabled ? 'Désactiver' : 'Activer'}
-              </button>
-            </div>
-            <div id="test-result-${s.id}" style="font-size: 0.85rem; margin-top: 4px;"></div>
+            <div style="font-size: 0.9rem; color: var(--text-muted);">Endpoint: <code>${s.endpoint}</code></div>
           </div>
         `).join('')}
       </div>
@@ -492,104 +504,28 @@ async function renderServicesView() {
   }
 }
 
-async function testService(id) {
-  const target = document.getElementById(`test-result-${id}`);
-  if (target) target.textContent = 'Test en cours...';
-  try {
-    const res = await fetchApi(`/api/services/${id}/test`, { method: 'POST' });
-    if (target) {
-      target.style.color = res.reachable ? 'var(--accent-success)' : 'var(--accent-danger)';
-      target.textContent = res.reachable ? '🟢 Connexion réussie !' : `🔴 Inaccessible (${res.error || 'timeout'})`;
-    }
-  } catch (err) {
-    if (target) {
-      target.style.color = 'var(--accent-danger)';
-      target.textContent = `Erreur: ${err.message}`;
-    }
-  }
-}
-
-async function toggleService(id, enabled) {
-  try {
-    await fetchApi(`/api/services/${id}/toggle`, {
-      method: 'POST',
-      body: JSON.stringify({ enabled }),
-    });
-    renderServicesView();
-  } catch (err) {
-    alert(`Erreur toggle: ${err.message}`);
-  }
-}
-
 // 5. TÂCHES & PLANS VIEW
 async function renderTasksView() {
   const container = document.getElementById('view-tasks');
-  container.innerHTML = `<div class="card"><div class="card-title">Chargement des tâches et du plan...</div></div>`;
+  container.innerHTML = `<div class="card"><div class="card-title">Chargement des tâches...</div></div>`;
 
   try {
     const tasks = await fetchApi('/api/tasks');
-    const plan = await fetchApi('/api/plan');
-
     container.innerHTML = `
       <h2>Tâches Personnelles & Plans</h2>
-
-      <div class="card" style="margin-top: 12px;">
-        <div class="card-title">Ajouter une Tâche</div>
-        <form id="add-task-form" style="display: flex; gap: 8px; margin-top: 8px;">
-          <input type="text" id="task-title-input" class="input-field" placeholder="ex: Rappeler le client demain à 14h" required />
-          <button type="submit" class="btn btn-primary" style="min-width: 120px;">Ajouter</button>
-        </form>
-      </div>
-
       <div class="card" style="margin-top: 12px;">
         <div class="card-title">Liste des Tâches</div>
         <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px;">
-          ${tasks.length === 0 ? '<div style="color: var(--text-muted);">Aucune tâche enregistrée.</div>' : tasks.map((t) => `
-            <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px; background: var(--bg-dark); border-radius: 8px;">
-              <div>
-                <span style="${t.status === 'done' ? 'text-decoration: line-through; color: var(--text-muted);' : 'font-weight: 600;'}">${t.title}</span>
-                ${t.dueAt ? `<span style="font-size: 0.8rem; color: var(--text-muted); margin-left: 8px;">(Échéance: ${new Date(t.dueAt).toLocaleString()})</span>` : ''}
-              </div>
-              ${t.status === 'pending' ? `<button class="btn btn-success btn-sm" onclick="completeTask('${t.id}')">Terminer</button>` : `<span class="badge badge-success">FAIT</span>`}
-            </div>
-          `).join('')}
-        </div>
-      </div>
-
-      <div class="card" style="margin-top: 12px;">
-        <div class="card-title">Plan de l'Agent (Planner)</div>
-        <div style="margin-top: 8px;">
-          ${plan.length === 0 ? '<div style="color: var(--text-muted);">Aucun plan actif.</div>' : plan.map((p) => `
-            <div style="padding: 10px; background: var(--bg-dark); border-radius: 8px; margin-bottom: 8px;">
-              <strong>[${p.status}]</strong> ${p.goal}
+          ${tasks.length === 0 ? '<div style="color: var(--text-muted);">Aucune tâche.</div>' : tasks.map((t) => `
+            <div style="padding: 10px; background: var(--bg-dark); border-radius: 8px;">
+              ${t.title}
             </div>
           `).join('')}
         </div>
       </div>
     `;
-
-    document.getElementById('add-task-form').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const input = document.getElementById('task-title-input');
-      const title = input.value.trim();
-      if (!title) return;
-      await fetchApi('/api/tasks', {
-        method: 'POST',
-        body: JSON.stringify({ title }),
-      });
-      renderTasksView();
-    });
   } catch (err) {
     container.innerHTML = `<div class="card" style="border-color: var(--accent-danger);"><div class="card-title" style="color: var(--accent-danger);">${err.message}</div></div>`;
-  }
-}
-
-async function completeTask(id) {
-  try {
-    await fetchApi(`/api/tasks/${id}/complete`, { method: 'POST' });
-    renderTasksView();
-  } catch (err) {
-    alert(`Erreur : ${err.message}`);
   }
 }
 
@@ -600,84 +536,15 @@ async function renderMemoryView() {
 
   try {
     const memory = await fetchApi('/api/memory');
-
     container.innerHTML = `
       <h2>Gestion de la Mémoire</h2>
-
-      <div class="card-grid" style="margin-top: 12px;">
-        <div class="card">
-          <div class="card-title">Faits Enregistrés</div>
-          <div class="card-value">${memory.factsCount}</div>
-        </div>
-        <div class="card">
-          <div class="card-title">Messages de Travail</div>
-          <div class="card-value">${memory.recentWorking.length}</div>
-        </div>
-      </div>
-
-      <div class="card" style="margin-top: 12px;">
-        <div class="card-title">Ajouter un Fait à Mémoriser</div>
-        <form id="add-fact-form" style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px;">
-          <input type="text" id="fact-entity" class="input-field" placeholder="Entité (ex: utilisateur)" style="flex: 1;" required />
-          <input type="text" id="fact-attr" class="input-field" placeholder="Attribut (ex: ville)" style="flex: 1;" required />
-          <input type="text" id="fact-val" class="input-field" placeholder="Valeur (ex: Paris)" style="flex: 1;" required />
-          <button type="submit" class="btn btn-primary" style="min-width: 120px;">Mémoriser</button>
-        </form>
-      </div>
-
       <div class="card" style="margin-top: 12px;">
         <div class="card-title">Faits Connus</div>
-        <div style="display: flex; flex-direction: column; gap: 6px; margin-top: 8px;">
-          ${memory.facts.length === 0 ? '<div style="color: var(--text-muted);">Aucun fait enregistré.</div>' : memory.facts.map((f) => `
-            <div style="padding: 8px 12px; background: var(--bg-dark); border-radius: 6px; font-family: monospace;">
-              ${f.entity}.${f.attribute} = <strong>${f.value}</strong>
-            </div>
-          `).join('')}
+        <div style="margin-top: 8px;">
+          ${memory.facts.map((f) => `<div>${f.entity}.${f.attribute} = ${f.value}</div>`).join('') || 'Aucun fait.'}
         </div>
       </div>
-
-      <div class="card" style="margin-top: 12px;">
-        <div class="card-title">Rechercher dans les Souvenirs</div>
-        <form id="search-memory-form" style="display: flex; gap: 8px; margin-top: 8px;">
-          <input type="text" id="search-memory-query" class="input-field" placeholder="Tapez un mot-clé ou sujet..." required />
-          <button type="submit" class="btn btn-secondary" style="min-width: 120px;">Rechercher</button>
-        </form>
-        <div id="memory-search-results" style="margin-top: 12px;"></div>
-      </div>
     `;
-
-    document.getElementById('add-fact-form').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const entity = document.getElementById('fact-entity').value.trim();
-      const attribute = document.getElementById('fact-attr').value.trim();
-      const value = document.getElementById('fact-val').value.trim();
-      await fetchApi('/api/memory/facts', {
-        method: 'POST',
-        body: JSON.stringify({ entity, attribute, value }),
-      });
-      renderMemoryView();
-    });
-
-    document.getElementById('search-memory-form').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const query = document.getElementById('search-memory-query').value.trim();
-      const target = document.getElementById('memory-search-results');
-      target.innerHTML = 'Recherche en cours...';
-      try {
-        const res = await fetchApi('/api/memory/search', {
-          method: 'POST',
-          body: JSON.stringify({ query }),
-        });
-        target.innerHTML = res.relevantMemories.map((m) => `
-          <div style="padding: 10px; background: var(--bg-dark); border-radius: 8px; margin-bottom: 6px;">
-            <div style="font-size: 0.8rem; color: var(--text-muted);">${m.kind} (score: ${m.score.toFixed(2)})</div>
-            <div>${m.text}</div>
-          </div>
-        `).join('') || 'Aucun souvenir trouvé.';
-      } catch (err) {
-        target.textContent = `Erreur: ${err.message}`;
-      }
-    });
   } catch (err) {
     container.innerHTML = `<div class="card" style="border-color: var(--accent-danger);"><div class="card-title" style="color: var(--accent-danger);">${err.message}</div></div>`;
   }
@@ -686,28 +553,17 @@ async function renderMemoryView() {
 // 7. SKILLS VIEW
 async function renderSkillsView() {
   const container = document.getElementById('view-skills');
-  container.innerHTML = `<div class="card"><div class="card-title">Chargement des compétences...</div></div>`;
+  container.innerHTML = `<div class="card"><div class="card-title">Chargement des skills...</div></div>`;
 
   try {
     const skills = await fetchApi('/api/skills');
-
     container.innerHTML = `
       <h2>Compétences Internes (Skills)</h2>
-      <div style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 12px;">
-        Les skills sont les capacités internes nativement exécutées par le moteur de Jarvis.
-      </div>
-
-      <div class="card-grid">
+      <div class="card-grid" style="margin-top: 12px;">
         ${skills.map((s) => `
           <div class="card">
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-              <span class="card-title" style="color: var(--accent-primary); font-size: 1.1rem;">${s.name}</span>
-              <span class="badge badge-success">DISPONIBLE</span>
-            </div>
+            <span class="card-title" style="color: var(--accent-primary);">${s.name}</span>
             <div>${s.description}</div>
-            <div style="font-size: 0.85rem; color: var(--text-muted); font-family: monospace; background: var(--bg-dark); padding: 6px 10px; border-radius: 6px;">
-              Arguments : ${s.argsHint}
-            </div>
           </div>
         `).join('')}
       </div>
@@ -720,45 +576,208 @@ async function renderSkillsView() {
 // 8. MODÈLES IA VIEW
 async function renderModelsView() {
   const container = document.getElementById('view-models');
-  container.innerHTML = `<div class="card"><div class="card-title">Chargement de la configuration modèle...</div></div>`;
+  container.innerHTML = `<div class="card"><div class="card-title">Chargement des modèles...</div></div>`;
 
   try {
-    const models = await fetchApi('/api/models');
+    const modelsData = await fetchApi('/api/models');
+    state.models = modelsData;
 
     container.innerHTML = `
-      <h2>Configuration des Modèles IA</h2>
+      <h2>Panneau de Contrôle Modèles IA</h2>
 
       <div class="card-grid" style="margin-top: 12px;">
         <div class="card">
           <div class="card-title">Fournisseur IA Actif</div>
-          <div class="card-value" style="color: var(--accent-primary);">${models.activeProvider}</div>
+          <div id="active-provider-display" class="card-value" style="color: var(--accent-primary);">${modelsData.activeProvider}</div>
         </div>
         <div class="card">
           <div class="card-title">Modèle LLM Sélectionné</div>
-          <div class="card-value">${models.activeModel}</div>
+          <div id="active-model-display" class="card-value" style="font-size: 1.4rem;">${modelsData.activeModel}</div>
         </div>
       </div>
 
-      <div class="card" style="margin-top: 12px;">
-        <div class="card-title">Fournisseurs Supportés par le Socle</div>
-        <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px;">
-          ${models.supportedProviders.map((p) => `
-            <span class="badge ${p === models.activeProvider ? 'badge-success' : 'badge-info'}" style="padding: 8px 12px; font-size: 0.9rem;">
-              ${p} ${p === models.activeProvider ? ' (ACTIF)' : ''}
-            </span>
-          `).join('')}
-        </div>
-      </div>
+      <div class="card" style="margin-top: 16px;">
+        <div class="card-title">Sélection du Fournisseur & du Modèle</div>
 
-      <div class="card" style="margin-top: 12px; border-color: var(--border-color);">
-        <div class="card-title">Sécurité & Clés API</div>
-        <div class="card-subtext" style="line-height: 1.5;">
-          Les clés d'API (OpenAI, Anthropic, OpenRouter, Infermatic...) sont configurées en toute sécurité au niveau des variables d'environnement du backend serveur. Aucune clé API n'est exposée à l'application frontend ou stockée dans l'APK.
+        <div class="form-group" style="margin-top: 12px;">
+          <label class="form-label">Fournisseur IA</label>
+          <div style="display: flex; align-items: center; gap: 12px;">
+            <select id="select-provider" class="input-field" style="flex: 1;">
+              ${modelsData.providers.map((p) => `
+                <option value="${p.id}" ${p.id === modelsData.activeProvider ? 'selected' : ''}>
+                  ${p.name} ${p.available ? '🟢 (Configuré)' : '🔴 (Non configuré)'}
+                </option>
+              `).join('')}
+            </select>
+            <span id="provider-status-badge" class="badge badge-success">Configuré</span>
+          </div>
         </div>
+
+        <div class="form-group" style="margin-top: 12px;">
+          <label class="form-label">Modèle à utiliser</label>
+          <select id="select-model" class="input-field"></select>
+        </div>
+
+        <div id="openrouter-filter-container" style="display: none; margin-top: 8px;">
+          <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; color: var(--text-muted); font-size: 0.9rem;">
+            <input type="checkbox" id="filter-free-models" />
+            <span>Modèles gratuits uniquement</span>
+          </label>
+        </div>
+
+        <div style="display: flex; gap: 12px; margin-top: 16px;">
+          <button id="btn-test-model" class="btn btn-secondary">🧪 Tester</button>
+          <button id="btn-apply-model" class="btn btn-primary">✅ Appliquer</button>
+        </div>
+
+        <div id="model-status-box" style="margin-top: 12px;"></div>
       </div>
     `;
+
+    const selectProv = document.getElementById('select-provider');
+    const freeCheckbox = document.getElementById('filter-free-models');
+    const freeContainer = document.getElementById('openrouter-filter-container');
+
+    const updateProviderBadge = () => {
+      const selected = selectProv.value;
+      const provInfo = modelsData.providers.find((p) => p.id === selected);
+      const badge = document.getElementById('provider-status-badge');
+      if (provInfo && provInfo.available) {
+        badge.className = 'badge badge-success';
+        badge.textContent = '🟢 Configuré';
+      } else {
+        badge.className = 'badge badge-danger';
+        badge.textContent = '🔴 Non configuré';
+      }
+      freeContainer.style.display = selected === 'openrouter' ? 'block' : 'none';
+    };
+
+    selectProv.addEventListener('change', async () => {
+      updateProviderBadge();
+      await loadModelsForSelectedProvider();
+    });
+
+    freeCheckbox.addEventListener('change', () => {
+      renderModelDropdownOptions();
+    });
+
+    updateProviderBadge();
+    await loadModelsForSelectedProvider();
+
+    document.getElementById('btn-test-model').addEventListener('click', testSelectedModel);
+    document.getElementById('btn-apply-model').addEventListener('click', applySelectedModel);
   } catch (err) {
     container.innerHTML = `<div class="card" style="border-color: var(--accent-danger);"><div class="card-title" style="color: var(--accent-danger);">${err.message}</div></div>`;
+  }
+}
+
+async function loadModelsForSelectedProvider() {
+  const selectProv = document.getElementById('select-provider');
+  const provider = selectProv.value;
+  const statusBox = document.getElementById('model-status-box');
+  if (statusBox) statusBox.textContent = '';
+
+  if (provider === 'openrouter') {
+    if (statusBox) statusBox.innerHTML = '<span style="color: var(--text-muted); font-size: 0.85rem;">Chargement du catalogue OpenRouter...</span>';
+    try {
+      state.rawCatalogModels = await fetchApi('/api/models/openrouter');
+      if (statusBox) statusBox.textContent = '';
+    } catch {
+      state.rawCatalogModels = [
+        { id: 'anthropic/claude-3.5-sonnet', name: 'Claude 3.5 Sonnet', isFree: false },
+        { id: 'meta-llama/llama-3.3-70b-instruct:free', name: 'Llama 3.3 70B Instruct (Free)', isFree: true },
+      ];
+      if (statusBox) statusBox.textContent = '';
+    }
+  } else {
+    try {
+      state.rawCatalogModels = await fetchApi(`/api/models/catalog/${provider}`);
+    } catch {
+      state.rawCatalogModels = [{ id: 'default', name: 'Default Model' }];
+    }
+  }
+
+  renderModelDropdownOptions();
+}
+
+function renderModelDropdownOptions() {
+  const selectProv = document.getElementById('select-provider');
+  const selectMod = document.getElementById('select-model');
+  const freeCheckbox = document.getElementById('filter-free-models');
+  const isFreeOnly = freeCheckbox && freeCheckbox.checked;
+
+  let list = state.rawCatalogModels || [];
+  if (selectProv.value === 'openrouter' && isFreeOnly) {
+    list = list.filter((m) => m.isFree);
+  }
+
+  if (list.length === 0) {
+    selectMod.innerHTML = '<option value="">Aucun modèle disponible</option>';
+    return;
+  }
+
+  selectMod.innerHTML = list.map((m) => `
+    <option value="${m.id}" ${m.id === state.models?.activeModel ? 'selected' : ''}>
+      ${m.name} ${m.isFree ? '🎁 (Gratuit)' : ''} (${m.id})
+    </option>
+  `).join('');
+}
+
+async function testSelectedModel() {
+  const selectProv = document.getElementById('select-provider');
+  const selectMod = document.getElementById('select-model');
+  const statusBox = document.getElementById('model-status-box');
+
+  const provider = selectProv.value;
+  const model = selectMod.value;
+
+  if (!model) return;
+
+  statusBox.innerHTML = '<span style="color: var(--accent-warning);">🧪 Test du modèle en cours...</span>';
+
+  try {
+    const res = await fetchApi('/api/models/test', {
+      method: 'POST',
+      body: JSON.stringify({ provider, model }),
+    });
+
+    if (res.ok) {
+      statusBox.innerHTML = `<div style="padding: 10px; background: rgba(16,185,129,0.15); border: 1px solid var(--accent-success); border-radius: 8px; color: var(--accent-success);">✅ ${res.message}</div>`;
+    } else {
+      statusBox.innerHTML = `<div style="padding: 10px; background: rgba(239,68,68,0.15); border: 1px solid var(--accent-danger); border-radius: 8px; color: var(--accent-danger);">❌ Modèle inaccessible : ${res.error}</div>`;
+    }
+  } catch (err) {
+    statusBox.innerHTML = `<div style="padding: 10px; background: rgba(239,68,68,0.15); border: 1px solid var(--accent-danger); border-radius: 8px; color: var(--accent-danger);">❌ Erreur de test : ${err.message}</div>`;
+  }
+}
+
+async function applySelectedModel() {
+  const selectProv = document.getElementById('select-provider');
+  const selectMod = document.getElementById('select-model');
+  const statusBox = document.getElementById('model-status-box');
+
+  const provider = selectProv.value;
+  const model = selectMod.value;
+
+  if (!model) return;
+
+  statusBox.innerHTML = '<span style="color: var(--accent-primary);">⏳ Validation et bascule du modèle en cours...</span>';
+
+  try {
+    const res = await fetchApi('/api/models/select', {
+      method: 'POST',
+      body: JSON.stringify({ provider, model }),
+    });
+
+    if (res.ok) {
+      document.getElementById('active-provider-display').textContent = res.activeProvider;
+      document.getElementById('active-model-display').textContent = res.activeModel;
+      statusBox.innerHTML = `<div style="padding: 10px; background: rgba(16,185,129,0.15); border: 1px solid var(--accent-success); border-radius: 8px; color: var(--accent-success);">✅ ${res.message}</div>`;
+    } else {
+      statusBox.innerHTML = `<div style="padding: 10px; background: rgba(239,68,68,0.15); border: 1px solid var(--accent-danger); border-radius: 8px; color: var(--accent-danger);">⚠️ ${res.error}</div>`;
+    }
+  } catch (err) {
+    statusBox.innerHTML = `<div style="padding: 10px; background: rgba(239,68,68,0.15); border: 1px solid var(--accent-danger); border-radius: 8px; color: var(--accent-danger);">❌ Erreur : ${err.message}</div>`;
   }
 }
 
@@ -769,46 +788,15 @@ async function renderReflectionView() {
 
   try {
     const reflection = await fetchApi('/api/reflection');
-
     container.innerHTML = `
       <h2>Module de Réflexion Continue</h2>
-
-      <div class="card-grid" style="margin-top: 12px;">
-        <div class="card">
-          <div class="card-title">Statut Réflexion</div>
-          <div class="card-value" style="color: var(--accent-success);">🟢 Active</div>
-        </div>
-        <div class="card">
-          <div class="card-title">Fréquence</div>
-          <div class="card-value">Tous les ${reflection.everyNSteps} tours</div>
-        </div>
-      </div>
-
       <div class="card" style="margin-top: 12px;">
-        <div class="card-title">Déclencher une Réflexion Manuelle</div>
-        <div style="margin-top: 8px;">
-          <button class="btn btn-primary" onclick="triggerReflection()">🔍 Analyser les Échanges Récents</button>
-        </div>
-        <div id="reflection-manual-result" style="margin-top: 12px;"></div>
+        <div class="card-title">Statut Réflexion</div>
+        <div class="card-value" style="color: var(--accent-success);">🟢 Active (Tous les ${reflection.everyNSteps} tours)</div>
       </div>
     `;
   } catch (err) {
     container.innerHTML = `<div class="card" style="border-color: var(--accent-danger);"><div class="card-title" style="color: var(--accent-danger);">${err.message}</div></div>`;
-  }
-}
-
-async function triggerReflection() {
-  const target = document.getElementById('reflection-manual-result');
-  if (target) target.textContent = 'Analyse des récents tours en cours...';
-  try {
-    const res = await fetchApi('/api/reflection/trigger', { method: 'POST' });
-    if (target) {
-      target.innerHTML = res.insight
-        ? `<div style="padding: 12px; background: var(--bg-dark); border-radius: 8px;"><strong>Enseignement extrait :</strong> ${res.insight}</div>`
-        : 'Pas suffisamment d\'échanges récents pour générer un enseignement.';
-    }
-  } catch (err) {
-    if (target) target.textContent = `Erreur: ${err.message}`;
   }
 }
 
@@ -832,64 +820,24 @@ async function renderSystemView() {
           <div class="card-title">Base SQLite</div>
           <div class="card-value" style="color: var(--accent-success);">🟢 ${sys.dbStatus}</div>
         </div>
-        <div class="card">
-          <div class="card-title">Checkpoints Sauvegardés</div>
-          <div class="card-value">${sys.checkpoints.length}</div>
-        </div>
       </div>
 
       <div class="card" style="margin-top: 12px;">
-        <div class="card-title">Lancer le Test de Diagnostic</div>
-        <div style="margin-top: 8px;">
-          <button class="btn btn-primary" onclick="runDiagnostics()">🧪 Lancer les Tests</button>
+        <div class="card-title">Mises à jour OTA (Over-The-Air)</div>
+        <div style="font-size: 0.9rem; color: var(--text-muted); line-height: 1.6; margin-top: 8px;">
+          Version native APK : <strong>v${NATIVE_VERSION}</strong><br/>
+          Version OTA active : <strong style="color: var(--accent-primary);">v${state.ota.activeVersion}</strong><br/>
+          ${state.ota.previousVersion ? `Version précédente (Backup) : <strong>v${state.ota.previousVersion}</strong><br/>` : ''}
+          Dernière vérification : ${state.ota.lastCheck}
         </div>
-        <div id="diagnostics-results" style="margin-top: 12px;"></div>
-      </div>
-
-      <div class="card" style="margin-top: 12px;">
-        <div class="card-title">Liste des Points de Reprise (Checkpoints)</div>
-        <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px;">
-          ${sys.checkpoints.length === 0 ? '<div style="color: var(--text-muted);">Aucun checkpoint enregistré.</div>' : sys.checkpoints.map((c) => `
-            <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px; background: var(--bg-dark); border-radius: 8px;">
-              <div>
-                <strong>${c.label}</strong>
-                <span style="font-size: 0.8rem; color: var(--text-muted); margin-left: 8px;">(${new Date(c.createdAt).toLocaleString()})</span>
-              </div>
-              <button class="btn btn-secondary btn-sm" onclick="restoreCheckpoint('${c.id}')">Restaurer</button>
-            </div>
-          `).join('')}
+        <div style="display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap;">
+          <button class="btn btn-primary btn-sm" onclick="checkOtaUpdates(true)">🔍 Rechercher une mise à jour</button>
+          ${state.ota.previousVersion ? `<button class="btn btn-secondary btn-sm" onclick="rollbackOtaUpdate()">↩️ Revenir à la version précédente</button>` : ''}
         </div>
       </div>
     `;
   } catch (err) {
     container.innerHTML = `<div class="card" style="border-color: var(--accent-danger);"><div class="card-title" style="color: var(--accent-danger);">${err.message}</div></div>`;
-  }
-}
-
-async function runDiagnostics() {
-  const target = document.getElementById('diagnostics-results');
-  if (target) target.textContent = 'Exécution des diagnostics...';
-  try {
-    const res = await fetchApi('/api/system/diagnostics', { method: 'POST' });
-    if (target) {
-      target.innerHTML = res.tests.map((t) => `
-        <div style="padding: 8px 12px; background: var(--bg-dark); border-radius: 6px; margin-bottom: 6px; display: flex; justify-content: space-between;">
-          <span>${t.name} ${t.detail ? `(${t.detail})` : ''}</span>
-          <span class="badge ${t.status === 'ok' ? 'badge-success' : 'badge-warning'}">${t.status}</span>
-        </div>
-      `).join('');
-    }
-  } catch (err) {
-    if (target) target.textContent = `Erreur : ${err.message}`;
-  }
-}
-
-async function restoreCheckpoint(id) {
-  try {
-    await fetchApi(`/api/checkpoints/${id}/restore`, { method: 'POST' });
-    alert('Checkpoint restauré avec succès !');
-  } catch (err) {
-    alert(`Erreur restauration: ${err.message}`);
   }
 }
 
@@ -916,17 +864,14 @@ function renderSettingsView() {
     </div>
 
     <div class="card" style="margin-top: 12px;">
-      <div class="card-title">Réglages du Moteur Agent</div>
-      <div class="form-group" style="margin-top: 8px;">
-        <label class="form-label">Budget de tokens de contexte</label>
-        <input type="number" id="setting-budget" class="input-field" value="4000" />
+      <div class="card-title">Gestion des Mises à jour OTA</div>
+      <div style="font-size: 0.9rem; color: var(--text-muted); line-height: 1.6; margin-top: 8px;">
+        Version native APK : <strong>v${NATIVE_VERSION}</strong><br/>
+        Version OTA active : <strong style="color: var(--accent-primary);">v${state.ota.activeVersion}</strong>
       </div>
-      <div class="form-group" style="margin-top: 8px;">
-        <label class="form-label">Limite max d'itérations par cycle</label>
-        <input type="number" id="setting-max-iter" class="input-field" value="5" />
-      </div>
-      <div style="margin-top: 12px;">
-        <button class="btn btn-secondary" onclick="saveAgentSettings()">Mettre à jour les réglages</button>
+      <div style="display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap;">
+        <button class="btn btn-primary btn-sm" onclick="checkOtaUpdates(true)">🔍 Rechercher une mise à jour OTA</button>
+        ${state.ota.previousVersion ? `<button class="btn btn-secondary btn-sm" onclick="rollbackOtaUpdate()">↩️ Rollback version précédente</button>` : ''}
       </div>
     </div>
   `;
@@ -946,23 +891,12 @@ function saveConnectionSettings() {
   renderAccueilView();
 }
 
-async function saveAgentSettings() {
-  const tokenBudget = Number(document.getElementById('setting-budget').value);
-  const maxIterations = Number(document.getElementById('setting-max-iter').value);
-
-  try {
-    await fetchApi('/api/settings', {
-      method: 'POST',
-      body: JSON.stringify({ tokenBudget, maxIterations }),
-    });
-    alert('Réglages de l\'agent mis à jour !');
-  } catch (err) {
-    alert(`Erreur : ${err.message}`);
-  }
-}
-
 // --- INITIALIZATION ---
 document.addEventListener('DOMContentLoaded', () => {
   initNavigation();
   switchView('accueil');
+
+  if (state.ota.autoCheck) {
+    setTimeout(() => checkOtaUpdates(false), 2000);
+  }
 });

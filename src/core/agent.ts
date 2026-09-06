@@ -34,7 +34,7 @@ export class Agent {
   readonly planner: Planner;
   readonly reflection: ReflectionEngine;
   readonly serviceOrchestrator: ServiceOrchestrator;
-  private readonly llm: LLMProvider;
+  private llm: LLMProvider;
   private readonly contextBudget: ContextBudgetManager;
   private readonly maxIterations: number;
   private stepCount = 0;
@@ -197,5 +197,13 @@ export class Agent {
 
   listCheckpoints() {
     return listCheckpoints();
+  }
+
+  setLLMProvider(llm: LLMProvider): void {
+    this.llm = llm;
+  }
+
+  getLLMProvider(): LLMProvider {
+    return this.llm;
   }
 }

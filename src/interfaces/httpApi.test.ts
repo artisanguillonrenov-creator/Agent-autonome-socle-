@@ -4,6 +4,7 @@ import { Agent } from "../core/agent.js";
 import { MockProvider } from "../llm/providers/mock.js";
 import { LocalHashingEmbeddingProvider } from "../llm/embeddings.js";
 import { startHttpApi } from "./httpApi.js";
+import { loadLLMConfig } from "../persistence/llmConfigStore.js";
 
 test("Jarvis Command Center API Endpoints Test", async () => {
   const agent = new Agent({
@@ -31,6 +32,7 @@ test("Jarvis Command Center API Endpoints Test", async () => {
     const status = await checkEndpoint(`${baseUrl}/api/status`);
     assert.equal(status.status, "online");
     assert.equal(status.llmProvider, "mock");
+    assert.ok(status.otaVersion);
 
     // 2. GET /api/operations
     const ops = await checkEndpoint(`${baseUrl}/api/operations`);
@@ -69,19 +71,75 @@ test("Jarvis Command Center API Endpoints Test", async () => {
     // 7. GET /api/skills
     await checkEndpoint(`${baseUrl}/api/skills`);
 
-    // 8. GET /api/models
+    // 8. GET /api/models & OpenRouter Catalog & Provider Testing & Model Selection
     const models = await checkEndpoint(`${baseUrl}/api/models`);
     assert.equal(models.activeProvider, "mock");
+    assert.ok(Array.isArray(models.providers));
+    // Verify no secrets returned
+    assert.equal(models.providers.some((p: { apiKey?: string }) => p.apiKey !== undefined), false);
 
-    // 9. GET /api/reflection
+    const openrouterCatalog = await checkEndpoint(`${baseUrl}/api/models/openrouter`);
+    assert.ok(Array.isArray(openrouterCatalog));
+
+    // Test model test endpoint
+    const testResult = await checkEndpoint(`${baseUrl}/api/models/test`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider: "mock", model: "test-mock-model" }),
+    });
+    assert.equal(testResult.ok, true);
+
+    // Test model select endpoint
+    const selectResult = await checkEndpoint(`${baseUrl}/api/models/select`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider: "mock", model: "new-mock-model" }),
+    });
+    assert.equal(selectResult.ok, true);
+    assert.equal(selectResult.activeProvider, "mock");
+
+    // Verify chat uses the updated agent model state
+    const chatRes = await checkEndpoint(`${baseUrl}/api/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "Hello Jarvis" }),
+    });
+    assert.ok(chatRes.response);
+
+    // Test model selection persistence
+    const savedConfig = loadLLMConfig();
+    assert.ok(savedConfig);
+    assert.equal(savedConfig?.provider, "mock");
+    assert.equal(savedConfig?.model, "new-mock-model");
+
+    // Test selection failure fallback
+    const invalidSelectResult = await checkEndpoint(`${baseUrl}/api/models/select`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider: "invalid_provider_name", model: "unknown" }),
+    });
+    assert.equal(invalidSelectResult.ok, false);
+    assert.ok(invalidSelectResult.error);
+    assert.equal(invalidSelectResult.activeProvider, "mock");
+
+    // 9. OTA Endpoints Test
+    const otaManifest = await checkEndpoint(`${baseUrl}/api/ota/manifest`);
+    assert.ok(otaManifest.version);
+    assert.ok(otaManifest.minimumNativeVersion);
+
+    const otaBundle = await checkEndpoint(`${baseUrl}/api/ota/bundle`);
+    assert.ok(otaBundle.files);
+    assert.ok(otaBundle.files["index.html"]);
+
+    // 10. GET /api/reflection
     await checkEndpoint(`${baseUrl}/api/reflection`);
 
-    // 10. GET /api/system & Diagnostics
+    // 11. GET /api/system & Diagnostics
     await checkEndpoint(`${baseUrl}/api/system`);
 
     await checkEndpoint(`${baseUrl}/api/system/diagnostics`, { method: "POST" });
 
-    // 11. Settings Endpoints
+    // 12. Settings Endpoints
     await checkEndpoint(`${baseUrl}/api/settings`);
 
     await checkEndpoint(`${baseUrl}/api/settings`, {
