@@ -74,6 +74,43 @@ test("l'agent intercepte CALL_SKILL web_search, exécute la recherche et synthé
   assert.equal(result.response.includes("CALL_SKILL"), false);
 });
 
+test("Test obligatoire : Interception format Nemotron / OpenRouter <tool_call> pour recherche de films au cinéma", async () => {
+  let calls = 0;
+  let receivedSearchData = false;
+
+  const nemotronProvider: LLMProvider = {
+    name: "openrouter_nemotron",
+    async complete(messages: ChatMessage[]) {
+      calls += 1;
+      if (calls === 1) {
+        // Nemotron / OpenRouter style tool call output
+        return '<tool_call>{"name": "web_search", "arguments": {"query": "films au cinema en france ce mois-ci"}}</tool_call>';
+      }
+
+      // Second pass: verify web_search results were received in messages
+      const toolMsg = messages.find((m) => m.role === "tool" && m.name === "web_search");
+      if (toolMsg && toolMsg.content) {
+        receivedSearchData = true;
+      }
+
+      return '{"action": "RESPOND", "response": "Voici les principaux films à l\'affiche au cinéma en France ce mois-ci : Film A, Film B, Film C."}';
+    },
+  };
+
+  const agent = new Agent({ llm: nemotronProvider, embeddings: new LocalHashingEmbeddingProvider() });
+  for (const skill of builtinSkills) agent.skills.register(skill);
+
+  const query = "Trouve-moi les films qui sortent au cinéma en France ce mois-ci.";
+  const result = await agent.step(query);
+
+  assert.equal(calls, 2);
+  assert.equal(receivedSearchData, true);
+  assert.equal(result.iterations, 2);
+  assert.equal(result.response.includes("<tool_call>"), false);
+  assert.equal(result.response.includes("CALL_SKILL"), false);
+  assert.match(result.response, /cinéma/i);
+});
+
 test("le prompt système contient la date actuelle et les instructions d'accès Internet", async () => {
   let capturedSystemPrompt = "";
 
