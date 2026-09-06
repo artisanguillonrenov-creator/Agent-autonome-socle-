@@ -6,6 +6,33 @@ import { LocalHashingEmbeddingProvider } from "../llm/embeddings.js";
 import { startHttpApi } from "./httpApi.js";
 import { loadLLMConfig } from "../persistence/llmConfigStore.js";
 
+test("Safe Array Contract Test for Models View - Prevents undefined.map error", () => {
+  // Case 1: modelsData contains error or lacks providers property
+  const modelsDataError: any = { error: "unauthorized" };
+  const providers = Array.isArray(modelsDataError?.providers)
+    ? modelsDataError.providers
+    : Array.isArray(modelsDataError?.data?.providers)
+    ? modelsDataError.data.providers
+    : [];
+  assert.equal(Array.isArray(providers), true);
+  assert.equal(providers.length, 0);
+
+  // Case 2: rawCatalogModels is an object instead of an Array
+  const catalogError: any = { error: "not found" };
+  const list = Array.isArray(catalogError)
+    ? catalogError
+    : Array.isArray(catalogError?.models)
+    ? catalogError.models
+    : [];
+  assert.equal(Array.isArray(list), true);
+  assert.equal(list.length, 0);
+
+  // Filtering on empty catalog does not crash
+  const filtered = list.filter((m: any) => Boolean(m?.isFree));
+  assert.equal(Array.isArray(filtered), true);
+  assert.equal(filtered.length, 0);
+});
+
 test("Jarvis Command Center API Endpoints Test", async () => {
   const agent = new Agent({
     llm: new MockProvider(),

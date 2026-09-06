@@ -457,7 +457,9 @@ async function renderOperationsView() {
   container.innerHTML = `<div class="card"><div class="card-title">Chargement des opérations...</div></div>`;
 
   try {
-    const ops = await fetchApi('/api/operations');
+    const opsData = await fetchApi('/api/operations');
+    const ops = Array.isArray(opsData) ? opsData : Array.isArray(opsData?.operations) ? opsData.operations : [];
+
     container.innerHTML = `
       <h2>Opérations Externe / Service Tasks</h2>
       <div style="display: flex; flex-direction: column; gap: 12px; margin-top: 12px;">
@@ -484,11 +486,13 @@ async function renderServicesView() {
   container.innerHTML = `<div class="card"><div class="card-title">Chargement des services...</div></div>`;
 
   try {
-    const services = await fetchApi('/api/services');
+    const servicesData = await fetchApi('/api/services');
+    const services = Array.isArray(servicesData) ? servicesData : Array.isArray(servicesData?.services) ? servicesData.services : [];
+
     container.innerHTML = `
       <h2>Registre des Services Extérieurs</h2>
       <div class="card-grid" style="margin-top: 12px;">
-        ${services.map((s) => `
+        ${services.length === 0 ? '<div class="card"><div class="card-subtext">Aucun service enregistré.</div></div>' : services.map((s) => `
           <div class="card">
             <div style="display: flex; justify-content: space-between;">
               <span class="card-title">${s.name}</span>
@@ -510,7 +514,9 @@ async function renderTasksView() {
   container.innerHTML = `<div class="card"><div class="card-title">Chargement des tâches...</div></div>`;
 
   try {
-    const tasks = await fetchApi('/api/tasks');
+    const tasksData = await fetchApi('/api/tasks');
+    const tasks = Array.isArray(tasksData) ? tasksData : Array.isArray(tasksData?.tasks) ? tasksData.tasks : [];
+
     container.innerHTML = `
       <h2>Tâches Personnelles & Plans</h2>
       <div class="card" style="margin-top: 12px;">
@@ -536,12 +542,14 @@ async function renderMemoryView() {
 
   try {
     const memory = await fetchApi('/api/memory');
+    const facts = Array.isArray(memory?.facts) ? memory.facts : [];
+
     container.innerHTML = `
       <h2>Gestion de la Mémoire</h2>
       <div class="card" style="margin-top: 12px;">
         <div class="card-title">Faits Connus</div>
         <div style="margin-top: 8px;">
-          ${memory.facts.map((f) => `<div>${f.entity}.${f.attribute} = ${f.value}</div>`).join('') || 'Aucun fait.'}
+          ${facts.length === 0 ? 'Aucun fait enregistré.' : facts.map((f) => `<div>${f.entity}.${f.attribute} = ${f.value}</div>`).join('')}
         </div>
       </div>
     `;
@@ -556,11 +564,13 @@ async function renderSkillsView() {
   container.innerHTML = `<div class="card"><div class="card-title">Chargement des skills...</div></div>`;
 
   try {
-    const skills = await fetchApi('/api/skills');
+    const skillsData = await fetchApi('/api/skills');
+    const skills = Array.isArray(skillsData) ? skillsData : Array.isArray(skillsData?.skills) ? skillsData.skills : [];
+
     container.innerHTML = `
       <h2>Compétences Internes (Skills)</h2>
       <div class="card-grid" style="margin-top: 12px;">
-        ${skills.map((s) => `
+        ${skills.length === 0 ? '<div class="card"><div class="card-subtext">Aucun skill trouvé.</div></div>' : skills.map((s) => `
           <div class="card">
             <span class="card-title" style="color: var(--accent-primary);">${s.name}</span>
             <div>${s.description}</div>
@@ -573,14 +583,23 @@ async function renderSkillsView() {
   }
 }
 
-// 8. MODÈLES IA VIEW
+// 8. MODÈLES IA VIEW (BULLETPROOF & SAFE ARRAY CONTRACTS)
 async function renderModelsView() {
   const container = document.getElementById('view-models');
-  container.innerHTML = `<div class="card"><div class="card-title">Chargement des modèles...</div></div>`;
+  container.innerHTML = `<div class="card"><div class="card-title">Chargement des fournisseurs...</div></div>`;
 
   try {
     const modelsData = await fetchApi('/api/models');
-    state.models = modelsData;
+    state.models = modelsData || {};
+
+    const activeProvider = modelsData?.activeProvider || 'non défini';
+    const activeModel = modelsData?.activeModel || 'non défini';
+
+    const providers = Array.isArray(modelsData?.providers)
+      ? modelsData.providers
+      : Array.isArray(modelsData?.data?.providers)
+      ? modelsData.data.providers
+      : [];
 
     container.innerHTML = `
       <h2>Panneau de Contrôle Modèles IA</h2>
@@ -588,11 +607,11 @@ async function renderModelsView() {
       <div class="card-grid" style="margin-top: 12px;">
         <div class="card">
           <div class="card-title">Fournisseur IA Actif</div>
-          <div id="active-provider-display" class="card-value" style="color: var(--accent-primary);">${modelsData.activeProvider}</div>
+          <div id="active-provider-display" class="card-value" style="color: var(--accent-primary);">${activeProvider}</div>
         </div>
         <div class="card">
           <div class="card-title">Modèle LLM Sélectionné</div>
-          <div id="active-model-display" class="card-value" style="font-size: 1.4rem;">${modelsData.activeModel}</div>
+          <div id="active-model-display" class="card-value" style="font-size: 1.4rem;">${activeModel}</div>
         </div>
       </div>
 
@@ -603,8 +622,8 @@ async function renderModelsView() {
           <label class="form-label">Fournisseur IA</label>
           <div style="display: flex; align-items: center; gap: 12px;">
             <select id="select-provider" class="input-field" style="flex: 1;">
-              ${modelsData.providers.map((p) => `
-                <option value="${p.id}" ${p.id === modelsData.activeProvider ? 'selected' : ''}>
+              ${providers.length === 0 ? '<option value="">Aucun fournisseur disponible</option>' : providers.map((p) => `
+                <option value="${p.id}" ${p.id === activeProvider ? 'selected' : ''}>
                   ${p.name} ${p.available ? '🟢 (Configuré)' : '🔴 (Non configuré)'}
                 </option>
               `).join('')}
@@ -615,7 +634,9 @@ async function renderModelsView() {
 
         <div class="form-group" style="margin-top: 12px;">
           <label class="form-label">Modèle à utiliser</label>
-          <select id="select-model" class="input-field"></select>
+          <select id="select-model" class="input-field">
+            <option value="">Chargement des modèles...</option>
+          </select>
         </div>
 
         <div id="openrouter-filter-container" style="display: none; margin-top: 8px;">
@@ -639,48 +660,82 @@ async function renderModelsView() {
     const freeContainer = document.getElementById('openrouter-filter-container');
 
     const updateProviderBadge = () => {
-      const selected = selectProv.value;
-      const provInfo = modelsData.providers.find((p) => p.id === selected);
+      const selected = selectProv?.value;
+      const provInfo = providers.find((p) => p && p.id === selected);
       const badge = document.getElementById('provider-status-badge');
-      if (provInfo && provInfo.available) {
-        badge.className = 'badge badge-success';
-        badge.textContent = '🟢 Configuré';
-      } else {
-        badge.className = 'badge badge-danger';
-        badge.textContent = '🔴 Non configuré';
+      if (badge) {
+        if (provInfo && provInfo.available) {
+          badge.className = 'badge badge-success';
+          badge.textContent = '🟢 Configuré';
+        } else {
+          badge.className = 'badge badge-danger';
+          badge.textContent = '🔴 Non configuré';
+        }
       }
-      freeContainer.style.display = selected === 'openrouter' ? 'block' : 'none';
+      if (freeContainer) {
+        freeContainer.style.display = selected === 'openrouter' ? 'block' : 'none';
+      }
     };
 
-    selectProv.addEventListener('change', async () => {
-      updateProviderBadge();
-      await loadModelsForSelectedProvider();
-    });
+    if (selectProv) {
+      selectProv.addEventListener('change', async () => {
+        updateProviderBadge();
+        await loadModelsForSelectedProvider();
+      });
+    }
 
-    freeCheckbox.addEventListener('change', () => {
-      renderModelDropdownOptions();
-    });
+    if (freeCheckbox) {
+      freeCheckbox.addEventListener('change', () => {
+        renderModelDropdownOptions();
+      });
+    }
 
     updateProviderBadge();
     await loadModelsForSelectedProvider();
 
-    document.getElementById('btn-test-model').addEventListener('click', testSelectedModel);
-    document.getElementById('btn-apply-model').addEventListener('click', applySelectedModel);
+    const btnTest = document.getElementById('btn-test-model');
+    const btnApply = document.getElementById('btn-apply-model');
+    if (btnTest) btnTest.addEventListener('click', testSelectedModel);
+    if (btnApply) btnApply.addEventListener('click', applySelectedModel);
   } catch (err) {
-    container.innerHTML = `<div class="card" style="border-color: var(--accent-danger);"><div class="card-title" style="color: var(--accent-danger);">${err.message}</div></div>`;
+    container.innerHTML = `
+      <div class="card" style="border-color: var(--accent-danger);">
+        <div class="card-title" style="color: var(--accent-danger);">Erreur de chargement des Modèles IA</div>
+        <div class="card-subtext">${err.message}</div>
+        <div style="margin-top: 12px;">
+          <button class="btn btn-primary btn-sm" onclick="renderModelsView()">Réessayer</button>
+        </div>
+      </div>
+    `;
   }
 }
 
 async function loadModelsForSelectedProvider() {
   const selectProv = document.getElementById('select-provider');
-  const provider = selectProv.value;
+  const selectMod = document.getElementById('select-model');
+  const provider = selectProv ? selectProv.value : '';
   const statusBox = document.getElementById('model-status-box');
+
+  if (selectMod) selectMod.innerHTML = '<option value="">Chargement des modèles...</option>';
   if (statusBox) statusBox.textContent = '';
+
+  if (!provider) {
+    state.rawCatalogModels = [];
+    renderModelDropdownOptions();
+    return;
+  }
 
   if (provider === 'openrouter') {
     if (statusBox) statusBox.innerHTML = '<span style="color: var(--text-muted); font-size: 0.85rem;">Chargement du catalogue OpenRouter...</span>';
     try {
-      state.rawCatalogModels = await fetchApi('/api/models/openrouter');
+      const response = await fetchApi('/api/models/openrouter');
+      state.rawCatalogModels = Array.isArray(response)
+        ? response
+        : Array.isArray(response?.models)
+        ? response.models
+        : Array.isArray(response?.data)
+        ? response.data
+        : [];
       if (statusBox) statusBox.textContent = '';
     } catch {
       state.rawCatalogModels = [
@@ -691,7 +746,14 @@ async function loadModelsForSelectedProvider() {
     }
   } else {
     try {
-      state.rawCatalogModels = await fetchApi(`/api/models/catalog/${provider}`);
+      const response = await fetchApi(`/api/models/catalog/${provider}`);
+      state.rawCatalogModels = Array.isArray(response)
+        ? response
+        : Array.isArray(response?.models)
+        ? response.models
+        : Array.isArray(response?.data)
+        ? response.data
+        : [];
     } catch {
       state.rawCatalogModels = [{ id: 'default', name: 'Default Model' }];
     }
@@ -706,9 +768,11 @@ function renderModelDropdownOptions() {
   const freeCheckbox = document.getElementById('filter-free-models');
   const isFreeOnly = freeCheckbox && freeCheckbox.checked;
 
-  let list = state.rawCatalogModels || [];
-  if (selectProv.value === 'openrouter' && isFreeOnly) {
-    list = list.filter((m) => m.isFree);
+  if (!selectMod) return;
+
+  let list = Array.isArray(state.rawCatalogModels) ? state.rawCatalogModels : [];
+  if (selectProv && selectProv.value === 'openrouter' && isFreeOnly) {
+    list = list.filter((m) => Boolean(m && m.isFree));
   }
 
   if (list.length === 0) {
@@ -716,11 +780,18 @@ function renderModelDropdownOptions() {
     return;
   }
 
-  selectMod.innerHTML = list.map((m) => `
-    <option value="${m.id}" ${m.id === state.models?.activeModel ? 'selected' : ''}>
-      ${m.name} ${m.isFree ? '🎁 (Gratuit)' : ''} (${m.id})
-    </option>
-  `).join('');
+  const activeModel = state.models?.activeModel || '';
+
+  selectMod.innerHTML = list.map((m) => {
+    const id = m?.id || 'unknown';
+    const name = m?.name || id;
+    const isFree = Boolean(m?.isFree);
+    return `
+      <option value="${id}" ${id === activeModel ? 'selected' : ''}>
+        ${name} ${isFree ? '🎁 (Gratuit)' : ''} (${id})
+      </option>
+    `;
+  }).join('');
 }
 
 async function testSelectedModel() {
@@ -728,12 +799,12 @@ async function testSelectedModel() {
   const selectMod = document.getElementById('select-model');
   const statusBox = document.getElementById('model-status-box');
 
-  const provider = selectProv.value;
-  const model = selectMod.value;
+  const provider = selectProv ? selectProv.value : '';
+  const model = selectMod ? selectMod.value : '';
 
   if (!model) return;
 
-  statusBox.innerHTML = '<span style="color: var(--accent-warning);">🧪 Test du modèle en cours...</span>';
+  if (statusBox) statusBox.innerHTML = '<span style="color: var(--accent-warning);">🧪 Test du modèle en cours...</span>';
 
   try {
     const res = await fetchApi('/api/models/test', {
@@ -741,13 +812,15 @@ async function testSelectedModel() {
       body: JSON.stringify({ provider, model }),
     });
 
-    if (res.ok) {
-      statusBox.innerHTML = `<div style="padding: 10px; background: rgba(16,185,129,0.15); border: 1px solid var(--accent-success); border-radius: 8px; color: var(--accent-success);">✅ ${res.message}</div>`;
-    } else {
-      statusBox.innerHTML = `<div style="padding: 10px; background: rgba(239,68,68,0.15); border: 1px solid var(--accent-danger); border-radius: 8px; color: var(--accent-danger);">❌ Modèle inaccessible : ${res.error}</div>`;
+    if (statusBox) {
+      if (res.ok) {
+        statusBox.innerHTML = `<div style="padding: 10px; background: rgba(16,185,129,0.15); border: 1px solid var(--accent-success); border-radius: 8px; color: var(--accent-success);">✅ ${res.message}</div>`;
+      } else {
+        statusBox.innerHTML = `<div style="padding: 10px; background: rgba(239,68,68,0.15); border: 1px solid var(--accent-danger); border-radius: 8px; color: var(--accent-danger);">❌ Modèle inaccessible : ${res.error}</div>`;
+      }
     }
   } catch (err) {
-    statusBox.innerHTML = `<div style="padding: 10px; background: rgba(239,68,68,0.15); border: 1px solid var(--accent-danger); border-radius: 8px; color: var(--accent-danger);">❌ Erreur de test : ${err.message}</div>`;
+    if (statusBox) statusBox.innerHTML = `<div style="padding: 10px; background: rgba(239,68,68,0.15); border: 1px solid var(--accent-danger); border-radius: 8px; color: var(--accent-danger);">❌ Erreur de test : ${err.message}</div>`;
   }
 }
 
@@ -756,12 +829,12 @@ async function applySelectedModel() {
   const selectMod = document.getElementById('select-model');
   const statusBox = document.getElementById('model-status-box');
 
-  const provider = selectProv.value;
-  const model = selectMod.value;
+  const provider = selectProv ? selectProv.value : '';
+  const model = selectMod ? selectMod.value : '';
 
   if (!model) return;
 
-  statusBox.innerHTML = '<span style="color: var(--accent-primary);">⏳ Validation et bascule du modèle en cours...</span>';
+  if (statusBox) statusBox.innerHTML = '<span style="color: var(--accent-primary);">⏳ Validation et bascule du modèle en cours...</span>';
 
   try {
     const res = await fetchApi('/api/models/select', {
@@ -770,14 +843,16 @@ async function applySelectedModel() {
     });
 
     if (res.ok) {
-      document.getElementById('active-provider-display').textContent = res.activeProvider;
-      document.getElementById('active-model-display').textContent = res.activeModel;
-      statusBox.innerHTML = `<div style="padding: 10px; background: rgba(16,185,129,0.15); border: 1px solid var(--accent-success); border-radius: 8px; color: var(--accent-success);">✅ ${res.message}</div>`;
-    } else {
+      const provDisp = document.getElementById('active-provider-display');
+      const modDisp = document.getElementById('active-model-display');
+      if (provDisp) provDisp.textContent = res.activeProvider;
+      if (modDisp) modDisp.textContent = res.activeModel;
+      if (statusBox) statusBox.innerHTML = `<div style="padding: 10px; background: rgba(16,185,129,0.15); border: 1px solid var(--accent-success); border-radius: 8px; color: var(--accent-success);">✅ ${res.message}</div>`;
+    } else if (statusBox) {
       statusBox.innerHTML = `<div style="padding: 10px; background: rgba(239,68,68,0.15); border: 1px solid var(--accent-danger); border-radius: 8px; color: var(--accent-danger);">⚠️ ${res.error}</div>`;
     }
   } catch (err) {
-    statusBox.innerHTML = `<div style="padding: 10px; background: rgba(239,68,68,0.15); border: 1px solid var(--accent-danger); border-radius: 8px; color: var(--accent-danger);">❌ Erreur : ${err.message}</div>`;
+    if (statusBox) statusBox.innerHTML = `<div style="padding: 10px; background: rgba(239,68,68,0.15); border: 1px solid var(--accent-danger); border-radius: 8px; color: var(--accent-danger);">❌ Erreur : ${err.message}</div>`;
   }
 }
 
