@@ -155,9 +155,20 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         const services = agent.serviceOrchestrator.registry.listServices();
         const ops = agent.serviceOrchestrator.store.listOperations();
 
+        let otaVersion = "1.0.0";
+        try {
+          const manifestPath = join(process.cwd(), "www", "ota-manifest.json");
+          if (existsSync(manifestPath)) {
+            const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+            otaVersion = manifest.version || "1.0.0";
+          }
+        } catch {}
+
         const statusData = {
           status: "online",
           version: "0.1.0",
+          nativeVersion: "1.0.0",
+          otaVersion,
           llmProvider: config.llm.provider,
           llmModel: config.llm.model,
           memory: {
@@ -358,7 +369,58 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         return;
       }
 
-      // 10. AI Models Control Panel Endpoints (No secrets exposed!)
+      // 10. OTA Endpoints
+      if (req.method === "GET" && pathname === "/api/ota/manifest") {
+        const manifestPath = join(process.cwd(), "www", "ota-manifest.json");
+        if (existsSync(manifestPath)) {
+          const content = readFileSync(manifestPath, "utf-8");
+          res.writeHead(200, {
+            "content-type": "application/json; charset=utf-8",
+            "access-control-allow-origin": "*",
+          });
+          res.end(content);
+          return;
+        }
+
+        // Fallback default manifest
+        sendJson(res, 200, {
+          version: "1.0.0",
+          build: 1,
+          minimumNativeVersion: "1.0.0",
+          bundleUrl: "/api/ota/bundle",
+          sha256: "",
+          releaseNotes: "Version initiale Command Center",
+          updatedAt: new Date().toISOString(),
+        });
+        return;
+      }
+
+      if (req.method === "GET" && pathname === "/api/ota/bundle") {
+        const bundlePath = join(process.cwd(), "www", "ota-bundle.json");
+        if (existsSync(bundlePath)) {
+          const content = readFileSync(bundlePath, "utf-8");
+          res.writeHead(200, {
+            "content-type": "application/json; charset=utf-8",
+            "access-control-allow-origin": "*",
+          });
+          res.end(content);
+          return;
+        }
+
+        // Dynamic fallback bundle creation
+        const filesToBundle = ["index.html", "style.css", "app.js"];
+        const filesMap: Record<string, string> = {};
+        for (const file of filesToBundle) {
+          const filePath = join(process.cwd(), "www", file);
+          if (existsSync(filePath)) {
+            filesMap[file] = readFileSync(filePath, "utf-8");
+          }
+        }
+        sendJson(res, 200, { files: filesMap });
+        return;
+      }
+
+      // 10b. AI Models Control Panel Endpoints (No secrets exposed!)
       if (req.method === "GET" && pathname === "/api/models") {
         const providers = [
           { id: "openrouter", name: "OpenRouter", available: Boolean(config.llm.openrouterApiKey) },

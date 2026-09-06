@@ -32,6 +32,7 @@ test("Jarvis Command Center API Endpoints Test", async () => {
     const status = await checkEndpoint(`${baseUrl}/api/status`);
     assert.equal(status.status, "online");
     assert.equal(status.llmProvider, "mock");
+    assert.ok(status.otaVersion);
 
     // 2. GET /api/operations
     const ops = await checkEndpoint(`${baseUrl}/api/operations`);
@@ -121,15 +122,24 @@ test("Jarvis Command Center API Endpoints Test", async () => {
     assert.ok(invalidSelectResult.error);
     assert.equal(invalidSelectResult.activeProvider, "mock");
 
-    // 9. GET /api/reflection
+    // 9. OTA Endpoints Test
+    const otaManifest = await checkEndpoint(`${baseUrl}/api/ota/manifest`);
+    assert.ok(otaManifest.version);
+    assert.ok(otaManifest.minimumNativeVersion);
+
+    const otaBundle = await checkEndpoint(`${baseUrl}/api/ota/bundle`);
+    assert.ok(otaBundle.files);
+    assert.ok(otaBundle.files["index.html"]);
+
+    // 10. GET /api/reflection
     await checkEndpoint(`${baseUrl}/api/reflection`);
 
-    // 10. GET /api/system & Diagnostics
+    // 11. GET /api/system & Diagnostics
     await checkEndpoint(`${baseUrl}/api/system`);
 
     await checkEndpoint(`${baseUrl}/api/system/diagnostics`, { method: "POST" });
 
-    // 11. Settings Endpoints
+    // 12. Settings Endpoints
     await checkEndpoint(`${baseUrl}/api/settings`);
 
     await checkEndpoint(`${baseUrl}/api/settings`, {
