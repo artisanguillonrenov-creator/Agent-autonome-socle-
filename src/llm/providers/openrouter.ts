@@ -1,5 +1,5 @@
-import type { ChatMessage } from "../../types.js";
-import type { CompletionOptions, LLMProvider } from "../provider.js";
+import type { ChatMessage, ToolCall } from "../../types.js";
+import type { CompletionOptions, LLMCompletionResult, LLMProvider } from "../provider.js";
 
 interface OpenRouterOptions {
   apiKey: string;
@@ -10,14 +10,60 @@ interface OpenRouterOptions {
  * OpenRouter expose une API compatible OpenAI mais route vers des dizaines de
  * modèles (Claude, GPT, Llama, Mistral...) avec une seule clé.
  */
+
 export class OpenRouterProvider implements LLMProvider {
   readonly name = "openrouter";
 
   constructor(private readonly opts: OpenRouterOptions) {}
 
-  async complete(messages: ChatMessage[], options: CompletionOptions = {}): Promise<string> {
+  supportsNativeTools(): boolean {
+    return true;
+  }
+
+  async complete(messages: ChatMessage[], options: CompletionOptions = {}): Promise<LLMCompletionResult> {
     if (!this.opts.apiKey) {
       throw new Error("OPENROUTER_API_KEY manquant : impossible d'appeler le fournisseur openrouter.");
+    }
+
+    const formattedMessages = messages.map((m) => {
+      if (m.role === "tool") {
+        return {
+          role: "tool",
+          tool_call_id: m.toolCallId || "call_unknown",
+          name: m.name,
+          content: m.content ?? "",
+        };
+      }
+
+      if (m.role === "assistant") {
+        const msgObj: Record<string, unknown> = {
+          role: "assistant",
+          content: m.content ?? null,
+        };
+        if (m.toolCalls && m.toolCalls.length > 0) {
+          msgObj.tool_calls = m.toolCalls;
+        }
+        return msgObj;
+      }
+
+      return {
+        role: m.role,
+        content: m.content ?? "",
+      };
+    });
+
+    const body: Record<string, unknown> = {
+      model: this.opts.model,
+      messages: formattedMessages,
+      max_tokens: options.maxTokens ?? 1024,
+      temperature: options.temperature,
+      stop: options.stopSequences,
+    };
+
+    if (options.tools && options.tools.length > 0) {
+      body.tools = options.tools;
+      body.tool_choice = options.toolChoice || "auto";
+      body.parallel_tool_calls = false;
     }
 
     const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -26,16 +72,7 @@ export class OpenRouterProvider implements LLMProvider {
         "content-type": "application/json",
         authorization: `Bearer ${this.opts.apiKey}`,
       },
-      body: JSON.stringify({
-        model: this.opts.model,
-        messages: messages.map((m) => ({
-          role: m.role === "tool" ? "user" : m.role,
-          content: m.role === "tool" ? `[Résultat de compétence: ${m.name ?? "?"}]\n${m.content}` : m.content,
-        })),
-        max_tokens: options.maxTokens ?? 1024,
-        temperature: options.temperature,
-        stop: options.stopSequences,
-      }),
+      body: JSON.stringify(body),
     });
 
     if (!res.ok) {
@@ -43,7 +80,12 @@ export class OpenRouterProvider implements LLMProvider {
     }
 
     const data = (await res.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
+      choices?: Array<{
+        message?: {
+          content?: string | null;
+          tool_calls?: ToolCall[];
+        };
+      }>;
       error?: { message?: string; code?: number } | string;
     };
 
@@ -56,11 +98,17 @@ export class OpenRouterProvider implements LLMProvider {
       throw new Error("OpenRouter API a renvoyé une réponse sans choix ('choices' manquant ou vide).");
     }
 
-    const content = data.choices[0]?.message?.content;
-    if (typeof content !== "string") {
-      throw new Error("OpenRouter API a renvoyé un contenu de message invalide.");
+    const message = data.choices[0]?.message;
+    const content = message?.content ?? null;
+    const toolCalls = Array.isArray(message?.tool_calls) && message.tool_calls.length > 0 ? message.tool_calls : undefined;
+
+    if (typeof content !== "string" && !toolCalls) {
+      throw new Error("OpenRouter API a renvoyé un contenu de message et des tool_calls invalides.");
     }
 
-    return content;
+    return {
+      content,
+      toolCalls,
+    };
   }
 }

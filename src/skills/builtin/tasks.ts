@@ -12,6 +12,15 @@ export const createTaskSkill: SkillDefinition = {
   name: "create_task",
   description: "Crée une tâche ou un rappel, avec une échéance optionnelle.",
   argsHint: '{"title": string, "due_at_iso"?: string (date ISO 8601)}',
+  parameters: {
+    type: "object",
+    properties: {
+      title: { type: "string", description: "Titre de la tâche" },
+      due_at_iso: { type: "string", description: "Date ISO 8601 optionnelle pour l'échéance" },
+    },
+    required: ["title"],
+    additionalProperties: false,
+  },
   handler: async (input) => {
     const title = String(input.title ?? "").trim();
     if (!title) return "Erreur: le champ title est requis.";
@@ -32,6 +41,13 @@ export const listTasksSkill: SkillDefinition = {
   name: "list_tasks",
   description: "Liste les tâches, éventuellement filtrées par statut (pending ou done).",
   argsHint: '{"status"?: "pending" | "done"}',
+  parameters: {
+    type: "object",
+    properties: {
+      status: { type: "string", enum: ["pending", "done"], description: "Statut optionnel pour filtrer" },
+    },
+    additionalProperties: false,
+  },
   handler: async (input) => {
     const status = input.status === "pending" || input.status === "done" ? input.status : undefined;
     const tasks = taskStore.list(status);
@@ -44,6 +60,14 @@ export const completeTaskSkill: SkillDefinition = {
   name: "complete_task",
   description: "Marque une tâche comme terminée à partir de son identifiant.",
   argsHint: '{"id": string}',
+  parameters: {
+    type: "object",
+    properties: {
+      id: { type: "string", description: "Identifiant de la tâche" },
+    },
+    required: ["id"],
+    additionalProperties: false,
+  },
   handler: async (input) => {
     const id = String(input.id ?? "").trim();
     if (!id) return "Erreur: le champ id est requis.";

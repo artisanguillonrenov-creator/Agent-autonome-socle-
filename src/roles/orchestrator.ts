@@ -27,7 +27,8 @@ export class RoleOrchestrator {
 
     for (const role of this.roles) {
       const messages: ChatMessage[] = [{ role: "system", content: role.systemPrompt }, ...transcript];
-      const response = await this.llm.complete(messages);
+      const rawResponse = await this.llm.complete(messages);
+      const response = typeof rawResponse === "string" ? rawResponse : rawResponse.content ?? "";
       outputs.push({ role: role.name, content: response });
       transcript.push({ role: "assistant", content: `[${role.name}] ${response}` });
     }

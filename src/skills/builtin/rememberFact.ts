@@ -4,6 +4,16 @@ export const rememberFactSkill: SkillDefinition = {
   name: "remember_fact",
   description: "Mémorise un fait structuré (entité, attribut, valeur) pour s'en souvenir durablement.",
   argsHint: '{"entity": string, "attribute": string, "value": string}',
+  parameters: {
+    type: "object",
+    properties: {
+      entity: { type: "string", description: "Nom de l'entité (ex: utilisateur, projet...)" },
+      attribute: { type: "string", description: "Attribut ou clé (ex: ville, role, preference...)" },
+      value: { type: "string", description: "Valeur associée" },
+    },
+    required: ["entity", "attribute", "value"],
+    additionalProperties: false,
+  },
   handler: async (input, ctx) => {
     const entity = String(input.entity ?? "").trim();
     const attribute = String(input.attribute ?? "").trim();

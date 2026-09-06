@@ -1,4 +1,4 @@
-import type { LLMProvider } from "../llm/provider.js";
+import type { LLMProvider, ToolDefinition } from "../llm/provider.js";
 import type { EmbeddingProvider } from "../llm/embeddings.js";
 import { MemoryManager } from "../memory/memoryManager.js";
 import { SkillRegistry } from "../skills/registry.js";
@@ -76,10 +76,79 @@ export class Agent {
 
       const messages: ChatMessage[] = [{ role: "system", content: systemPrompt }, ...retrieved.recentMessages];
 
-      const raw = await this.llm.complete(messages);
+      const isNativeToolSupported = Boolean(this.llm.supportsNativeTools?.());
 
-      // 1. Essayer de parser une décision structurée
-      const decision = parseCoreDecision(raw);
+      const toolDefinitions: ToolDefinition[] = relevantSkills.map((s) => ({
+        type: "function",
+        function: {
+          name: s.name,
+          description: s.description,
+          parameters: s.parameters || {
+            type: "object",
+            properties: {},
+            additionalProperties: true,
+          },
+        },
+      }));
+
+      const completionResult = await this.llm.complete(messages, {
+        tools: isNativeToolSupported && toolDefinitions.length > 0 ? toolDefinitions : undefined,
+      });
+
+      const rawText = typeof completionResult === "string" ? completionResult : completionResult.content ?? "";
+      const nativeToolCalls = typeof completionResult === "string" ? undefined : completionResult.toolCalls;
+
+      // --- NATIVE TOOL CALLING PATH (PRIORITY 1) ---
+      if (nativeToolCalls && nativeToolCalls.length > 0) {
+        console.log(`[Agent] ${nativeToolCalls.length} appel(s) de tool natif(s) intercepté(s) au tour ${iterations}.`);
+        await this.memory.recordTurn({
+          role: "assistant",
+          content: rawText || null,
+          toolCalls: nativeToolCalls,
+        });
+
+        for (const toolCall of nativeToolCalls) {
+          const skillName = toolCall.function?.name;
+          let parsedInput: Record<string, unknown> = {};
+
+          try {
+            const rawArgs = toolCall.function?.arguments || "{}";
+            const parsed = JSON.parse(rawArgs);
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+              parsedInput = parsed as Record<string, unknown>;
+            }
+          } catch (err) {
+            const errorResult = `Erreur : Arguments JSON invalides pour l'outil "${skillName}": ${(err as Error).message}`;
+            console.error(`[Agent] ${errorResult}`);
+            await this.memory.recordTurn({
+              role: "tool",
+              name: skillName,
+              toolCallId: toolCall.id || "call_unknown",
+              content: errorResult,
+            });
+            continue;
+          }
+
+          lastActionOrStep = `Appel outil natif: ${skillName}`;
+          console.log(`[Agent] Exécution de l'outil natif '${skillName}' (id: ${toolCall.id}) avec input:`, parsedInput);
+
+          const result = await this.skills.execute(skillName, parsedInput, {
+            rememberFact: (entity, attribute, value) => this.memory.facts.set(entity, attribute, value),
+          });
+
+          await this.memory.recordTurn({
+            role: "tool",
+            name: skillName,
+            toolCallId: toolCall.id || "call_unknown",
+            content: result,
+          });
+        }
+
+        continue;
+      }
+
+      // --- HISTORICAL FALLBACK PATH (PRIORITY 2) ---
+      const decision = parseCoreDecision(rawText);
 
       if (decision) {
         if (decision.action === "RESPOND") {
@@ -124,8 +193,8 @@ export class Agent {
         }
       }
 
-      // 2. Fallback de rétrocompatibilité : parseSkillCall (ex: <<SKILL ...>>)
-      const skillCall = parseSkillCall(raw);
+      // Fallback : parseSkillCall (ex: <<SKILL ...>>)
+      const skillCall = parseSkillCall(rawText);
       if (skillCall) {
         lastActionOrStep = `Appel compétence balisée: ${skillCall.name}`;
         console.log(`[Agent] Décision balisée <<SKILL>> interceptée -> Skill: '${skillCall.name}'`);
@@ -137,8 +206,8 @@ export class Agent {
         continue;
       }
 
-      // 3. Sinon réponse texte normale
-      finalResponse = this.cleanRawTextResponse(raw);
+      // Sinon réponse texte normale
+      finalResponse = this.cleanRawTextResponse(rawText);
       await this.memory.recordTurn({ role: "assistant", content: finalResponse });
       break;
     }
@@ -183,6 +252,18 @@ export class Agent {
       day: "numeric",
     });
     const isoDate = now.toISOString().split("T")[0];
+
+    const isNativeToolSupported = Boolean(this.llm.supportsNativeTools?.());
+
+    if (isNativeToolSupported) {
+      return [
+        `Tu es Jarvis Command Center V1. Tu réponds à l'utilisateur de manière naturelle, fluide et précise en français.`,
+        `Date et heure actuelles : ${dateStr} (${isoDate}).`,
+        "ACCÈS INTERNET : Tu possèdes un accès Internet fonctionnel grâce à la compétence/outil 'web_search'.",
+        "RÈGLE IMPÉRATIVE : Lorsque la demande nécessite des informations récentes, actuelles ou externes (ex: météo, actualités, événements, films au cinéma 'ce mois-ci' ou 'cette année'), tu DOIS obligatoirement utiliser l'outil 'web_search'. Ne dis JAMAIS que tu n'as pas accès à Internet.",
+        "RÈGLE NATIVE : Utilise les outils natifs mis à ta disposition. Ne rédige AUCUNE structure technique JSON ou balise XML dans le texte utilisateur.",
+      ].join("\n");
+    }
 
     const skillsText = relevantSkills.length
       ? relevantSkills.map((s) => `- ${s.name}: ${s.description} (args: ${s.argsHint})`).join("\n")

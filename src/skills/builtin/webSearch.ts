@@ -7,6 +7,17 @@ export const webSearchSkill: SkillDefinition = {
   name: "web_search",
   description: "Recherche sur le web des informations récentes ou externes (actualités, météo, faits...).",
   argsHint: '{"query": string}',
+  parameters: {
+    type: "object",
+    properties: {
+      query: {
+        type: "string",
+        description: "Requête à rechercher sur Internet",
+      },
+    },
+    required: ["query"],
+    additionalProperties: false,
+  },
   handler: async (input) => {
     const query = String(input.query ?? "").trim();
     if (!query) return "Erreur: le champ query est requis.";

@@ -10,6 +10,14 @@ export const executeCodeSkill: SkillDefinition = {
     : "Exécution de code — désactivée. Active ENABLE_CODE_EXECUTION=true dans .env pour l'utiliser " +
       "(capacité sensible en sécurité).",
   argsHint: '{"code": string}',
+  parameters: {
+    type: "object",
+    properties: {
+      code: { type: "string", description: "Code JavaScript Node.js à exécuter" },
+    },
+    required: ["code"],
+    additionalProperties: false,
+  },
   handler: async (input) => {
     if (!config.codeExecution.enabled) {
       return "Exécution de code désactivée. Active ENABLE_CODE_EXECUTION=true dans .env pour l'utiliser.";
