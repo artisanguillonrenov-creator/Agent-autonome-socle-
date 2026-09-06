@@ -82,46 +82,64 @@ export interface ServiceEvent {
   payload: Record<string, unknown>;
 }
 
+function validateAndMapDecision(parsed: any): CoreDecision | null {
+  if (parsed && typeof parsed === "object" && typeof parsed.action === "string") {
+    if (parsed.action === "RESPOND" && typeof parsed.response === "string") {
+      return { action: "RESPOND", response: parsed.response };
+    }
+    if (parsed.action === "CALL_SKILL" && typeof parsed.skill === "string") {
+      return {
+        action: "CALL_SKILL",
+        skill: parsed.skill,
+        input: (typeof parsed.input === "object" && parsed.input !== null) ? parsed.input as Record<string, unknown> : {},
+      };
+    }
+    if (parsed.action === "DISPATCH_CAPABILITY" && typeof parsed.capability === "string" && typeof parsed.objective === "string") {
+      return {
+        action: "DISPATCH_CAPABILITY",
+        capability: parsed.capability,
+        objective: parsed.objective,
+        context: parsed.context ?? {},
+        constraints: Array.isArray(parsed.constraints) ? parsed.constraints : [],
+        priority: parsed.priority ?? "medium",
+      };
+    }
+  }
+  return null;
+}
+
 /**
  * Validation et parsing robuste d'une décision produite par le LLM
  */
 export function parseCoreDecision(rawText: string): CoreDecision | null {
   const trimmed = rawText.trim();
 
-  // 1. Tenter le parsing direct JSON (si le LLM renvoie le JSON pur ou entouré de ```json ... ```)
+  // 1. Direct JSON or markdown block
   let cleanJsonStr = trimmed;
-  if (cleanJsonStr.startsWith("```")) {
-    cleanJsonStr = cleanJsonStr.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "").trim();
+  if (cleanJsonStr.includes("```")) {
+    const match = cleanJsonStr.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+    if (match) cleanJsonStr = match[1].trim();
   }
 
   try {
     const parsed = JSON.parse(cleanJsonStr);
-    if (parsed && typeof parsed === "object" && typeof parsed.action === "string") {
-      if (parsed.action === "RESPOND" && typeof parsed.response === "string") {
-        return { action: "RESPOND", response: parsed.response };
-      }
-      if (parsed.action === "CALL_SKILL" && typeof parsed.skill === "string") {
-        return {
-          action: "CALL_SKILL",
-          skill: parsed.skill,
-          input: (typeof parsed.input === "object" && parsed.input !== null) ? parsed.input as Record<string, unknown> : {},
-        };
-      }
-      if (parsed.action === "DISPATCH_CAPABILITY" && typeof parsed.capability === "string" && typeof parsed.objective === "string") {
-        return {
-          action: "DISPATCH_CAPABILITY",
-          capability: parsed.capability,
-          objective: parsed.objective,
-          context: parsed.context ?? {},
-          constraints: Array.isArray(parsed.constraints) ? parsed.constraints : [],
-          priority: parsed.priority ?? "medium",
-        };
-      }
-    }
+    const decision = validateAndMapDecision(parsed);
+    if (decision) return decision;
   } catch {
-    // Si la chaîne n'est pas un JSON valide, on continuera
+    // Continue
   }
 
-  // Si non trouvé ou invalide, retourner null pour permettre les fallbacks
+  // 2. Embedded JSON extraction
+  const jsonMatch = trimmed.match(/\{[\s\S]*?"action"\s*:\s*"(?:RESPOND|CALL_SKILL|DISPATCH_CAPABILITY)"[\s\S]*?\}/);
+  if (jsonMatch) {
+    try {
+      const parsed = JSON.parse(jsonMatch[0]);
+      const decision = validateAndMapDecision(parsed);
+      if (decision) return decision;
+    } catch {
+      // Continue
+    }
+  }
+
   return null;
 }
