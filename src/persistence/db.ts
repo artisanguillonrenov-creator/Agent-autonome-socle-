@@ -61,6 +61,27 @@ export function getDb(): Database.Database {
       due_at INTEGER,
       created_at INTEGER NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS service_operations (
+      task_id TEXT PRIMARY KEY,
+      trace_id TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      objective TEXT NOT NULL,
+      capability TEXT NOT NULL,
+      selected_service TEXT NOT NULL,
+      status TEXT NOT NULL,
+      result TEXT,
+      error TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS processed_service_events (
+      event_id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL,
+      processed_at INTEGER NOT NULL
+    );
   `);
 
   instance = db;

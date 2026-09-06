@@ -1,0 +1,217 @@
+import { getDb } from "../persistence/db.js";
+import type { OperationStatus, ServiceEvent } from "./contract.js";
+
+export interface ServiceOperation {
+  taskId: string;
+  traceId: string;
+  idempotencyKey: string;
+  objective: string;
+  capability: string;
+  selectedService: string;
+  status: OperationStatus;
+  result?: string;
+  error?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export class OperationStore {
+  createOperation(op: Omit<ServiceOperation, "createdAt" | "updatedAt">): ServiceOperation {
+    const db = getDb();
+    const now = Date.now();
+    const fullOp: ServiceOperation = {
+      ...op,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    db.prepare(`
+      INSERT INTO service_operations (
+        task_id, trace_id, idempotency_key, objective, capability, selected_service, status, result, error, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      fullOp.taskId,
+      fullOp.traceId,
+      fullOp.idempotencyKey,
+      fullOp.objective,
+      fullOp.capability,
+      fullOp.selectedService,
+      fullOp.status,
+      fullOp.result ?? null,
+      fullOp.error ?? null,
+      fullOp.createdAt,
+      fullOp.updatedAt,
+    );
+
+    return fullOp;
+  }
+
+  updateStatus(taskId: string, status: OperationStatus, result?: string, error?: string): void {
+    const db = getDb();
+    const now = Date.now();
+
+    db.prepare(`
+      UPDATE service_operations
+      SET status = ?, result = COALESCE(?, result), error = COALESCE(?, error), updated_at = ?
+      WHERE task_id = ?
+    `).run(status, result ?? null, error ?? null, now, taskId);
+  }
+
+  getOperation(taskId: string): ServiceOperation | null {
+    const db = getDb();
+    const row = db.prepare("SELECT * FROM service_operations WHERE task_id = ?").get(taskId) as
+      | {
+          task_id: string;
+          trace_id: string;
+          idempotency_key: string;
+          objective: string;
+          capability: string;
+          selected_service: string;
+          status: string;
+          result: string | null;
+          error: string | null;
+          created_at: number;
+          updated_at: number;
+        }
+      | undefined;
+
+    if (!row) return null;
+
+    return {
+      taskId: row.task_id,
+      traceId: row.trace_id,
+      idempotencyKey: row.idempotency_key,
+      objective: row.objective,
+      capability: row.capability,
+      selectedService: row.selected_service,
+      status: row.status as OperationStatus,
+      result: row.result ?? undefined,
+      error: row.error ?? undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  getByIdempotencyKey(idempotencyKey: string): ServiceOperation | null {
+    const db = getDb();
+    const row = db.prepare("SELECT * FROM service_operations WHERE idempotency_key = ?").get(idempotencyKey) as
+      | {
+          task_id: string;
+          trace_id: string;
+          idempotency_key: string;
+          objective: string;
+          capability: string;
+          selected_service: string;
+          status: string;
+          result: string | null;
+          error: string | null;
+          created_at: number;
+          updated_at: number;
+        }
+      | undefined;
+
+    if (!row) return null;
+
+    return {
+      taskId: row.task_id,
+      traceId: row.trace_id,
+      idempotencyKey: row.idempotency_key,
+      objective: row.objective,
+      capability: row.capability,
+      selectedService: row.selected_service,
+      status: row.status as OperationStatus,
+      result: row.result ?? undefined,
+      error: row.error ?? undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  listOperations(): ServiceOperation[] {
+    const db = getDb();
+    const rows = db.prepare("SELECT * FROM service_operations ORDER BY created_at DESC").all() as Array<{
+      task_id: string;
+      trace_id: string;
+      idempotency_key: string;
+      objective: string;
+      capability: string;
+      selected_service: string;
+      status: string;
+      result: string | null;
+      error: string | null;
+      created_at: number;
+      updated_at: number;
+    }>;
+
+    return rows.map((row) => ({
+      taskId: row.task_id,
+      traceId: row.trace_id,
+      idempotencyKey: row.idempotency_key,
+      objective: row.objective,
+      capability: row.capability,
+      selectedService: row.selected_service,
+      status: row.status as OperationStatus,
+      result: row.result ?? undefined,
+      error: row.error ?? undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  processEvent(event: ServiceEvent): { duplicate: boolean; applied: boolean } {
+    const db = getDb();
+
+    // Check if event was already processed (event_id deduplication)
+    const existing = db.prepare("SELECT event_id FROM processed_service_events WHERE event_id = ?").get(event.event_id);
+    if (existing) {
+      return { duplicate: true, applied: false };
+    }
+
+    // Record processed event
+    db.prepare(`
+      INSERT INTO processed_service_events (event_id, task_id, sequence, processed_at)
+      VALUES (?, ?, ?, ?)
+    `).run(event.event_id, event.task_id, event.sequence, Date.now());
+
+    // Map event type to operation status
+    let status: OperationStatus | null = null;
+    let result: string | undefined;
+    let error: string | undefined;
+
+    switch (event.type) {
+      case "TASK_ACCEPTED":
+      case "TASK_PROGRESS":
+        status = "RUNNING";
+        if (event.payload?.message) {
+          result = String(event.payload.message);
+        }
+        break;
+      case "TASK_REJECTED":
+        status = "REJECTED";
+        error = event.payload?.reason ? String(event.payload.reason) : "Tâche rejetée par le service";
+        break;
+      case "NEEDS_INPUT":
+        status = "WAITING_INPUT";
+        result = event.payload?.prompt ? String(event.payload.prompt) : "Information requise par le service";
+        break;
+      case "NEEDS_PERMISSION":
+        status = "WAITING_PERMISSION";
+        result = event.payload?.permission ? String(event.payload.permission) : "Autorisation requise par le service";
+        break;
+      case "TASK_COMPLETED":
+        status = "COMPLETED";
+        result = JSON.stringify(event.payload ?? {});
+        break;
+      case "TASK_FAILED":
+        status = "FAILED";
+        error = event.payload?.error ? String(event.payload.error) : "Erreur survenue lors de l'exécution de la tâche";
+        break;
+    }
+
+    if (status) {
+      this.updateStatus(event.task_id, status, result, error);
+    }
+
+    return { duplicate: false, applied: true };
+  }
+}

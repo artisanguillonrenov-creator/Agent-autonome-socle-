@@ -1,6 +1,6 @@
 import "dotenv/config";
 
-export type LLMProviderName = "anthropic" | "openai" | "openrouter" | "ollama" | "mock";
+export type LLMProviderName = "anthropic" | "openai" | "openrouter" | "ollama" | "infermatic" | "mock";
 export type EmbeddingProviderName = "local" | "openai" | "voyage";
 export type WebSearchProviderName = "brave" | "duckduckgo" | "none";
 
@@ -17,6 +17,8 @@ export const config = {
     openaiApiKey: process.env.OPENAI_API_KEY || "",
     openrouterApiKey: process.env.OPENROUTER_API_KEY || "",
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL || "http://localhost:11434",
+    infermaticApiKey: process.env.INFERMATIC_API_KEY || "",
+    infermaticBaseUrl: process.env.INFERMATIC_BASE_URL || "https://api.infermatic.ai/v1",
   },
   embeddings: {
     provider: (process.env.EMBEDDING_PROVIDER as EmbeddingProviderName) || "local",
