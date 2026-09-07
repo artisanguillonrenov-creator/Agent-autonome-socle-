@@ -1,5 +1,4 @@
-// README.md : la version V2 non censurée avec recherche internet Tavily et Software Factory V1 est active.
-
+// Version V2 non censurée avec recherche internet Tavily et Software Factory V1 active.
 import { createLLMProvider } from "./llm/providers/index.js";
 import { createEmbeddingProvider } from "./llm/embeddingFactory.js";
 import { Agent } from "./core/agent.js";
