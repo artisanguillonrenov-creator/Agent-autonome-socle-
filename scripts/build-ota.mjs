@@ -29,7 +29,7 @@ const sha256 = createHash("sha256").update(bundlePayload).digest("hex");
 
 // 4. Create Manifest
 const packageJson = JSON.parse(readFileSync(join(rootDir, "package.json"), "utf-8"));
-const otaVersion = process.env.OTA_VERSION || "1.0.1";
+const otaVersion = process.env.OTA_VERSION || "1.1.0";
 const minNativeVersion = process.env.MIN_NATIVE_VERSION || "1.0.0";
 
 const manifest = {
