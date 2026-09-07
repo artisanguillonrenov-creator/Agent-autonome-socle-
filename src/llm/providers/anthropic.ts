@@ -1,5 +1,5 @@
 import type { ChatMessage } from "../../types.js";
-import type { CompletionOptions, LLMProvider } from "../provider.js";
+import type { CompletionOptions, LLMCompletionResult, LLMProvider } from "../provider.js";
 
 interface AnthropicOptions {
   apiKey: string;
@@ -12,20 +12,20 @@ export class AnthropicProvider implements LLMProvider {
 
   constructor(private readonly opts: AnthropicOptions) {}
 
-  async complete(messages: ChatMessage[], options: CompletionOptions = {}): Promise<string> {
+  async complete(messages: ChatMessage[], options: CompletionOptions = {}): Promise<LLMCompletionResult> {
     if (!this.opts.apiKey) {
       throw new Error("ANTHROPIC_API_KEY manquant : impossible d'appeler le fournisseur anthropic.");
     }
 
     const system = messages
       .filter((m) => m.role === "system")
-      .map((m) => m.content)
+      .map((m) => m.content ?? "")
       .join("\n\n");
     const rest = messages
       .filter((m) => m.role !== "system")
       .map((m) => ({
         role: m.role === "assistant" ? "assistant" : "user",
-        content: m.role === "tool" ? `[Résultat de compétence: ${m.name ?? "?"}]\n${m.content}` : m.content,
+        content: m.content ?? "",
       }));
 
     const res = await fetch("https://api.anthropic.com/v1/messages", {
@@ -49,9 +49,11 @@ export class AnthropicProvider implements LLMProvider {
       throw new Error(`Anthropic API ${res.status}: ${await res.text()}`);
     }
     const data = (await res.json()) as { content: Array<{ type: string; text?: string }> };
-    return data.content
+    const content = data.content
       .filter((block) => block.type === "text")
       .map((block) => block.text ?? "")
       .join("");
+
+    return { content, toolCalls: undefined };
   }
 }

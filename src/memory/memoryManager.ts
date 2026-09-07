@@ -30,7 +30,7 @@ export class MemoryManager {
 
   async recordTurn(message: ChatMessage): Promise<void> {
     this.working.add(message);
-    if (message.content.trim().length > 0) {
+    if (typeof message.content === "string" && message.content.trim().length > 0) {
       await this.vector.add(`${message.role}: ${message.content}`, "episodic");
     }
   }

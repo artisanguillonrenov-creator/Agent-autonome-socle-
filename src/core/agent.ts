@@ -1,4 +1,4 @@
-import type { LLMProvider } from "../llm/provider.js";
+import type { LLMProvider, ToolDefinition } from "../llm/provider.js";
 import type { EmbeddingProvider } from "../llm/embeddings.js";
 import { MemoryManager } from "../memory/memoryManager.js";
 import { SkillRegistry } from "../skills/registry.js";
@@ -6,9 +6,8 @@ import { Planner } from "../planning/planner.js";
 import { ReflectionEngine } from "../reflection/reflectionEngine.js";
 import { ContextBudgetManager } from "../context/contextBudgetManager.js";
 import { saveCheckpoint, loadCheckpoint, listCheckpoints } from "../persistence/checkpoint.js";
-import { parseSkillCall } from "./skillCall.js";
 import { ServiceOrchestrator } from "../orchestration/serviceOrchestrator.js";
-import { parseCoreDecision } from "../orchestration/contract.js";
+import { builtinSkills } from "../skills/builtin/index.js";
 import { config } from "../config.js";
 import type { AgentStepResult, ChatMessage, SkillDefinition } from "../types.js";
 
@@ -22,7 +21,7 @@ export interface AgentOptions {
 }
 
 /**
- * Brique 1 : la boucle agent centrale.
+ * Brique 1 : la boucle agent centrale fonctionnant 100% avec Tool Calling natif.
  */
 export class Agent {
   readonly memory: MemoryManager;
@@ -48,6 +47,10 @@ export class Agent {
     this.contextBudget = new ContextBudgetManager(opts.contextTokenBudget ?? config.context.tokenBudget);
     this.maxIterations = opts.maxIterations ?? config.agent.maxIterations;
     this.serviceOrchestrator = opts.orchestrator ?? new ServiceOrchestrator();
+
+    for (const skill of builtinSkills) {
+      this.skills.register(skill);
+    }
   }
 
   async step(userInput: string): Promise<AgentStepResult> {
@@ -55,7 +58,6 @@ export class Agent {
 
     let iterations = 0;
     let finalResponse = "";
-
     let lastActionOrStep = "Initialisation du cycle";
 
     while (iterations < this.maxIterations) {
@@ -76,69 +78,78 @@ export class Agent {
 
       const messages: ChatMessage[] = [{ role: "system", content: systemPrompt }, ...retrieved.recentMessages];
 
-      const raw = await this.llm.complete(messages);
+      const toolDefinitions: ToolDefinition[] = relevantSkills.map((s) => ({
+        type: "function",
+        function: {
+          name: s.name,
+          description: s.description,
+          parameters: s.parameters || {
+            type: "object",
+            properties: {},
+            additionalProperties: true,
+          },
+        },
+      }));
 
-      // 1. Essayer de parser une décision structurée
-      const decision = parseCoreDecision(raw);
+      const completionResult = await this.llm.complete(messages, {
+        tools: toolDefinitions.length > 0 ? toolDefinitions : undefined,
+      });
 
-      if (decision) {
-        if (decision.action === "RESPOND") {
-          console.log(`[Agent] Décision RESPOND reçue au tour ${iterations}.`);
-          finalResponse = decision.response;
-          await this.memory.recordTurn({ role: "assistant", content: finalResponse });
-          break;
-        }
+      const rawText = completionResult.content ?? "";
+      const nativeToolCalls = completionResult.toolCalls;
 
-        if (decision.action === "CALL_SKILL") {
-          lastActionOrStep = `Appel compétence: ${decision.skill}`;
-          console.log(`[Agent] Décision CALL_SKILL interceptée -> Skill: '${decision.skill}', Input:`, decision.input);
+      // --- NATIVE TOOL CALLING PATH ---
+      if (nativeToolCalls && nativeToolCalls.length > 0) {
+        console.log(`[Agent] ${nativeToolCalls.length} appel(s) de tool natif(s) intercepté(s) au tour ${iterations}.`);
+        await this.memory.recordTurn({
+          role: "assistant",
+          content: rawText || null,
+          toolCalls: nativeToolCalls,
+        });
 
-          const result = await this.skills.execute(decision.skill, decision.input, {
-            rememberFact: (entity, attribute, value) => this.memory.facts.set(entity, attribute, value),
-          });
+        for (const toolCall of nativeToolCalls) {
+          const skillName = toolCall.function?.name;
+          let parsedInput: Record<string, unknown> = {};
 
-          console.log(`[Agent] Skill '${decision.skill}' exécuté. Résultat (${result.length} chars). Réinjection dans la mémoire.`);
-          await this.memory.recordTurn({ role: "tool", name: decision.skill, content: result });
-          continue;
-        }
-
-        if (decision.action === "DISPATCH_CAPABILITY") {
-          lastActionOrStep = `Délégation de capacité externe: ${decision.capability} (${decision.objective})`;
-          console.log(`[Agent] Décision DISPATCH_CAPABILITY -> Capacité: '${decision.capability}'`);
-
-          const orchResult = await this.serviceOrchestrator.dispatchCapability(decision);
-
-          let outcomeMsg = "";
-          if (orchResult.status === "COMPLETED") {
-            outcomeMsg = `[Service ${orchResult.selectedService}] Résultat de la capacité '${decision.capability}': ${orchResult.result ?? "Tâche terminée avec succès."}`;
-          } else if (orchResult.status === "FAILED") {
-            outcomeMsg = `[Service ${orchResult.selectedService}] Échec de la capacité '${decision.capability}': ${orchResult.error ?? "Erreur inconnue"}`;
-          } else if (orchResult.status === "REJECTED") {
-            outcomeMsg = `[Service ${orchResult.selectedService}] Capacité '${decision.capability}' rejetée: ${orchResult.error ?? "Rejeté par le service."}`;
-          } else {
-            outcomeMsg = `[Service ${orchResult.selectedService}] Capacité '${decision.capability}' status=${orchResult.status}: ${orchResult.result || orchResult.error || "En cours"}`;
+          try {
+            const rawArgs = toolCall.function?.arguments || "{}";
+            const parsed = JSON.parse(rawArgs);
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+              parsedInput = parsed as Record<string, unknown>;
+            }
+          } catch (err) {
+            const errorResult = `Erreur : Arguments JSON invalides pour l'outil "${skillName}": ${(err as Error).message}`;
+            console.error(`[Agent] ${errorResult}`);
+            await this.memory.recordTurn({
+              role: "tool",
+              name: skillName,
+              toolCallId: toolCall.id || "call_unknown",
+              content: errorResult,
+            });
+            continue;
           }
 
-          await this.memory.recordTurn({ role: "tool", name: `dispatch_${decision.capability}`, content: outcomeMsg });
-          continue;
+          lastActionOrStep = `Appel outil natif: ${skillName}`;
+          console.log(`[Agent] Exécution de l'outil natif '${skillName}' (id: ${toolCall.id}) avec input:`, parsedInput);
+
+          const result = await this.skills.execute(skillName, parsedInput, {
+            rememberFact: (entity, attribute, value) => this.memory.facts.set(entity, attribute, value),
+            serviceOrchestrator: this.serviceOrchestrator,
+          });
+
+          await this.memory.recordTurn({
+            role: "tool",
+            name: skillName,
+            toolCallId: toolCall.id || "call_unknown",
+            content: result,
+          });
         }
-      }
 
-      // 2. Fallback de rétrocompatibilité : parseSkillCall (ex: <<SKILL ...>>)
-      const skillCall = parseSkillCall(raw);
-      if (skillCall) {
-        lastActionOrStep = `Appel compétence balisée: ${skillCall.name}`;
-        console.log(`[Agent] Décision balisée <<SKILL>> interceptée -> Skill: '${skillCall.name}'`);
-
-        const result = await this.skills.execute(skillCall.name, skillCall.input, {
-          rememberFact: (entity, attribute, value) => this.memory.facts.set(entity, attribute, value),
-        });
-        await this.memory.recordTurn({ role: "tool", name: skillCall.name, content: result });
         continue;
       }
 
-      // 3. Sinon réponse texte normale
-      finalResponse = this.cleanRawTextResponse(raw);
+      // --- NATURAL USER RESPONSE ---
+      finalResponse = rawText.trim() || "Je suis à votre disposition.";
       await this.memory.recordTurn({ role: "assistant", content: finalResponse });
       break;
     }
@@ -156,24 +167,6 @@ export class Agent {
     };
   }
 
-  private cleanRawTextResponse(raw: string): string {
-    let clean = raw.trim();
-    // Strip raw tool call tags, JSON action blobs, or function call markup if model leaked them
-    clean = clean.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "").trim();
-    clean = clean.replace(/<function_call>[\s\S]*?<\/function_call>/gi, "").trim();
-    clean = clean.replace(/<<SKILL[\s\S]*?<\/SKILL>>/gi, "").trim();
-    clean = clean.replace(/CALL_SKILL\s*:\s*[a-z_]+[\s\S]*/gi, "").trim();
-
-    if (clean.startsWith("```json") && clean.endsWith("```")) {
-      try {
-        const parsed = JSON.parse(clean.replace(/^```json\n?/, "").replace(/\n?```$/, "").trim());
-        if (parsed?.response) return parsed.response;
-      } catch {}
-    }
-
-    return clean || "Je suis à votre disposition.";
-  }
-
   private buildInstructions(relevantSkills: SkillDefinition[]): string {
     const now = new Date();
     const dateStr = now.toLocaleDateString("fr-FR", {
@@ -184,33 +177,13 @@ export class Agent {
     });
     const isoDate = now.toISOString().split("T")[0];
 
-    const skillsText = relevantSkills.length
-      ? relevantSkills.map((s) => `- ${s.name}: ${s.description} (args: ${s.argsHint})`).join("\n")
-      : "(aucune compétence jugée pertinente pour cette requête)";
-
     return [
+      `Tu es Jarvis Command Center V1, un assistant autonomisé. Tu réponds de manière fluide, naturelle et précise en français.`,
       `Date et heure actuelles : ${dateStr} (${isoDate}).`,
-      "ACCÈS INTERNET : Jarvis possède un accès Internet fonctionnel grâce à la compétence 'web_search'.",
-      "RÈGLE IMPÉRATIVE : Lorsque la demande de l'utilisateur nécessite des informations récentes, actuelles ou externes (ex: météo, actualités, films au cinéma 'ce mois-ci' ou 'cette année'), tu DOIS obligatoirement appeler 'web_search'. Ne dis JAMAIS que tu n'as pas accès à Internet.",
-      "",
-      "Tu es Jarvis Command Center V1. Tu peux décider entre 3 types d'actions :",
-      "",
-      '1. RESPOND : Répondre directement à l\'utilisateur en JSON :',
-      '{"action": "RESPOND", "response": "ton texte de réponse rédigé en français"}',
-      "",
-      '2. CALL_SKILL : Exécuter une compétence interne (ex: web_search) :',
-      '{"action": "CALL_SKILL", "skill": "nom_skill", "input": {...}}',
-      "",
-      '3. DISPATCH_CAPABILITY : Demander une capacité exécutée par un service externe (ex: développement de logiciel) :',
-      '{"action": "DISPATCH_CAPABILITY", "capability": "software_development", "objective": "description de ce qu\'il faut réaliser", "context": {}, "constraints": []}',
-      "",
-      "RÈGLE : Si l'utilisateur demande la création ou le développement d'une application/logiciel, utilise DISPATCH_CAPABILITY avec la capacité 'software_development'.",
-      "",
-      "Pour compatibilité, tu peux aussi répondre en texte libre ou utiliser la balise :",
-      '<<SKILL name="nom_skill">{"arg": "valeur"}</SKILL>>',
-      "",
-      "Compétences internes disponibles :",
-      skillsText,
+      "ACCÈS INTERNET : Tu possèdes un accès Internet fonctionnel grâce à l'outil 'web_search'.",
+      "RÈGLE IMPÉRATIVE : Lorsque la demande de l'utilisateur nécessite des informations récentes, actuelles ou externes (ex: météo, actualités, événements, films au cinéma 'ce mois-ci' ou 'cette année'), tu DOIS obligatoirement appeler l'outil 'web_search'. Ne dis JAMAIS que tu n'as pas accès à Internet.",
+      "DÉLÉGATION EXTERNE : Lorsque la demande concerne la création/développement d'un logiciel ou d'une application, utilise l'outil 'dispatch_capability' avec la capacité 'software_development'.",
+      "RÈGLE DE FORMAT : Utilise les outils natifs mis à ta disposition. Ne rédiges JAMAIS de structures techniques JSON ou balises XML dans le texte adressé à l'utilisateur.",
     ].join("\n");
   }
 

@@ -1,5 +1,5 @@
 import type { ChatMessage } from "../../types.js";
-import type { CompletionOptions, LLMProvider } from "../provider.js";
+import type { CompletionOptions, LLMCompletionResult, LLMProvider } from "../provider.js";
 
 interface OllamaOptions {
   baseUrl: string;
@@ -12,15 +12,15 @@ export class OllamaProvider implements LLMProvider {
 
   constructor(private readonly opts: OllamaOptions) {}
 
-  async complete(messages: ChatMessage[], options: CompletionOptions = {}): Promise<string> {
+  async complete(messages: ChatMessage[], options: CompletionOptions = {}): Promise<LLMCompletionResult> {
     const res = await fetch(`${this.opts.baseUrl}/api/chat`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         model: this.opts.model,
         messages: messages.map((m) => ({
-          role: m.role === "tool" ? "user" : m.role,
-          content: m.role === "tool" ? `[Résultat de compétence: ${m.name ?? "?"}]\n${m.content}` : m.content,
+          role: m.role,
+          content: m.content ?? "",
         })),
         stream: false,
         options: {
@@ -35,6 +35,9 @@ export class OllamaProvider implements LLMProvider {
       throw new Error(`Ollama API ${res.status}: ${await res.text()}`);
     }
     const data = (await res.json()) as { message: { content: string } };
-    return data.message.content;
+    return {
+      content: data.message.content,
+      toolCalls: undefined,
+    };
   }
 }

@@ -11,44 +11,76 @@ import { ServiceAdapter } from "./serviceAdapter.js";
 import { OperationStore } from "./operationStore.js";
 import { getDb, closeDb } from "../persistence/db.js";
 
+import type { LLMCompletionResult } from "../llm/provider.js";
+
 class StructuredMockLLM implements LLMProvider {
   readonly name = "structured-mock";
   public mode: "SUCCESS" | "UNKNOWN_CAPABILITY" | "MAX_ITERATIONS" = "SUCCESS";
 
-  async complete(messages: ChatMessage[]): Promise<string> {
-    const lastMsg = messages[messages.length - 1]?.content ?? "";
+  supportsNativeTools(): boolean {
+    return true;
+  }
+
+  async complete(messages: ChatMessage[]): Promise<LLMCompletionResult> {
+    const toolMsg = [...messages].reverse().find((m) => m.role === "tool");
 
     if (this.mode === "MAX_ITERATIONS") {
-      return JSON.stringify({
-        action: "CALL_SKILL",
-        skill: "unknown_skill",
-        input: {},
-      });
+      return {
+        content: null,
+        toolCalls: [
+          {
+            id: "call_loop_1",
+            type: "function",
+            function: { name: "unknown_skill", arguments: "{}" },
+          },
+        ],
+      };
     }
 
-    if (lastMsg.includes("Résultat de la capacité") || lastMsg.includes("status=")) {
-      return JSON.stringify({
-        action: "RESPOND",
-        response: "L'application de prise de notes a été créée avec succès par la Software Factory.",
-      });
+    if (toolMsg) {
+      return {
+        content: "L'application de prise de notes a été créée avec succès par la Software Factory.",
+      };
     }
 
     if (this.mode === "UNKNOWN_CAPABILITY") {
-      return JSON.stringify({
-        action: "DISPATCH_CAPABILITY",
-        capability: "non_existent_capability",
-        objective: "Faire quelque chose d'impossible",
-      });
+      return {
+        content: null,
+        toolCalls: [
+          {
+            id: "call_dispatch_err",
+            type: "function",
+            function: {
+              name: "dispatch_capability",
+              arguments: JSON.stringify({
+                capability: "non_existent_capability",
+                objective: "Faire quelque chose d'impossible",
+              }),
+            },
+          },
+        ],
+      };
     }
 
     // Default DISPATCH_CAPABILITY
-    return JSON.stringify({
-      action: "DISPATCH_CAPABILITY",
-      capability: "software_development",
-      objective: "Crée-moi une petite application de prise de notes.",
-      context: { framework: "react" },
-      constraints: ["clean code"],
-    });
+    return {
+      content: null,
+      toolCalls: [
+        {
+          id: "call_dispatch_1",
+          type: "function",
+          function: {
+            name: "dispatch_capability",
+            arguments: JSON.stringify({
+              capability: "software_development",
+              objective: "Crée-moi une petite application de prise de notes.",
+              context: { framework: "react" },
+              constraints: ["clean code"],
+            }),
+          },
+        },
+      ],
+    };
   }
 }
 

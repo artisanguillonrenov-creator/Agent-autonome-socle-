@@ -1,17 +1,33 @@
-import type { ChatMessage } from "../types.js";
+import type { ChatMessage, SkillParameterSchema, ToolCall } from "../types.js";
+
+export interface ToolDefinition {
+  type: "function";
+  function: {
+    name: string;
+    description: string;
+    parameters?: SkillParameterSchema;
+  };
+}
 
 export interface CompletionOptions {
   maxTokens?: number;
   temperature?: number;
   stopSequences?: string[];
+  tools?: ToolDefinition[];
+  toolChoice?: string | Record<string, unknown>;
+}
+
+export interface LLMCompletionResult {
+  content: string | null;
+  toolCalls?: ToolCall[];
 }
 
 /**
  * Interface agnostique : chaque fournisseur (Anthropic, OpenAI, Ollama, mock...)
- * n'a qu'à savoir transformer ChatMessage[] en texte. La boucle agent ne connaît
- * jamais le format propriétaire d'un fournisseur donné.
+ * transforme ChatMessage[] en texte ou en structure native avec toolCalls.
  */
 export interface LLMProvider {
   readonly name: string;
-  complete(messages: ChatMessage[], options?: CompletionOptions): Promise<string>;
+  supportsNativeTools?(): boolean;
+  complete(messages: ChatMessage[], options?: CompletionOptions): Promise<LLMCompletionResult>;
 }

@@ -493,12 +493,13 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
 
         try {
           const testProviderInstance = createLLMProvider({ provider: body.provider, model: body.model });
-          const response = await testProviderInstance.complete([{ role: "user", content: "Test ping" }]);
+          const responseResult = await testProviderInstance.complete([{ role: "user", content: "Test ping" }]);
+          const responseText = typeof responseResult === "string" ? responseResult : responseResult.content ?? "";
           sendJson(res, 200, {
             ok: true,
             provider: body.provider,
             model: body.model,
-            responsePreview: response.slice(0, 100),
+            responsePreview: responseText.slice(0, 100),
             message: "Modèle accessible et fonctionnel !",
           });
         } catch (err) {

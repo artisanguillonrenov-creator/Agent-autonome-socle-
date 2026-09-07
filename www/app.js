@@ -158,23 +158,39 @@ function closeOtaBanner() {
 async function applyOtaUpdate(version) {
   try {
     const manifest = await fetchApi('/api/ota/manifest');
-    const bundleData = await fetchApi('/api/ota/bundle');
-    const bundleString = JSON.stringify(bundleData);
 
-    // Verify SHA-256 integrity hash
+    // Fetch raw bundle response text to preserve exact bytes for SHA-256 calculation
+    const bundleUrl = getApiUrl('/api/ota/bundle');
+    const headers = {};
+    if (state.token) {
+      headers['Authorization'] = `Bearer ${state.token}`;
+    }
+    const response = await fetch(bundleUrl, { headers });
+    if (!response.ok) {
+      throw new Error(`Erreur HTTP ${response.status} lors du téléchargement du bundle OTA.`);
+    }
+    const bundleString = await response.text();
+
+    // Verify SHA-256 integrity hash against raw served text
     if (manifest.sha256) {
       const computedHash = await computeSha256(bundleString);
       if (computedHash.toLowerCase() !== manifest.sha256.toLowerCase()) {
-        alert('⚠️ Échec de vérification SHA-256 : le bundle télécharge semble altéré. Mise à jour annulée.');
+        alert('⚠️ Échec de vérification SHA-256 : le bundle téléchargé semble altéré. Mise à jour annulée.');
         return;
       }
+    }
+
+    // Verify the bundle string is valid JSON
+    const bundleData = JSON.parse(bundleString);
+    if (!bundleData || !bundleData.files) {
+      throw new Error('Bundle OTA invalide ou corrompu.');
     }
 
     // Save previous version as backup for rollback
     localStorage.setItem('jarvis_ota_previous_version', state.ota.activeVersion);
     localStorage.setItem('jarvis_ota_previous_bundle', localStorage.getItem('jarvis_ota_active_bundle') || '');
 
-    // Save active new version
+    // Save active new version and bundle payload
     localStorage.setItem('jarvis_ota_active_version', manifest.version);
     localStorage.setItem('jarvis_ota_active_bundle', bundleString);
 

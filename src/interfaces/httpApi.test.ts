@@ -213,7 +213,14 @@ test("Jarvis Command Center API Endpoints Test", async () => {
     assert.ok(otaManifest.version);
     assert.ok(otaManifest.minimumNativeVersion);
 
-    const otaBundle = await checkEndpoint(`${baseUrl}/api/ota/bundle`);
+    const otaBundleRes = await fetch(`${baseUrl}/api/ota/bundle`);
+    assert.equal(otaBundleRes.status, 200);
+    const otaBundleText = await otaBundleRes.text();
+    const computedHash = (await import("node:crypto")).createHash("sha256").update(otaBundleText).digest("hex");
+
+    assert.equal(computedHash.toLowerCase(), otaManifest.sha256.toLowerCase());
+
+    const otaBundle = JSON.parse(otaBundleText);
     assert.ok(otaBundle.files);
     assert.ok(otaBundle.files["index.html"]);
 

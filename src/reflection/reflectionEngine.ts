@@ -32,7 +32,7 @@ export class ReflectionEngine {
     }
 
     const transcript = recent.map((m) => `${m.role}: ${m.content}`).join("\n");
-    const insight = await this.llm.complete([
+    const rawInsight = await this.llm.complete([
       {
         role: "system",
         content:
@@ -43,6 +43,8 @@ export class ReflectionEngine {
       },
       { role: "user", content: transcript },
     ]);
+
+    const insight = typeof rawInsight === "string" ? rawInsight : rawInsight.content ?? "";
 
     if (insight.trim().length > 0) {
       await this.memory.vector.add(insight.trim(), "reflection");

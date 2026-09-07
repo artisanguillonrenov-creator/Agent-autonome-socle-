@@ -1,10 +1,23 @@
 export type ChatRole = "system" | "user" | "assistant" | "tool";
 
+export interface ToolCall {
+  id: string;
+  type: "function";
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
 export interface ChatMessage {
   role: ChatRole;
-  content: string;
+  content: string | null;
   /** Nom de la compétence, quand role === "tool" */
   name?: string;
+  /** Identifiant unique de l'appel de tool, quand role === "tool" */
+  toolCallId?: string;
+  /** Liste des appels d'outils générés par l'assistant, quand role === "assistant" */
+  toolCalls?: ToolCall[];
 }
 
 export interface MemoryEntry {
@@ -50,16 +63,26 @@ export interface TaskItem {
   createdAt: number;
 }
 
+export interface SkillParameterSchema {
+  type: "object";
+  properties: Record<string, unknown>;
+  required?: string[];
+  additionalProperties?: boolean;
+}
+
 export interface SkillDefinition {
   name: string;
   description: string;
-  /** Description textuelle des arguments attendus (pas de JSON Schema pour rester simple/agnostique). */
+  /** Description textuelle des arguments attendus (pour rétrocompatibilité/affichage UI). */
   argsHint: string;
+  /** Spécification JSON Schema native pour le Tool Calling OpenAI / OpenRouter. */
+  parameters?: SkillParameterSchema;
   handler: (input: Record<string, unknown>, ctx: SkillContext) => Promise<string>;
 }
 
 export interface SkillContext {
   rememberFact(entity: string, attribute: string, value: string): void;
+  serviceOrchestrator?: any;
 }
 
 export interface AgentStepResult {
