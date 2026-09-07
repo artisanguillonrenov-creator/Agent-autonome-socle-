@@ -167,8 +167,10 @@ test("OpenRouterProvider formats tool role and toolCalls assistant messages corr
     assert.equal(sentBody.messages[1].content, null);
     assert.equal(sentBody.messages[1].tool_calls[0].id, "call_1");
 
-    assert.equal(sentBody.messages[2].role, "user");
-    assert.equal(sentBody.messages[2].content, "[Résultat de l'outil [Outil: web_search]]: résultat web");
+    assert.equal(sentBody.messages[2].role, "tool");
+    assert.equal(sentBody.messages[2].tool_call_id, "call_1");
+    assert.equal(sentBody.messages[2].name, "web_search");
+    assert.equal(sentBody.messages[2].content, "résultat web");
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -137,7 +137,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         }
       }
 
-      // 2. Chat Endpoint
+      // 2. Chat & Streaming Chat Endpoints
       if (req.method === "POST" && (pathname === "/chat" || pathname === "/api/chat")) {
         const body = JSON.parse((await readBody(req)) || "{}") as { message?: string };
         const message = (body.message ?? "").trim();
@@ -147,6 +147,34 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         }
         const result = await agent.step(message);
         sendJson(res, 200, result);
+        return;
+      }
+
+      if (req.method === "GET" && pathname === "/api/chat/stream") {
+        const queryMsg = parsedUrl.searchParams.get("message") || "";
+        if (!queryMsg.trim()) {
+          sendJson(res, 400, { error: "message query param requis" });
+          return;
+        }
+
+        res.writeHead(200, {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+          connection: "keep-alive",
+          "access-control-allow-origin": "*",
+        });
+
+        res.write(`data: ${JSON.stringify({ type: "thought", content: "Analyse de la demande en cours..." })}\n\n`);
+
+        try {
+          const result = await agent.step(queryMsg.trim());
+          res.write(`data: ${JSON.stringify({ type: "answer", content: result.response, iterations: result.iterations })}\n\n`);
+          res.write(`data: [DONE]\n\n`);
+          res.end();
+        } catch (err) {
+          res.write(`data: ${JSON.stringify({ type: "error", error: (err as Error).message })}\n\n`);
+          res.end();
+        }
         return;
       }
 
