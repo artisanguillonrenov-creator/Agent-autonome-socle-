@@ -12,7 +12,7 @@ function int(value: string | undefined, fallback: number): number {
 export const config = {
   llm: {
     provider: (process.env.LLM_PROVIDER as LLMProviderName) || "mock",
-    model: process.env.LLM_MODEL || "claude-sonnet-5",
+    model: process.env.LLM_MODEL || "anthropic/claude-3.5-sonnet",
     anthropicApiKey: process.env.ANTHROPIC_API_KEY || "",
     openaiApiKey: process.env.OPENAI_API_KEY || "",
     openrouterApiKey: process.env.OPENROUTER_API_KEY || "",

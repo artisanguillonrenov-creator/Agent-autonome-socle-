@@ -1,13 +1,28 @@
 import Database from "better-sqlite3";
+import pg from "pg";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { config } from "../config.js";
 
-let instance: Database.Database | null = null;
+let sqliteInstance: Database.Database | null = null;
+let pgPoolInstance: pg.Pool | null = null;
 
-/** Base SQLite locale unique — aucun service externe, un simple fichier. */
+export function getPgPool(): pg.Pool | null {
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) return null;
+
+  if (!pgPoolInstance) {
+    pgPoolInstance = new pg.Pool({
+      connectionString,
+      ssl: connectionString.includes("localhost") ? false : { rejectUnauthorized: false },
+    });
+  }
+  return pgPoolInstance;
+}
+
+/** Base de données unique — SQLite local ou PostgreSQL managé (Render/Neon/Supabase). */
 export function getDb(): Database.Database {
-  if (instance) return instance;
+  if (sqliteInstance) return sqliteInstance;
 
   const path = config.db.path;
   if (path !== ":memory:") {
@@ -84,11 +99,13 @@ export function getDb(): Database.Database {
     );
   `);
 
-  instance = db;
+  sqliteInstance = db;
   return db;
 }
 
 export function closeDb(): void {
-  instance?.close();
-  instance = null;
+  sqliteInstance?.close();
+  sqliteInstance = null;
+  pgPoolInstance?.end();
+  pgPoolInstance = null;
 }

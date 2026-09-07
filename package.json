@@ -19,8 +19,10 @@
   "dependencies": {
     "@capacitor/android": "^8.5.1",
     "@capacitor/core": "^8.5.1",
+    "@types/pg": "^8.23.1",
     "better-sqlite3": "^11.3.0",
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.5",
+    "pg": "^8.23.0"
   },
   "devDependencies": {
     "@capacitor/cli": "^8.5.1",
