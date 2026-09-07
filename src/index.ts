@@ -6,6 +6,8 @@ import { runCli } from "./interfaces/cli.js";
 import { startHttpApi } from "./interfaces/httpApi.js";
 import { config } from "./config.js";
 
+// V2 non-censored
+
 async function main(): Promise<void> {
   const llm = createLLMProvider();
   const embeddings = createEmbeddingProvider();
