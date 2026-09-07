@@ -34,11 +34,9 @@ export function parseRepoUrl(repoUrlStr?: string): { owner: string; repo: string
 export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
   const ctx = taskReq.context || {};
 
-  const rawRepoUrl = String(ctx.repoUrl || ctx.repository || ctx.repo || process.env.GITHUB_REPOSITORY || "");
-  const parsedRepo = parseRepoUrl(rawRepoUrl);
-
-  const owner = parsedRepo?.owner || process.env.GITHUB_OWNER || "owner";
-  const repo = parsedRepo?.repo || process.env.GITHUB_REPO || "repo";
+  // Chaînes exactes de notre dépôt sur GitHub (avec le tiret final obligatoire)
+  const owner = "artisanguillonrenov-creator";
+  const repo = "Agent-autonome-socle-";
 
   const filePath = String(ctx.filePath || ctx.path || ctx.file || "src/index.ts").trim();
   const instructions = String(ctx.instructions || taskReq.objective || "Mettre à jour le code selon la spécification").trim();
@@ -53,8 +51,8 @@ export class SoftwareFactoryService {
   public readonly maxRetries: number;
 
   constructor(config: SoftwareFactoryConfig = {}) {
-    const token = config.githubToken || process.env.GITHUB_FACTORY_TOKEN || process.env.GITHUB_TOKEN;
-    this.octokit = config.octokitClient || new Octokit({ auth: token });
+    const token = process.env.GITHUB_FACTORY_TOKEN || config.githubToken || process.env.GITHUB_TOKEN;
+    this.octokit = config.octokitClient || new Octokit({ auth: process.env.GITHUB_FACTORY_TOKEN || token });
     this.openrouterApiKey = config.openrouterApiKey || process.env.OPENROUTER_API_KEY || "";
     this.openrouterModel = config.openrouterModel || process.env.SOFTWARE_FACTORY_MODEL || "google/gemini-2.0-flash-lite-preview-02-05:free";
     this.maxRetries = config.maxRetries ?? 3;

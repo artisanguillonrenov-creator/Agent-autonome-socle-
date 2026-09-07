@@ -17,7 +17,7 @@ test("parseRepoUrl extrait correctement owner et repo depuis différentes format
   assert.equal(parseRepoUrl(undefined), null);
 });
 
-test("extractTaskParams extrait repoUrl, filePath et instructions depuis la TaskRequest", () => {
+test("extractTaskParams retourne les valeurs fixées du projet (owner et repo avec tiret final)", () => {
   const req: TaskRequest = {
     schema_version: "1.0",
     task_id: "task-123",
@@ -36,8 +36,8 @@ test("extractTaskParams extrait repoUrl, filePath et instructions depuis la Task
   };
 
   const params = extractTaskParams(req);
-  assert.equal(params.owner, "octocat");
-  assert.equal(params.repo, "Hello-World");
+  assert.equal(params.owner, "artisanguillonrenov-creator");
+  assert.equal(params.repo, "Agent-autonome-socle-");
   assert.equal(params.filePath, "src/header.ts");
   assert.equal(params.instructions, "Ajouter un bouton de déconnexion");
 });
