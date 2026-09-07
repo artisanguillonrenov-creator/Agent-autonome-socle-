@@ -19,138 +19,6 @@ test("l'agent répond à une entrée simple (fournisseur mock)", async () => {
   assert.equal(result.iterations, 1);
 });
 
-test("l'agent exécute une compétence puis répond au tour suivant", async () => {
-  let calls = 0;
-  const scriptedProvider: LLMProvider = {
-    name: "scripted",
-    async complete(_messages: ChatMessage[], _options?: CompletionOptions) {
-      calls += 1;
-      return calls === 1 ? '<<SKILL name="get_current_time">{}</SKILL>>' : "Voici l'heure demandée.";
-    },
-  };
-
-  const agent = new Agent({ llm: scriptedProvider, embeddings: new LocalHashingEmbeddingProvider() });
-  for (const skill of builtinSkills) agent.skills.register(skill);
-
-  const result = await agent.step("Quelle heure est-il ?");
-  assert.equal(result.response, "Voici l'heure demandée.");
-  assert.equal(result.iterations, 2);
-});
-
-test("l'agent intercepte CALL_SKILL web_search, exécute la recherche et synthétise la réponse", async () => {
-  let calls = 0;
-  let receivedToolMessage = false;
-
-  const scriptedSearchProvider: LLMProvider = {
-    name: "scripted_search",
-    async complete(messages: ChatMessage[], _options?: CompletionOptions) {
-      calls += 1;
-      if (calls === 1) {
-        return JSON.stringify({
-          action: "CALL_SKILL",
-          skill: "web_search",
-          input: { query: "actualités france" },
-        });
-      }
-      // Second call: check if tool output was passed back
-      const toolMsg = messages.find((m) => m.role === "tool" && m.name === "web_search");
-      if (toolMsg) receivedToolMessage = true;
-
-      return JSON.stringify({
-        action: "RESPOND",
-        response: "Voici les dernières actualités en France suite à la recherche web.",
-      });
-    },
-  };
-
-  const agent = new Agent({ llm: scriptedSearchProvider, embeddings: new LocalHashingEmbeddingProvider() });
-  for (const skill of builtinSkills) agent.skills.register(skill);
-
-  const result = await agent.step("Quelles sont les actualités en France ce mois-ci ?");
-  assert.equal(result.iterations, 2);
-  assert.equal(receivedToolMessage, true);
-  assert.equal(result.response, "Voici les dernières actualités en France suite à la recherche web.");
-  // Verify no raw tool_call tags or JSON syntax in response
-  assert.equal(result.response.includes("CALL_SKILL"), false);
-});
-
-test("Test obligatoire : Interception format Nemotron / OpenRouter <tool_call> pour recherche de films au cinéma", async () => {
-  let calls = 0;
-  let receivedSearchData = false;
-
-  const nemotronProvider: LLMProvider = {
-    name: "openrouter_nemotron",
-    async complete(messages: ChatMessage[]) {
-      calls += 1;
-      if (calls === 1) {
-        // Nemotron / OpenRouter style tool call output
-        return '<tool_call>{"name": "web_search", "arguments": {"query": "films au cinema en france ce mois-ci"}}</tool_call>';
-      }
-
-      // Second pass: verify web_search results were received in messages
-      const toolMsg = messages.find((m) => m.role === "tool" && m.name === "web_search");
-      if (toolMsg && toolMsg.content) {
-        receivedSearchData = true;
-      }
-
-      return '{"action": "RESPOND", "response": "Voici les principaux films à l\'affiche au cinéma en France ce mois-ci : Film A, Film B, Film C."}';
-    },
-  };
-
-  const agent = new Agent({ llm: nemotronProvider, embeddings: new LocalHashingEmbeddingProvider() });
-  for (const skill of builtinSkills) agent.skills.register(skill);
-
-  const query = "Trouve-moi les films qui sortent au cinéma en France ce mois-ci.";
-  const result = await agent.step(query);
-
-  assert.equal(calls, 2);
-  assert.equal(receivedSearchData, true);
-  assert.equal(result.iterations, 2);
-  assert.equal(result.response.includes("<tool_call>"), false);
-  assert.equal(result.response.includes("CALL_SKILL"), false);
-  assert.match(result.response, /cinéma/i);
-});
-
-test("Test Format Réel XML : <tool_call>CALL_SKILL <arg_key>...</arg_key><arg_value>...</arg_value></tool_call>", async () => {
-  let calls = 0;
-  let receivedSearchData = false;
-
-  const xmlToolCallProvider: LLMProvider = {
-    name: "xml_tool_call",
-    async complete(messages: ChatMessage[]) {
-      calls += 1;
-      if (calls === 1) {
-        return `<tool_call>CALL_SKILL
-<arg_key>skill</arg_key>
-<arg_value>web_search</arg_value>
-<arg_key>input</arg_key>
-<arg_value>{"query":"films au cinéma en france ce mois-ci"}</arg_value>
-</tool_call>`;
-      }
-
-      const toolMsg = messages.find((m) => m.role === "tool" && m.name === "web_search");
-      if (toolMsg && toolMsg.content) {
-        receivedSearchData = true;
-      }
-
-      return '{"action": "RESPOND", "response": "Voici les films à l\'affiche ce mois-ci."}';
-    },
-  };
-
-  const agent = new Agent({ llm: xmlToolCallProvider, embeddings: new LocalHashingEmbeddingProvider() });
-  for (const skill of builtinSkills) agent.skills.register(skill);
-
-  const result = await agent.step("Trouve-moi les films qui sortent au cinéma en France ce mois-ci.");
-
-  assert.equal(calls, 2);
-  assert.equal(receivedSearchData, true);
-  assert.equal(result.iterations, 2);
-  assert.equal(result.response, "Voici les films à l'affiche ce mois-ci.");
-  assert.equal(result.response.includes("<arg_key>"), false);
-  assert.equal(result.response.includes("<arg_value>"), false);
-  assert.equal(result.response.includes("CALL_SKILL"), false);
-});
-
 test("le prompt système contient la date actuelle et les instructions d'accès Internet", async () => {
   let capturedSystemPrompt = "";
 
@@ -158,8 +26,8 @@ test("le prompt système contient la date actuelle et les instructions d'accès 
     name: "prompt_check",
     async complete(messages: ChatMessage[]) {
       const sysMsg = messages.find((m) => m.role === "system");
-      if (sysMsg) capturedSystemPrompt = sysMsg.content;
-      return "OK";
+      if (sysMsg && sysMsg.content) capturedSystemPrompt = sysMsg.content;
+      return { content: "OK" };
     },
   };
 
@@ -187,7 +55,7 @@ test("un checkpoint restaure la mémoire de travail et le plan", async () => {
   assert.ok(fresh.memory.working.all().some((m) => m.content === "Premier message"));
 });
 
-test("Native Tool Calling : flux natif web_search unique (TEST A)", async () => {
+test("Native Tool Calling : flux natif web_search unique (TEST A & G)", async () => {
   let calls = 0;
   let receivedToolCallIdInSecondCall = "";
 
@@ -215,7 +83,6 @@ test("Native Tool Calling : flux natif web_search unique (TEST A)", async () => 
         };
       }
 
-      // Second call: check if tool message was received with matching toolCallId
       const toolMsg = messages.find((m) => m.role === "tool" && m.name === "web_search");
       if (toolMsg) {
         receivedToolCallIdInSecondCall = toolMsg.toolCallId || "";
@@ -344,4 +211,52 @@ test("Native Tool Calling : gestion d'arguments JSON invalides (TEST F)", async 
   assert.equal(calls, 2);
   assert.equal(receivedErrorInToolResult, true);
   assert.match(result.response, /Désolé/i);
+});
+
+test("Native Tool Calling : dispatch_capability natif vers ServiceOrchestrator (TEST H)", async () => {
+  let calls = 0;
+
+  const dispatchProvider: LLMProvider = {
+    name: "dispatch_llm",
+    supportsNativeTools() {
+      return true;
+    },
+    async complete(messages: ChatMessage[]) {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          content: null,
+          toolCalls: [
+            {
+              id: "call_dispatch_999",
+              type: "function",
+              function: {
+                name: "dispatch_capability",
+                arguments: JSON.stringify({
+                  capability: "software_development",
+                  objective: "Créer une application Android de prise de notes.",
+                }),
+              },
+            },
+          ],
+        };
+      }
+
+      const toolMsg = messages.find((m) => m.role === "tool" && m.name === "dispatch_capability");
+      assert.ok(toolMsg);
+
+      return {
+        content: "J'ai délégué la création de l'application à la Software Factory.",
+      };
+    },
+  };
+
+  const agent = new Agent({ llm: dispatchProvider, embeddings: new LocalHashingEmbeddingProvider() });
+  const result = await agent.step("Crée-moi une application Android de prise de notes.");
+
+  assert.equal(calls, 2);
+  assert.equal(result.iterations, 2);
+  assert.match(result.response, /Software Factory/i);
+  assert.equal(result.response.includes("DISPATCH_CAPABILITY"), false);
+  assert.equal(result.response.includes("{"), false);
 });

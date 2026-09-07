@@ -82,6 +82,7 @@ export interface SkillDefinition {
 
 export interface SkillContext {
   rememberFact(entity: string, attribute: string, value: string): void;
+  serviceOrchestrator?: any;
 }
 
 export interface AgentStepResult {

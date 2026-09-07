@@ -29,5 +29,5 @@ export interface LLMCompletionResult {
 export interface LLMProvider {
   readonly name: string;
   supportsNativeTools?(): boolean;
-  complete(messages: ChatMessage[], options?: CompletionOptions): Promise<string | LLMCompletionResult>;
+  complete(messages: ChatMessage[], options?: CompletionOptions): Promise<LLMCompletionResult>;
 }

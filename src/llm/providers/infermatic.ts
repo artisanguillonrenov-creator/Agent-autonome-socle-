@@ -1,5 +1,5 @@
 import type { ChatMessage } from "../../types.js";
-import type { CompletionOptions, LLMProvider } from "../provider.js";
+import type { CompletionOptions, LLMCompletionResult, LLMProvider } from "../provider.js";
 
 interface InfermaticOptions {
   apiKey: string;
@@ -12,7 +12,7 @@ export class InfermaticProvider implements LLMProvider {
 
   constructor(private readonly opts: InfermaticOptions) {}
 
-  async complete(messages: ChatMessage[], options: CompletionOptions = {}): Promise<string> {
+  async complete(messages: ChatMessage[], options: CompletionOptions = {}): Promise<LLMCompletionResult> {
     if (!this.opts.apiKey) {
       throw new Error("INFERMATIC_API_KEY manquant : impossible d'appeler le fournisseur infermatic.");
     }
@@ -28,8 +28,8 @@ export class InfermaticProvider implements LLMProvider {
       body: JSON.stringify({
         model: this.opts.model,
         messages: messages.map((m) => ({
-          role: m.role === "tool" ? "user" : m.role,
-          content: m.role === "tool" ? `[Résultat de compétence: ${m.name ?? "?"}]\n${m.content}` : m.content,
+          role: m.role,
+          content: m.content ?? "",
         })),
         max_tokens: options.maxTokens ?? 1024,
         temperature: options.temperature,
@@ -41,6 +41,9 @@ export class InfermaticProvider implements LLMProvider {
       throw new Error(`Infermatic API ${res.status}: ${await res.text()}`);
     }
     const data = (await res.json()) as { choices: Array<{ message: { content: string } }> };
-    return data.choices[0]?.message.content ?? "";
+    return {
+      content: data.choices[0]?.message.content ?? "",
+      toolCalls: undefined,
+    };
   }
 }
