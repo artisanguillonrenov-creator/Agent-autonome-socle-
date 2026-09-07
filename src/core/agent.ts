@@ -137,11 +137,13 @@ export class Agent {
             serviceOrchestrator: this.serviceOrchestrator,
           });
 
+          const formattedToolOutput = `[Résultat de l'outil '${skillName}']: ${result}`;
+
           await this.memory.recordTurn({
             role: "tool",
             name: skillName,
             toolCallId: toolCall.id || "call_unknown",
-            content: result,
+            content: formattedToolOutput,
           });
         }
 
