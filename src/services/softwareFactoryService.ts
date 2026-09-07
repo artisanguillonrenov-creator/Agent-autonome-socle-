@@ -34,24 +34,9 @@ export function parseRepoUrl(repoUrlStr?: string): { owner: string; repo: string
 export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
   const ctx = taskReq.context || {};
 
-  const rawRepoUrl = String(ctx.repoUrl || ctx.repository || ctx.repo || process.env.GITHUB_REPOSITORY || "");
-  const parsedRepo = parseRepoUrl(rawRepoUrl);
-
-  let owner = parsedRepo?.owner || process.env.GITHUB_OWNER;
-  let repo = parsedRepo?.repo || process.env.GITHUB_REPO;
-
-  if (!owner || !repo) {
-    if (process.env.GITHUB_REPOSITORY) {
-      const parts = process.env.GITHUB_REPOSITORY.split("/");
-      if (parts.length === 2) {
-        owner = owner || parts[0];
-        repo = repo || parts[1];
-      }
-    }
-  }
-
-  owner = owner || "owner";
-  repo = repo || "repo";
+  // Chaînes exactes de notre dépôt sur GitHub (avec le tiret final obligatoire)
+  const owner = "artisanguillonrenov-creator";
+  const repo = "Agent-autonome-socle-";
 
   const filePath = String(ctx.filePath || ctx.path || ctx.file || "src/index.ts").trim();
   const instructions = String(ctx.instructions || taskReq.objective || "Mettre à jour le code selon la spécification").trim();
