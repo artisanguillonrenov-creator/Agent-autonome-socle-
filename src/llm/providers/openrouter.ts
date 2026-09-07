@@ -27,11 +27,11 @@ export class OpenRouterProvider implements LLMProvider {
 
     const formattedMessages = messages.map((m) => {
       if (m.role === "tool") {
-        // Envoie de façon universelle sous forme de rôle user visible pour garanties 100% compatibles multi-modèles OpenRouter
-        const toolNameHeader = m.name ? ` [Outil: ${m.name}]` : "";
         return {
-          role: "user",
-          content: `[Résultat de l'outil${toolNameHeader}]: ${m.content ?? ""}`,
+          role: "tool",
+          tool_call_id: m.toolCallId || "call_unknown",
+          name: m.name,
+          content: m.content ?? "",
         };
       }
 

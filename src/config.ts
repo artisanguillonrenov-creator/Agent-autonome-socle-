@@ -2,7 +2,7 @@ import "dotenv/config";
 
 export type LLMProviderName = "anthropic" | "openai" | "openrouter" | "ollama" | "infermatic" | "mock";
 export type EmbeddingProviderName = "local" | "openai" | "voyage";
-export type WebSearchProviderName = "brave" | "duckduckgo" | "none";
+export type WebSearchProviderName = "brave" | "tavily" | "serper" | "duckduckgo" | "none";
 
 function int(value: string | undefined, fallback: number): number {
   const n = Number(value);
@@ -26,8 +26,10 @@ export const config = {
     voyageApiKey: process.env.VOYAGE_API_KEY || "",
   },
   webSearch: {
-    provider: (process.env.WEB_SEARCH_PROVIDER as WebSearchProviderName) || "none",
+    provider: (process.env.WEB_SEARCH_PROVIDER as WebSearchProviderName) || "duckduckgo",
     braveApiKey: process.env.BRAVE_SEARCH_API_KEY || "",
+    tavilyApiKey: process.env.TAVILY_API_KEY || "",
+    serperApiKey: process.env.SERPER_API_KEY || "",
   },
   codeExecution: {
     enabled: process.env.ENABLE_CODE_EXECUTION === "true",
