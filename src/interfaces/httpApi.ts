@@ -7,8 +7,11 @@ import { TaskStore } from "../tasks/taskStore.js";
 import { getChatPageHtml } from "./chatPage.js";
 import { createLLMProvider } from "../llm/providers/index.js";
 import { saveLLMConfig } from "../persistence/llmConfigStore.js";
+import { SoftwareFactoryService } from "../services/softwareFactoryService.js";
+import type { TaskRequest } from "../orchestration/contract.js";
 
 const taskStore = new TaskStore();
+const softwareFactoryService = new SoftwareFactoryService();
 let lastServerError: string | null = null;
 
 async function readBody(req: IncomingMessage): Promise<string> {
@@ -117,6 +120,22 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
     }
 
     try {
+      // 0. Service Orchestration Tasks Endpoint: POST /tasks
+      if (req.method === "POST" && (pathname === "/tasks" || pathname === "/api/tasks/dispatch")) {
+        const bodyStr = await readBody(req);
+        let taskReq: TaskRequest;
+        try {
+          taskReq = JSON.parse(bodyStr || "{}");
+        } catch {
+          sendJson(res, 400, { error: "JSON invalide" });
+          return;
+        }
+
+        const events = await softwareFactoryService.handleTaskRequest(taskReq);
+        sendJson(res, 200, { events });
+        return;
+      }
+
       // 1. Static Web Files Serving
       if (req.method === "GET") {
         if (pathname === "/") {

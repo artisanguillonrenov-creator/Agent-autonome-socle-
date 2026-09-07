@@ -1,11 +1,29 @@
 import type { TaskRequest, ServiceEvent } from "./contract.js";
+import { SoftwareFactoryService } from "../services/softwareFactoryService.js";
 
 export type ServiceAdapterResponse =
   | { success: true; events: ServiceEvent[] }
   | { success: false; transportError: true; message: string };
 
 export class ServiceAdapter {
+  private localSoftwareFactory = new SoftwareFactoryService();
+
   async dispatchTask(endpoint: string, request: TaskRequest, timeoutMs = 5000): Promise<ServiceAdapterResponse> {
+    const isLocalDirect = endpoint === "in-process" || endpoint === "local" || endpoint === "direct";
+
+    if (isLocalDirect && request.capability === "software_development") {
+      try {
+        const events = await this.localSoftwareFactory.handleTaskRequest(request);
+        return { success: true, events };
+      } catch (err: unknown) {
+        return {
+          success: false,
+          transportError: true,
+          message: `Direct execution error: ${(err as Error).message}`,
+        };
+      }
+    }
+
     const targetUrl = `${endpoint.replace(/\/+$/, "")}/tasks`;
 
     const controller = new AbortController();
@@ -41,10 +59,27 @@ export class ServiceAdapter {
     } catch (err: unknown) {
       clearTimeout(timer);
       const isAbort = err instanceof Error && err.name === "AbortError";
+      const errMsg = (err as Error).message || String(err);
+
+      // Fallback: If network fetch to a localhost/127.0.0.1 endpoint fails for software_development,
+      // execute locally via SoftwareFactoryService in-process.
+      if (!isAbort && (targetUrl.includes("localhost") || targetUrl.includes("127.0.0.1")) && request.capability === "software_development") {
+        try {
+          const events = await this.localSoftwareFactory.handleTaskRequest(request);
+          return { success: true, events };
+        } catch (localErr: unknown) {
+          return {
+            success: false,
+            transportError: true,
+            message: `Transport error (${errMsg}) and local fallback error: ${(localErr as Error).message}`,
+          };
+        }
+      }
+
       return {
         success: false,
         transportError: true,
-        message: isAbort ? `Network timeout after ${timeoutMs}ms` : `Transport error: ${(err as Error).message}`,
+        message: isAbort ? `Network timeout after ${timeoutMs}ms` : `Transport error: ${errMsg}`,
       };
     }
   }
