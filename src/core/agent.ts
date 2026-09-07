@@ -143,6 +143,13 @@ export class Agent {
             toolCallId: toolCall.id || "call_unknown",
             content: result,
           });
+
+          // Intercepter le texte brut du compte-rendu pour aider les LLM (notamment OpenRouter gratuits)
+          // à reconnaître immédiatement que l'exécution de l'outil est terminée.
+          await this.memory.recordTurn({
+            role: "user",
+            content: `[Résultat de l'outil '${skillName}']: ${result}`,
+          });
         }
 
         continue;
