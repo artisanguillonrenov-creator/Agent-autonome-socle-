@@ -1,7 +1,10 @@
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer, type IncomingMessage } from "node:http";
 import type { TaskRequest, ServiceEvent } from "../orchestration/contract.js";
+import { SoftwareFactoryServer, SoftwareFactoryService } from "./softwareFactoryService.js";
 
 export type MockBehavior = "SUCCESS" | "FAILURE" | "REJECT" | "TIMEOUT" | "WAITING_INPUT" | "WAITING_PERMISSION";
+
+export { SoftwareFactoryServer, SoftwareFactoryService };
 
 export class MockServiceServer {
   private server: ReturnType<typeof createServer> | null = null;
@@ -26,11 +29,10 @@ export class MockServiceServer {
 
           // Check behavior
           if (this.currentBehavior === "TIMEOUT") {
-            // Do not respond, simulate network timeout
             return;
           }
 
-          // Check idempotency key: double envoi -> une seule exécution logique
+          // Check idempotency key
           if (this.processedKeys.has(taskReq.idempotency_key)) {
             const cachedEvents = this.processedKeys.get(taskReq.idempotency_key)!;
             res.writeHead(200, { "content-type": "application/json" });
@@ -73,7 +75,7 @@ export class MockServiceServer {
   }
 
   private generateEventsForTask(taskReq: TaskRequest): ServiceEvent[] {
-    const serviceName = "mock_software_factory";
+    const serviceName = "software_factory";
 
     if (this.currentBehavior === "REJECT") {
       return [
@@ -102,7 +104,7 @@ export class MockServiceServer {
           sequence: 1,
           type: "TASK_ACCEPTED",
           timestamp: Date.now(),
-          payload: { message: "Tâche acceptée par Mock Factory" },
+          payload: { message: "Tâche acceptée par Software Factory" },
         },
         {
           schema_version: "1.0",
@@ -124,7 +126,7 @@ export class MockServiceServer {
           sequence: 3,
           type: "TASK_FAILED",
           timestamp: Date.now(),
-          payload: { error: "Échec de compilation dans Mock Factory" },
+          payload: { error: "Échec de compilation dans Software Factory" },
         },
       ];
     }
@@ -167,7 +169,7 @@ export class MockServiceServer {
         sequence: 1,
         type: "TASK_ACCEPTED",
         timestamp: Date.now(),
-        payload: { message: "Tâche acceptée" },
+        payload: { message: "Tâche acceptée par Jarvis Software Factory V1" },
       },
       {
         schema_version: "1.0",
@@ -178,7 +180,7 @@ export class MockServiceServer {
         sequence: 2,
         type: "TASK_PROGRESS",
         timestamp: Date.now(),
-        payload: { progress: 80, message: "Création des fichiers de l'application de prise de notes" },
+        payload: { progress: 80, message: "Création de la branche patch-jarvis-v1 et de la PR sur GitHub" },
       },
       {
         schema_version: "1.0",
@@ -192,7 +194,8 @@ export class MockServiceServer {
         payload: {
           app_name: "NotesApp",
           status: "ready",
-          summary: "Application de prise de notes créée avec succès.",
+          branch: "patch-jarvis-v1",
+          summary: "Application mise à jour avec succès par Jarvis Software Factory V1.",
         },
       },
     ];
@@ -207,8 +210,8 @@ export class MockServiceServer {
 
 // Standalone runner when executed directly
 if (process.argv[1]?.endsWith("mockService.ts") || process.argv[1]?.endsWith("mockService.js")) {
-  const mockServer = new MockServiceServer(4000);
-  mockServer.start().then(() => {
-    console.log("Mock Service standalone HTTP démarré sur http://localhost:4000");
+  const factoryServer = new SoftwareFactoryServer(4000);
+  factoryServer.start().then(() => {
+    console.log("Jarvis Software Factory V1 HTTP démarré sur http://localhost:4000");
   });
 }

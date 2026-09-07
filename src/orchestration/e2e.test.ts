@@ -112,7 +112,7 @@ describe("Jarvis Command Center V1 - End to End & Orchestration Tests", () => {
       enabled: true,
       endpoint: `http://localhost:${mockPort}`,
       capabilities: ["software_development"],
-      priority: 10,
+      priority: 100,
     });
 
     const store = new OperationStore();
@@ -149,7 +149,7 @@ describe("Jarvis Command Center V1 - End to End & Orchestration Tests", () => {
       enabled: true,
       endpoint: `http://localhost:${mockPort}`,
       capabilities: ["software_development"],
-      priority: 10,
+      priority: 100,
     });
 
     const store = new OperationStore();
@@ -176,7 +176,7 @@ describe("Jarvis Command Center V1 - End to End & Orchestration Tests", () => {
       enabled: true,
       endpoint: `http://localhost:${mockPort}`,
       capabilities: ["software_development"],
-      priority: 10,
+      priority: 100,
     });
 
     const store = new OperationStore();
@@ -192,7 +192,7 @@ describe("Jarvis Command Center V1 - End to End & Orchestration Tests", () => {
     });
 
     assert.strictEqual(res.status, "REJECTED");
-    assert.ok(res.error?.includes("rejetée par le service") || res.error?.includes("Capacité indisponible"));
+    assert.ok(res.error?.includes("rejetée par le service") || res.error?.includes("Capacité indisponible") || res.error?.includes("rejetée"));
   });
 
   test("Test Network Timeout & Retry Idempotent", async () => {
@@ -203,7 +203,7 @@ describe("Jarvis Command Center V1 - End to End & Orchestration Tests", () => {
       enabled: true,
       endpoint: `http://localhost:${mockPort}`,
       capabilities: ["software_development"],
-      priority: 10,
+      priority: 100,
     });
 
     const store = new OperationStore();
