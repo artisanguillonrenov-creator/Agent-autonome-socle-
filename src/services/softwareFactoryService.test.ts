@@ -1,0 +1,242 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { Octokit } from "@octokit/rest";
+import {
+  SoftwareFactoryService,
+  SoftwareFactoryServer,
+  parseRepoUrl,
+  extractTaskParams,
+} from "./softwareFactoryService.js";
+import type { TaskRequest } from "../orchestration/contract.js";
+
+test("parseRepoUrl extrait correctement owner et repo depuis différentes formats", () => {
+  assert.deepEqual(parseRepoUrl("https://github.com/myorg/myrepo"), { owner: "myorg", repo: "myrepo" });
+  assert.deepEqual(parseRepoUrl("https://github.com/myorg/myrepo.git"), { owner: "myorg", repo: "myrepo" });
+  assert.deepEqual(parseRepoUrl("myorg/myrepo"), { owner: "myorg", repo: "myrepo" });
+  assert.equal(parseRepoUrl("invalid-repo-format"), null);
+  assert.equal(parseRepoUrl(undefined), null);
+});
+
+test("extractTaskParams extrait repoUrl, filePath et instructions depuis la TaskRequest", () => {
+  const req: TaskRequest = {
+    schema_version: "1.0",
+    task_id: "task-123",
+    trace_id: "trace-123",
+    idempotency_key: "idemp-123",
+    capability: "software_development",
+    objective: "Mise à jour du header",
+    context: {
+      repoUrl: "https://github.com/octocat/Hello-World",
+      filePath: "src/header.ts",
+      instructions: "Ajouter un bouton de déconnexion",
+    },
+    constraints: [],
+    priority: "high",
+    permissions: [],
+  };
+
+  const params = extractTaskParams(req);
+  assert.equal(params.owner, "octocat");
+  assert.equal(params.repo, "Hello-World");
+  assert.equal(params.filePath, "src/header.ts");
+  assert.equal(params.instructions, "Ajouter un bouton de déconnexion");
+});
+
+test("SoftwareFactoryService initialise Octokit et respecte la limite de 3 retries max", async () => {
+  let attempts = 0;
+
+  // Mock Octokit client avec échecs simulés
+  const mockOctokit = {
+    rest: {
+      repos: {
+        get: async () => {
+          attempts++;
+          throw new Error(`Simulated GitHub API Error (Attempt ${attempts})`);
+        },
+      },
+    },
+  } as unknown as Octokit;
+
+  const service = new SoftwareFactoryService({
+    githubToken: "ghp_fake_token_for_test",
+    octokitClient: mockOctokit,
+    maxRetries: 3,
+  });
+
+  assert.ok(service.getOctokit());
+  assert.equal(service.maxRetries, 3);
+
+  const req: TaskRequest = {
+    schema_version: "1.0",
+    task_id: "task-retry-test",
+    trace_id: "trace-retry-test",
+    idempotency_key: "idemp-retry-test",
+    capability: "software_development",
+    objective: "Tester le guardrail anti-boucle max retries",
+    context: {
+      repoUrl: "owner/repo",
+      filePath: "src/main.ts",
+      instructions: "Refactoriser",
+    },
+    constraints: [],
+    priority: "medium",
+    permissions: [],
+  };
+
+  const events = await service.handleTaskRequest(req);
+
+  // Vérifier qu'exactement 3 tentatives ont été effectuées avant de renvoyer TASK_FAILED
+  assert.equal(attempts, 3);
+
+  const failedEvent = events.find((e) => e.type === "TASK_FAILED");
+  assert.ok(failedEvent, "Un événement TASK_FAILED doit être émis après 3 tentatives échouées");
+  assert.match(String(failedEvent?.payload.error), /après 3 tentatives/);
+});
+
+test("SoftwareFactoryService exécute le workflow complet (getContent, createRef, createOrUpdateFile, create PR)", async () => {
+  const calls: string[] = [];
+
+  const mockOctokit = {
+    rest: {
+      repos: {
+        get: async ({ owner, repo }: { owner: string; repo: string }) => {
+          calls.push("repos.get");
+          return { data: { default_branch: "main" } };
+        },
+        getContent: async ({ path, ref }: { path: string; ref: string }) => {
+          calls.push(`repos.getContent:${ref}`);
+          return {
+            data: {
+              content: Buffer.from("console.log('v1');").toString("base64"),
+              sha: "sha-file-v1",
+            },
+          };
+        },
+        createOrUpdateFileContents: async ({ branch, path }: { branch: string; path: string }) => {
+          calls.push(`repos.createOrUpdateFileContents:${branch}:${path}`);
+          return { data: { content: { sha: "sha-file-v2" } } };
+        },
+      },
+      git: {
+        getRef: async ({ ref }: { ref: string }) => {
+          calls.push(`git.getRef:${ref}`);
+          if (ref === "heads/patch-jarvis-v1") {
+            throw new Error("404 Not Found");
+          }
+          return { data: { object: { sha: "sha-commit-main" } } };
+        },
+        createRef: async ({ ref, sha }: { ref: string; sha: string }) => {
+          calls.push(`git.createRef:${ref}`);
+          return { data: { ref } };
+        },
+      },
+      pulls: {
+        list: async () => {
+          calls.push("pulls.list");
+          return { data: [] };
+        },
+        create: async ({ head, base, title }: { head: string; base: string; title: string }) => {
+          calls.push(`pulls.create:${head}->${base}`);
+          return {
+            data: {
+              html_url: "https://github.com/owner/repo/pull/42",
+              number: 42,
+            },
+          };
+        },
+      },
+    },
+  } as unknown as Octokit;
+
+  const service = new SoftwareFactoryService({
+    githubToken: "ghp_fake_token_for_test",
+    octokitClient: mockOctokit,
+  });
+
+  const req: TaskRequest = {
+    schema_version: "1.0",
+    task_id: "task-success-test",
+    trace_id: "trace-success-test",
+    idempotency_key: "idemp-success-test",
+    capability: "software_development",
+    objective: "Ajouter la fonction salut()",
+    context: {
+      repoUrl: "https://github.com/testowner/testrepo",
+      filePath: "src/app.ts",
+      instructions: "Ajouter la fonction salut()",
+    },
+    constraints: [],
+    priority: "medium",
+    permissions: [],
+  };
+
+  const events = await service.handleTaskRequest(req);
+
+  const completedEvent = events.find((e) => e.type === "TASK_COMPLETED");
+  assert.ok(completedEvent, "L'événement TASK_COMPLETED doit être présent");
+  assert.equal(completedEvent?.payload.branch, "patch-jarvis-v1");
+  assert.equal(completedEvent?.payload.pr_url, "https://github.com/owner/repo/pull/42");
+  assert.equal(completedEvent?.payload.pr_number, 42);
+
+  assert.ok(calls.includes("git.createRef:refs/heads/patch-jarvis-v1"));
+  assert.ok(calls.includes("repos.createOrUpdateFileContents:patch-jarvis-v1:src/app.ts"));
+  assert.ok(calls.includes("pulls.create:patch-jarvis-v1->main"));
+});
+
+test("SoftwareFactoryServer démarre, traite les requêtes HTTP POST /tasks et s'arrête proprement", async () => {
+  const mockOctokit = {
+    rest: {
+      repos: {
+        get: async () => ({ data: { default_branch: "main" } }),
+        getContent: async () => ({ data: { content: Buffer.from("code").toString("base64"), sha: "sha-1" } }),
+        createOrUpdateFileContents: async () => ({ data: {} }),
+      },
+      git: {
+        getRef: async ({ ref }: { ref: string }) => {
+          if (ref === "heads/patch-jarvis-v1") throw new Error("404");
+          return { data: { object: { sha: "sha-main" } } };
+        },
+        createRef: async () => ({ data: {} }),
+      },
+      pulls: {
+        list: async () => ({ data: [] }),
+        create: async () => ({ data: { html_url: "https://github.com/org/repo/pull/1", number: 1 } }),
+      },
+    },
+  } as unknown as Octokit;
+
+  const service = new SoftwareFactoryService({
+    githubToken: "test-token",
+    octokitClient: mockOctokit,
+  });
+
+  const testPort = 4088;
+  const server = new SoftwareFactoryServer(testPort, service);
+  await server.start();
+
+  try {
+    const res = await fetch(`http://localhost:${testPort}/tasks`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        schema_version: "1.0",
+        task_id: "task-http-test",
+        trace_id: "trace-http-test",
+        idempotency_key: "idemp-http-test",
+        capability: "software_development",
+        objective: "Test via HTTP",
+        context: { repoUrl: "org/repo", filePath: "index.ts", instructions: "Update index" },
+        constraints: [],
+        priority: "medium",
+        permissions: [],
+      }),
+    });
+
+    assert.equal(res.status, 200);
+    const json = (await res.json()) as { events: Array<{ type: string }> };
+    assert.ok(Array.isArray(json.events));
+    assert.ok(json.events.some((e) => e.type === "TASK_COMPLETED"));
+  } finally {
+    await server.stop();
+  }
+});
