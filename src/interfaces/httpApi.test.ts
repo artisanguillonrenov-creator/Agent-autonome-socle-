@@ -115,13 +115,16 @@ test("ServiceEvent est transformé en entrée de timeline sans interpréter le t
 
   const transform = (contextObj.window as { serviceEventToTimelineEntry: (event: unknown) => { label: string; state: string } })
     .serviceEventToTimelineEntry;
+  const markerFor = (contextObj.window as {
+    timelineMarkerForEntry: (entry: { label: string; state: string }, isLast: boolean, status: string) => string;
+  }).timelineMarkerForEntry;
   assert.deepEqual(
     { ...transform({ type: "TASK_ACCEPTED", payload: {} }) },
     { label: "Tâche acceptée", state: "complete" },
   );
   assert.deepEqual(
     { ...transform({ type: "TASK_PROGRESS", payload: { stage: "GITHUB_UPDATING_FILE" } }) },
-    { label: "Mise à jour du fichier", state: "complete" },
+    { label: "Mise à jour du fichier", state: "active-candidate" },
   );
   assert.deepEqual(
     { ...transform({ type: "TASK_FAILED", payload: {} }) },
@@ -132,6 +135,21 @@ test("ServiceEvent est transformé en entrée de timeline sans interpréter le t
   assert.equal(transform({ type: "TASK_PROGRESS", payload: { message: hostileText } }).label, hostileText);
   assert.match(appJsCode, /label\.textContent = entry\.label/);
   assert.doesNotMatch(appJsCode, /innerHTML\s*=\s*entry\.label/);
+
+  const accepted = transform({ type: "TASK_ACCEPTED", payload: {} });
+  assert.equal(markerFor(accepted, true, "RUNNING"), "✓");
+
+  const fileUpdated = transform({ type: "TASK_PROGRESS", payload: { stage: "GITHUB_FILE_UPDATED" } });
+  assert.equal(fileUpdated.label, "Fichier mis à jour");
+  assert.equal(markerFor(fileUpdated, true, "RUNNING"), "✓");
+
+  const fileUpdating = transform({ type: "TASK_PROGRESS", payload: { stage: "GITHUB_UPDATING_FILE" } });
+  assert.equal(markerFor(fileUpdating, true, "RUNNING"), "●");
+  assert.equal(markerFor(fileUpdating, false, "RUNNING"), "✓");
+
+  const needsPermission = transform({ type: "NEEDS_PERMISSION", payload: {} });
+  assert.equal(needsPermission.label, "Approbation requise");
+  assert.equal(markerFor(needsPermission, true, "WAITING_PERMISSION"), "●");
 });
 
 test("Jarvis Command Center API Endpoints Test", async () => {

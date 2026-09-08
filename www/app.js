@@ -400,6 +400,15 @@ const TERMINAL_OPERATION_STATUSES = new Set([
   'WAITING_PERMISSION',
 ]);
 
+const ACTIVE_SERVICE_STAGES = new Set([
+  'GITHUB_AUTHENTICATING',
+  'GENERATING_CODE_UPDATE',
+  'GITHUB_CREATING_BRANCH',
+  'GITHUB_UPDATING_FILE',
+  'GITHUB_CHECKING_DIFF',
+  'GITHUB_CREATING_PR',
+]);
+
 function serviceEventToTimelineEntry(event) {
   const payload = event && payloadIsRecord(event.payload) ? event.payload : {};
   let label;
@@ -411,6 +420,9 @@ function serviceEventToTimelineEntry(event) {
       break;
     case 'TASK_PROGRESS':
       label = SERVICE_STAGE_LABELS[payload.stage] || (payload.message != null ? String(payload.message) : 'Progression');
+      if (ACTIVE_SERVICE_STAGES.has(payload.stage) || (payload.stage == null && payload.message != null)) {
+        state = 'active-candidate';
+      }
       break;
     case 'NEEDS_INPUT':
       label = 'Information utilisateur requise';
@@ -436,6 +448,13 @@ function serviceEventToTimelineEntry(event) {
   }
 
   return { label, state };
+}
+
+function timelineMarkerForEntry(entry, isLast, operationStatus) {
+  if (entry.state === 'failed') return '×';
+  if (entry.state === 'active') return '●';
+  if (entry.state === 'active-candidate' && isLast && !TERMINAL_OPERATION_STATUSES.has(operationStatus)) return '●';
+  return '✓';
 }
 
 function payloadIsRecord(payload) {
@@ -485,9 +504,8 @@ function renderTimelineCard(view, operation, events) {
     const entry = serviceEventToTimelineEntry(event);
     const row = document.createElement('div');
     row.className = `chat-timeline-step ${entry.state}`;
-    const isLastActive = index === events.length - 1 && !TERMINAL_OPERATION_STATUSES.has(operation.status);
     const marker = document.createElement('span');
-    marker.textContent = entry.state === 'failed' ? '×' : isLastActive || entry.state === 'active' ? '●' : '✓';
+    marker.textContent = timelineMarkerForEntry(entry, index === events.length - 1, operation.status);
     const label = document.createElement('span');
     label.textContent = entry.label;
     row.append(marker, label);
@@ -1213,6 +1231,7 @@ if (typeof window !== 'undefined') {
   window.bootstrapJarvis = bootstrapJarvis;
   window.jarvisInitialized = () => jarvisInitialized;
   window.serviceEventToTimelineEntry = serviceEventToTimelineEntry;
+  window.timelineMarkerForEntry = timelineMarkerForEntry;
 }
 
 if (typeof document !== 'undefined') {
@@ -1224,5 +1243,5 @@ if (typeof document !== 'undefined') {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { bootstrapJarvis, state, switchView, serviceEventToTimelineEntry };
+  module.exports = { bootstrapJarvis, state, switchView, serviceEventToTimelineEntry, timelineMarkerForEntry };
 }
