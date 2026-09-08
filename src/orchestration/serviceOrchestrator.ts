@@ -77,6 +77,7 @@ export class ServiceOrchestrator {
     const existingOp = this.store.getByIdempotencyKey(idempotencyKey);
     if (existingOp) {
       if (
+        existingOp.status === "QUEUED" ||
         existingOp.status === "COMPLETED" ||
         existingOp.status === "RUNNING" ||
         existingOp.status === "DISPATCHING" ||
