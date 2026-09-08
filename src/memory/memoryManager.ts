@@ -4,6 +4,7 @@ import { VectorMemory } from "./vectorMemory.js";
 import { FactStore } from "./factStore.js";
 import { UserModel } from "./userModel.js";
 import type { ChatMessage, MemoryEntry } from "../types.js";
+import { selectRecentMessages } from "./selectRecentMessages.js";
 
 export interface RetrievedContext {
   recentMessages: ChatMessage[];
@@ -39,7 +40,7 @@ export class MemoryManager {
     const relevantMemories = await this.vector.search(query, topK);
     const facts = this.facts.all().map((f) => `${f.entity}.${f.attribute} = ${f.value}`);
     return {
-      recentMessages: this.working.recent(10),
+      recentMessages: selectRecentMessages(this.working.all(), 10),
       relevantMemories,
       facts,
     };

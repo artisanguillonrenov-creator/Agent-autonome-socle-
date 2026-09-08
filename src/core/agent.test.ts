@@ -11,6 +11,105 @@ const { Agent } = await import("./agent.js");
 const { LocalHashingEmbeddingProvider } = await import("../llm/embeddings.js");
 const { MockProvider } = await import("../llm/providers/mock.js");
 const { builtinSkills } = await import("../skills/builtin/index.js");
+const { selectRecentMessages } = await import("../memory/selectRecentMessages.js");
+
+const ordinaryMessage = (content: string): ChatMessage => ({ role: "user", content });
+const toolBlock = (...ids: string[]): ChatMessage[] => [
+  {
+    role: "assistant",
+    content: null,
+    toolCalls: ids.map((id) => ({
+      id,
+      type: "function",
+      function: { name: `tool_${id}`, arguments: "{}" },
+    })),
+  },
+  ...ids.map((id) => ({ role: "tool" as const, content: `result_${id}`, toolCallId: id })),
+];
+
+test("sélection récente : historique simple sans outils", () => {
+  const history = Array.from({ length: 12 }, (_, index) => ordinaryMessage(`message_${index}`));
+  assert.deepEqual(selectRecentMessages(history, 10), history.slice(-10));
+});
+
+test("sélection récente : bloc complet avec un seul tool call", () => {
+  const block = toolBlock("call_a");
+  assert.deepEqual(selectRecentMessages([ordinaryMessage("avant"), ...block], 10), [ordinaryMessage("avant"), ...block]);
+});
+
+test("sélection récente : bloc complet avec plusieurs tool calls", () => {
+  const block = toolBlock("call_a", "call_b");
+  assert.deepEqual(selectRecentMessages(block, 10), block);
+});
+
+test("sélection récente : la limite tombant au milieu conserve le bloc complet", () => {
+  const history = [ordinaryMessage("exclu"), ...toolBlock("call_a", "call_b"), ...Array.from({ length: 8 }, (_, index) => ordinaryMessage(`recent_${index}`))];
+  const selected = selectRecentMessages(history, 10);
+  assert.equal(selected.length, 11);
+  assert.deepEqual(selected, history.slice(1));
+});
+
+test("sélection récente : un message tool orphelin est exclu", () => {
+  const recent = ordinaryMessage("recent");
+  assert.deepEqual(selectRecentMessages([{ role: "tool", content: "orphan", toolCallId: "call_a" }, recent], 10), [recent]);
+});
+
+test("sélection récente : un toolCallId inconnu invalide le bloc", () => {
+  const assistant = toolBlock("call_a")[0];
+  const recent = ordinaryMessage("recent");
+  assert.deepEqual(selectRecentMessages([assistant, { role: "tool", content: "result", toolCallId: "unknown" }, recent], 10), [recent]);
+});
+
+test("sélection récente : des toolCall.id dupliqués invalident le bloc", () => {
+  const block = toolBlock("call_a", "call_a");
+  const recent = ordinaryMessage("recent");
+  assert.deepEqual(selectRecentMessages([...block, recent], 10), [recent]);
+});
+
+test("sélection récente : un résultat sans toolCallId invalide le bloc", () => {
+  const assistant = toolBlock("call_a")[0];
+  const recent = ordinaryMessage("recent");
+  assert.deepEqual(selectRecentMessages([assistant, { role: "tool", content: "result" }, recent], 10), [recent]);
+});
+
+test("sélection récente : un résultat tool dupliqué invalide le bloc", () => {
+  const block = toolBlock("call_a");
+  const duplicate = { ...block[1] };
+  const recent = ordinaryMessage("recent");
+  assert.deepEqual(selectRecentMessages([...block, duplicate, recent], 10), [recent]);
+});
+
+test("sélection récente : un résultat manquant invalide le bloc", () => {
+  const block = toolBlock("call_a", "call_b").slice(0, 2);
+  const recent = ordinaryMessage("recent");
+  assert.deepEqual(selectRecentMessages([...block, recent], 10), [recent]);
+});
+
+test("sélection récente : un bloc incomplet en fin d'historique est exclu", () => {
+  const assistant = toolBlock("call_a")[0];
+  const earlier = ordinaryMessage("earlier");
+  assert.deepEqual(selectRecentMessages([earlier, assistant], 10), [earlier]);
+});
+
+test("sélection récente : aucun bloc valide n'est envoyé partiellement", () => {
+  const firstBlock = toolBlock("call_a", "call_b");
+  const secondBlock = toolBlock("call_c");
+  const history = [...firstBlock, ...Array.from({ length: 7 }, (_, index) => ordinaryMessage(`middle_${index}`)), ...secondBlock];
+  const selected = selectRecentMessages(history, 10);
+
+  for (const message of selected.filter((item) => item.role === "assistant" && item.toolCalls?.length)) {
+    const declaredIds = message.toolCalls?.map((call) => call.id) ?? [];
+    const assistantIndex = selected.indexOf(message);
+    const resultIds = selected
+      .slice(assistantIndex + 1)
+      .filter((item) => item.role === "tool")
+      .map((item) => item.toolCallId);
+    assert.ok(declaredIds.every((id) => resultIds.includes(id)));
+  }
+
+  assert.deepEqual(selected.slice(0, firstBlock.length), firstBlock);
+  assert.equal(selected.length, 12);
+});
 
 test("l'agent répond à une entrée simple (fournisseur mock)", async () => {
   const agent = new Agent({ llm: new MockProvider(), embeddings: new LocalHashingEmbeddingProvider() });
