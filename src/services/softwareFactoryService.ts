@@ -642,7 +642,7 @@ export class SoftwareFactoryService {
 
 function checkServerAuth(req: IncomingMessage): boolean {
   const token = config.softwareFactory.token || config.api.token;
-  if (!token) return true;
+  if (!token) return false;
   const auth = req.headers.authorization;
   return auth === `Bearer ${token}`;
 }
@@ -659,7 +659,16 @@ export class SoftwareFactoryServer {
   start(): Promise<void> {
     return new Promise((resolve) => {
       this.server = createServer(async (req, res) => {
-        if (!checkServerAuth(req) && req.url !== "/health") {
+        const isPublicHealthcheck = req.method === "GET" && req.url === "/health";
+        const serverToken = config.softwareFactory.token || config.api.token;
+
+        if (!isPublicHealthcheck && !serverToken) {
+          res.writeHead(503, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "TOKEN_NOT_CONFIGURED" }));
+          return;
+        }
+
+        if (!isPublicHealthcheck && !checkServerAuth(req)) {
           res.writeHead(401, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: "unauthorized" }));
           return;
@@ -692,16 +701,8 @@ export class SoftwareFactoryServer {
         }
 
         if (req.method === "GET" && req.url === "/health") {
-          const diag = await this.service.getGitHubDiagnostics();
           res.writeHead(200, { "content-type": "application/json" });
-          res.end(
-            JSON.stringify({
-              status: "ok",
-              service: "software_factory",
-              authenticated: checkServerAuth(req),
-              github: diag,
-            }),
-          );
+          res.end(JSON.stringify({ status: "ok", service: "software_factory" }));
           return;
         }
 
