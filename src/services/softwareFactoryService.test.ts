@@ -917,6 +917,11 @@ test("TEST R — Serveur HTTP Software Factory POST /tasks", async () => {
   });
 
   service.generateCodeUpdate = async (content) => content + "\n// Patched";
+  let diagnosticsCalls = 0;
+  service.getGitHubDiagnostics = async () => {
+    diagnosticsCalls++;
+    return { configured: true, authenticated: true, repositoryAccessible: true };
+  };
 
   const testPort = 4088;
   const server = new SoftwareFactoryServer(testPort, service);
@@ -965,6 +970,11 @@ test("TEST R — Serveur HTTP Software Factory POST /tasks", async () => {
 
     const health = await fetch(`http://localhost:${testPort}/health`);
     assert.equal(health.status, 200);
+    assert.deepEqual(await health.json(), {
+      status: "ok",
+      service: "software_factory",
+    });
+    assert.equal(diagnosticsCalls, 0);
   } finally {
     await server.stop();
     config.softwareFactory.token = previousFactoryToken;

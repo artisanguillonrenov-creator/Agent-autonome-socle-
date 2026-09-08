@@ -630,16 +630,8 @@ export class SoftwareFactoryServer {
         }
 
         if (req.method === "GET" && req.url === "/health") {
-          const diag = await this.service.getGitHubDiagnostics();
           res.writeHead(200, { "content-type": "application/json" });
-          res.end(
-            JSON.stringify({
-              status: "ok",
-              service: "software_factory",
-              authenticated: checkServerAuth(req),
-              github: diag,
-            }),
-          );
+          res.end(JSON.stringify({ status: "ok", service: "software_factory" }));
           return;
         }
 
