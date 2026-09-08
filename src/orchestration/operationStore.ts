@@ -1,5 +1,5 @@
 import { getDb } from "../persistence/db.js";
-import type { OperationStatus, ServiceEvent } from "./contract.js";
+import { CONTRACT_SCHEMA_VERSION, type OperationStatus, type ServiceEvent } from "./contract.js";
 
 export interface ServiceOperation {
   taskId: string;
@@ -206,6 +206,11 @@ export class OperationStore {
 
   processEvent(event: ServiceEvent): { duplicate: boolean; applied: boolean } {
     const db = getDb();
+
+    // 0. Schema version validation
+    if (event.schema_version !== CONTRACT_SCHEMA_VERSION) {
+      return { duplicate: false, applied: false };
+    }
 
     // 1. Deduplication by event_id
     const existingEvt = db.prepare("SELECT event_id FROM processed_service_events WHERE event_id = ?").get(event.event_id);

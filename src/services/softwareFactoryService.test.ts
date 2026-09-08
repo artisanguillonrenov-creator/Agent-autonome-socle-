@@ -9,9 +9,12 @@ import {
 } from "./softwareFactoryService.js";
 import { OperationStore } from "../orchestration/operationStore.js";
 import { ServiceAdapter } from "../orchestration/serviceAdapter.js";
+import { ServiceOrchestrator } from "../orchestration/serviceOrchestrator.js";
+import { ServiceRegistry } from "../orchestration/serviceRegistry.js";
 import { Agent } from "../core/agent.js";
 import { MockProvider } from "../llm/providers/mock.js";
 import { LocalHashingEmbeddingProvider } from "../llm/embeddings.js";
+import { config } from "../config.js";
 import type { TaskRequest, ServiceEvent } from "../orchestration/contract.js";
 
 test("parseRepoUrl extrait correctement owner et repo depuis différentes formats", () => {
@@ -57,7 +60,99 @@ test("TEST 1 - dispatch_capability est toujours présent dans les skills disponi
   assert.ok(mandatory, "dispatch_capability doit être enregistré dans les skills");
 });
 
-test("TEST 6 & 7 - OperationStore protège les états terminaux et rejette la désynchronisation de séquence/trace", () => {
+test("TEST 2 - Auth SoftwareFactoryServer : token valide -> 200, token invalide -> 401", async () => {
+  process.env.SOFTWARE_FACTORY_TOKEN = "secret-factory-token-123";
+  config.softwareFactory.token = "secret-factory-token-123";
+
+  const testPort = 4091;
+  const mockOctokit = {
+    rest: {
+      users: { getAuthenticated: async () => ({ data: { login: "test" } }) },
+      repos: { get: async () => ({ data: { id: 1 } }) },
+    },
+  } as unknown as Octokit;
+
+  const service = new SoftwareFactoryService({ githubToken: "test", octokitClient: mockOctokit });
+  const server = new SoftwareFactoryServer(testPort, service);
+  await server.start();
+
+  try {
+    // Mauvais token -> 401
+    const badRes = await fetch(`http://localhost:${testPort}/tasks`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer wrong-token" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(badRes.status, 401);
+
+    // /health est accessible pour diagnostic
+    const healthRes = await fetch(`http://localhost:${testPort}/health`, { method: "GET" });
+    assert.equal(healthRes.status, 200);
+    const healthJson = (await healthRes.json()) as { ok: boolean };
+    assert.equal(healthJson.ok, true);
+  } finally {
+    await server.stop();
+    delete process.env.SOFTWARE_FACTORY_TOKEN;
+    config.softwareFactory.token = "";
+  }
+});
+
+test("TEST 3 & 4 - Idempotence COMPLETED et retry contrôlé FAILED retryable avec même taskId/traceId", async () => {
+  const store = new OperationStore();
+  const registry = new ServiceRegistry();
+  const adapter = new ServiceAdapter();
+  const orchestrator = new ServiceOrchestrator({ registry, adapter, store });
+
+  const idempotencyKey = `idemp-test-${Date.now()}`;
+
+  // 1. Première opération FAILED (retryable = true)
+  store.createOperation({
+    taskId: `task-${Date.now()}`,
+    traceId: `trace-${Date.now()}`,
+    idempotencyKey,
+    objective: "Test idempotence",
+    capability: "software_development",
+    selectedService: "software_factory",
+    status: "FAILED",
+    error: "TRANSPORT_UNKNOWN: network error",
+    retryable: true,
+  });
+
+  const firstOp = store.getByIdempotencyKey(idempotencyKey)!;
+  assert.equal(firstOp.status, "FAILED");
+  assert.equal(firstOp.retryable, true);
+
+  // 2. Relancer avec la même idempotencyKey -> réutilise le MÊME taskId et MÊME traceId
+  const retryRes = await orchestrator.dispatchCapability(
+    {
+      action: "DISPATCH_CAPABILITY",
+      capability: "software_development",
+      objective: "Test idempotence",
+    },
+    { idempotencyKey },
+  );
+
+  assert.equal(retryRes.taskId, firstOp.taskId);
+  assert.equal(retryRes.traceId, firstOp.traceId);
+
+  // 3. Passer en COMPLETED
+  store.updateStatus(firstOp.taskId, "COMPLETED", "Résultat prêt");
+
+  // 4. Troisième appel avec même idempotencyKey -> retourne immédiatement COMPLETED sans réexécuter
+  const completedRes = await orchestrator.dispatchCapability(
+    {
+      action: "DISPATCH_CAPABILITY",
+      capability: "software_development",
+      objective: "Test idempotence",
+    },
+    { idempotencyKey },
+  );
+
+  assert.equal(completedRes.status, "COMPLETED");
+  assert.equal(completedRes.taskId, firstOp.taskId);
+});
+
+test("TEST 6, 7 & 8 - OperationStore valide schema_version, trace_id, séquence et états terminaux", () => {
   const store = new OperationStore();
   const taskId = `task-state-test-${Date.now()}`;
   const traceId = `trace-state-test-${Date.now()}`;
@@ -72,6 +167,22 @@ test("TEST 6 & 7 - OperationStore protège les états terminaux et rejette la d�
     status: "DISPATCHING",
   });
 
+  // Rejeter événement avec schema_version incompatible
+  const evtBadSchema: ServiceEvent = {
+    schema_version: "2.0", // version non supportée
+    event_id: `evt-bad-schema-${Date.now()}`,
+    task_id: taskId,
+    trace_id: traceId,
+    service: "software_factory",
+    sequence: 1,
+    type: "TASK_COMPLETED",
+    timestamp: Date.now(),
+    payload: {},
+  };
+  const resBadSchema = store.processEvent(evtBadSchema);
+  assert.equal(resBadSchema.applied, false);
+
+  // Événement valide COMPLETED (seq 1)
   const evt1: ServiceEvent = {
     schema_version: "1.0",
     event_id: `evt-seq-1-${Date.now()}`,

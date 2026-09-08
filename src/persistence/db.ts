@@ -97,6 +97,9 @@ export function getDb(): Database.Database {
       sequence INTEGER NOT NULL,
       processed_at INTEGER NOT NULL
     );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ops_idempotency ON service_operations(idempotency_key);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_processed_events_task_seq ON processed_service_events(task_id, sequence);
   `);
 
   sqliteInstance = db;

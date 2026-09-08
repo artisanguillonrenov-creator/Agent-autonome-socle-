@@ -17,8 +17,9 @@ export function resolveServiceEndpoint(service: ServiceDefinition): ServiceDefin
     if (process.env.SOFTWARE_FACTORY_URL) {
       endpoint = process.env.SOFTWARE_FACTORY_URL;
     } else if (process.env.PORT || process.env.API_PORT) {
-      const activePort = process.env.PORT || process.env.API_PORT;
-      if (endpoint === "http://localhost:4000") {
+      const activePort = process.env.PORT || process.env.API_PORT || "3000";
+      // Si endpoint signale un localhost non spécifique, faire pointer vers le backend actif
+      if (endpoint.includes("localhost:4000") || endpoint.includes("${PORT}")) {
         endpoint = `http://localhost:${activePort}`;
       }
     }

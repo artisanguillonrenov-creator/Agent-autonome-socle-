@@ -307,25 +307,12 @@ export class SoftwareFactoryService {
   }
 
   /**
-   * Traite une demande de tâche selon le contrat Service avec événements granulaires et max 3 tentatives.
+   * Traite une demande de tâche selon le contrat Service avec événements granulaires attempt-aware et max 3 tentatives.
    */
   async handleTaskRequest(taskReq: TaskRequest): Promise<ServiceEvent[]> {
     const serviceName = "software_factory";
     const events: ServiceEvent[] = [];
     let sequence = 1;
-
-    // 1. TASK_ACCEPTED
-    events.push({
-      schema_version: CONTRACT_SCHEMA_VERSION,
-      event_id: `evt-${taskReq.task_id}-accepted`,
-      task_id: taskReq.task_id,
-      trace_id: taskReq.trace_id,
-      service: serviceName,
-      sequence: sequence++,
-      type: "TASK_ACCEPTED",
-      timestamp: Date.now(),
-      payload: { message: "Tâche acceptée par Jarvis Software Factory V1" },
-    });
 
     const params = extractTaskParams(taskReq);
     let lastErrorMsg = "";
@@ -334,7 +321,19 @@ export class SoftwareFactoryService {
     for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
       events.push({
         schema_version: CONTRACT_SCHEMA_VERSION,
-        event_id: `evt-${taskReq.task_id}-progress-${attempt}`,
+        event_id: `evt-${taskReq.task_id}-att${attempt}-accepted-${sequence}`,
+        task_id: taskReq.task_id,
+        trace_id: taskReq.trace_id,
+        service: serviceName,
+        sequence: sequence++,
+        type: "TASK_ACCEPTED",
+        timestamp: Date.now(),
+        payload: { message: `Tâche acceptée par Jarvis Software Factory V1 (Tentative ${attempt})` },
+      });
+
+      events.push({
+        schema_version: CONTRACT_SCHEMA_VERSION,
+        event_id: `evt-${taskReq.task_id}-att${attempt}-progress-${sequence}`,
         task_id: taskReq.task_id,
         trace_id: taskReq.trace_id,
         service: serviceName,
@@ -353,20 +352,20 @@ export class SoftwareFactoryService {
         const result = await this.executeWorkflow(params, taskReq.task_id, (stage, detail) => {
           events.push({
             schema_version: CONTRACT_SCHEMA_VERSION,
-            event_id: `evt-${taskReq.task_id}-step-${sequence}`,
+            event_id: `evt-${taskReq.task_id}-att${attempt}-${stage.toLowerCase()}-${sequence}`,
             task_id: taskReq.task_id,
             trace_id: taskReq.trace_id,
             service: serviceName,
             sequence: sequence++,
             type: "TASK_PROGRESS",
             timestamp: Date.now(),
-            payload: { stage, ...(detail || {}) },
+            payload: { stage, attempt, ...(detail || {}) },
           });
         });
 
         events.push({
           schema_version: CONTRACT_SCHEMA_VERSION,
-          event_id: `evt-${taskReq.task_id}-completed`,
+          event_id: `evt-${taskReq.task_id}-att${attempt}-completed-${sequence}`,
           task_id: taskReq.task_id,
           trace_id: taskReq.trace_id,
           service: serviceName,
@@ -390,7 +389,7 @@ export class SoftwareFactoryService {
 
         events.push({
           schema_version: CONTRACT_SCHEMA_VERSION,
-          event_id: `evt-${taskReq.task_id}-retry-${attempt}`,
+          event_id: `evt-${taskReq.task_id}-att${attempt}-retry-${sequence}`,
           task_id: taskReq.task_id,
           trace_id: taskReq.trace_id,
           service: serviceName,
@@ -409,7 +408,7 @@ export class SoftwareFactoryService {
 
     events.push({
       schema_version: CONTRACT_SCHEMA_VERSION,
-      event_id: `evt-${taskReq.task_id}-failed`,
+      event_id: `evt-${taskReq.task_id}-failed-${sequence}`,
       task_id: taskReq.task_id,
       trace_id: taskReq.trace_id,
       service: serviceName,
@@ -428,10 +427,13 @@ export class SoftwareFactoryService {
 }
 
 function checkServerAuth(req: IncomingMessage): boolean {
-  const token = config.softwareFactory.token || config.api.token;
-  if (!token) return true;
+  const factoryToken = process.env.SOFTWARE_FACTORY_TOKEN;
+  const apiToken = config.api.token;
+  const expectedToken = factoryToken || apiToken;
+
+  if (!expectedToken) return true;
   const auth = req.headers.authorization;
-  return auth === `Bearer ${token}`;
+  return auth === `Bearer ${expectedToken}`;
 }
 
 export class SoftwareFactoryServer {
@@ -483,6 +485,7 @@ export class SoftwareFactoryServer {
           res.writeHead(200, { "content-type": "application/json" });
           res.end(
             JSON.stringify({
+              ok: true,
               status: "ok",
               service: "software_factory",
               authenticated: checkServerAuth(req),
