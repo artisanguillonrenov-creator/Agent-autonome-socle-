@@ -17,7 +17,12 @@ export const dispatchCapabilitySkill: SkillDefinition = {
       },
       context: {
         type: "object",
-        description: "Données de contexte additionnelles sous forme d'objet",
+        description: "Données de contexte additionnelles (ex: filePath, exactContent, instructions)",
+        properties: {
+          filePath: { type: "string", description: "Chemin du fichier cible" },
+          exactContent: { type: "string", description: "Contenu exact du fichier si spécifié littéralement" },
+          instructions: { type: "string", description: "Instructions opérationnelles (ex: créer branche, PR)" },
+        },
       },
       constraints: {
         type: "array",

@@ -18,6 +18,43 @@ export interface OrchestrationResult {
   prUrl?: string;
 }
 
+export function extractOperationMetadata(resultStr?: string): {
+  branch?: string;
+  commitSha?: string;
+  prNumber?: number;
+  prUrl?: string;
+} {
+  if (!resultStr) return {};
+  try {
+    const p = JSON.parse(resultStr);
+    if (p && typeof p === "object") {
+      const branch = typeof p.branch === "string" ? p.branch : undefined;
+      const commitSha =
+        typeof p.commit_sha === "string"
+          ? p.commit_sha
+          : typeof p.commitSha === "string"
+          ? p.commitSha
+          : undefined;
+      const prNumber =
+        typeof p.pr_number === "number"
+          ? p.pr_number
+          : typeof p.prNumber === "number"
+          ? p.prNumber
+          : undefined;
+      const prUrl =
+        typeof p.pr_url === "string"
+          ? p.pr_url
+          : typeof p.prUrl === "string"
+          ? p.prUrl
+          : undefined;
+      return { branch, commitSha, prNumber, prUrl };
+    }
+  } catch {
+    // ignore
+  }
+  return {};
+}
+
 export class ServiceOrchestrator {
   readonly registry: ServiceRegistry;
   readonly adapter: ServiceAdapter;
@@ -48,25 +85,7 @@ export class ServiceOrchestrator {
         existingOp.status === "REJECTED" ||
         (existingOp.status === "FAILED" && !existingOp.retryable)
       ) {
-        let branch: string | undefined;
-        let commitSha: string | undefined;
-        let prNumber: number | undefined;
-        let prUrl: string | undefined;
-
-        if (existingOp.result) {
-          try {
-            const p = JSON.parse(existingOp.result);
-            if (p && typeof p === "object") {
-              branch = typeof p.branch === "string" ? p.branch : undefined;
-              commitSha = typeof p.commit_sha === "string" ? p.commit_sha : typeof p.commitSha === "string" ? p.commitSha : undefined;
-              prNumber = typeof p.pr_number === "number" ? p.pr_number : typeof p.prNumber === "number" ? p.prNumber : undefined;
-              prUrl = typeof p.pr_url === "string" ? p.pr_url : typeof p.prUrl === "string" ? p.prUrl : undefined;
-            }
-          } catch {
-            // Not JSON
-          }
-        }
-
+        const meta = extractOperationMetadata(existingOp.result);
         return {
           taskId: existingOp.taskId,
           traceId: existingOp.traceId,
@@ -74,10 +93,7 @@ export class ServiceOrchestrator {
           selectedService: existingOp.selectedService,
           result: existingOp.result,
           error: existingOp.error,
-          branch,
-          commitSha,
-          prNumber,
-          prUrl,
+          ...meta,
         };
       }
       // If FAILED and retryable, proceed with controlled retry dispatch below
@@ -165,24 +181,7 @@ export class ServiceOrchestrator {
     }
 
     const updatedOp = this.store.getOperation(taskId)!;
-    let branch: string | undefined;
-    let commitSha: string | undefined;
-    let prNumber: number | undefined;
-    let prUrl: string | undefined;
-
-    if (updatedOp.result) {
-      try {
-        const p = JSON.parse(updatedOp.result);
-        if (p && typeof p === "object") {
-          branch = typeof p.branch === "string" ? p.branch : undefined;
-          commitSha = typeof p.commit_sha === "string" ? p.commit_sha : typeof p.commitSha === "string" ? p.commitSha : undefined;
-          prNumber = typeof p.pr_number === "number" ? p.pr_number : typeof p.prNumber === "number" ? p.prNumber : undefined;
-          prUrl = typeof p.pr_url === "string" ? p.pr_url : typeof p.prUrl === "string" ? p.prUrl : undefined;
-        }
-      } catch {
-        // Not JSON
-      }
-    }
+    const meta = extractOperationMetadata(updatedOp.result);
 
     return {
       taskId,
@@ -191,10 +190,7 @@ export class ServiceOrchestrator {
       selectedService: service.id,
       result: updatedOp.result,
       error: updatedOp.error,
-      branch,
-      commitSha,
-      prNumber,
-      prUrl,
+      ...meta,
     };
   }
 

@@ -64,23 +64,39 @@ export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
   if (typeof ctx.exactContent === "string") {
     exactContent = ctx.exactContent;
   } else {
-    const exactPatterns = [
-      /(?:avec exactement ce contenu|contenu exact|écris exactement|exact content)\s*:\s*```(?:\w+)?\r?\n([\s\S]*?)\r?\n```/i,
-      /(?:avec exactement ce contenu|contenu exact|écris exactement|exact content)\s*:\s*```([\s\S]*?)```/i,
-      /(?:avec exactement ce contenu|contenu exact|écris exactement|exact content)\s*:\s*\r?\n+([\s\S]+)$/i,
-      /(?:avec exactement ce contenu|contenu exact|écris exactement|exact content)\s*:\s*([^\n]+)$/i,
-    ];
+    const exactDirectiveMatch = textToSearch.match(/(?:avec exactement ce contenu|contenu exact|écris exactement|exact content)\s*:\s*([\s\S]+)$/i);
 
-    for (const pattern of exactPatterns) {
-      const m = textToSearch.match(pattern);
-      if (m && m[1] !== undefined) {
-        exactContent = m[1];
-        if (pattern === exactPatterns[2]) {
-          exactContent = exactContent.replace(/^\r?\n/, "").replace(/\r?\n$/, "").replace(/[ \t]+$/, "");
-        } else if (pattern === exactPatterns[3]) {
-          exactContent = exactContent.trim();
+    if (exactDirectiveMatch) {
+      const rest = exactDirectiveMatch[1];
+      const fenceMatch = rest.match(/^```(?:\w+)?\r?\n([\s\S]*?)\r?\n```/i) || rest.match(/^```([\s\S]*?)```/i);
+
+      if (fenceMatch) {
+        exactContent = fenceMatch[1];
+      } else {
+        const lines = rest.split(/\r?\n/);
+        const firstNonEmptyLineIndex = lines.findIndex((l) => l.trim() !== "");
+        if (firstNonEmptyLineIndex !== -1) {
+          const firstContentLine = lines[firstNonEmptyLineIndex].trim();
+          const remainingLines = lines.slice(firstNonEmptyLineIndex + 1).filter((l) => l.trim() !== "");
+
+          if (remainingLines.length > 0) {
+            const operationalIndex = remainingLines.findIndex((l) =>
+              /\b(?:crée|ouvre|branche|pull request|pr|fusionne|dédiée)\b/i.test(l),
+            );
+            if (operationalIndex === 0) {
+              // Operational instructions start right on the second line
+              exactContent = firstContentLine;
+            } else if (operationalIndex > 0) {
+              // Ambiguous mixture of lines and operational instructions without code fences
+              throw new Error("EXACT_CONTENT_AMBIGUOUS: Les limites du contenu exact ne peuvent pas être déterminées de manière non ambiguë sans code fences (```) ou context.exactContent.");
+            } else {
+              // No operational instructions found in remaining lines: the multiline block is the exact content
+              exactContent = [firstContentLine, ...remainingLines].join("\n");
+            }
+          } else {
+            exactContent = firstContentLine;
+          }
         }
-        break;
       }
     }
   }
@@ -332,10 +348,27 @@ export class SoftwareFactoryService {
     });
     onStep?.("GITHUB_FILE_UPDATED", { path: filePath, branch: branchName });
 
-    const commitSha =
-      (updateRes.data as { commit?: { sha?: string } }).commit?.sha ||
-      (updateRes.data as { content?: { sha?: string } }).content?.sha ||
-      baseSha;
+    let commitSha = (updateRes.data as { commit?: { sha?: string } }).commit?.sha;
+
+    if (!commitSha) {
+      try {
+        const refRes = await this.octokit.rest.git.getRef({
+          owner,
+          repo,
+          ref: `heads/${branchName}`,
+        });
+        const refSha = refRes.data.object?.sha;
+        if (refSha && refSha !== baseSha) {
+          commitSha = refSha;
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    if (!commitSha || commitSha === baseSha) {
+      throw new Error("GITHUB_COMMIT_SHA_MISSING: Impossible de déterminer le véritable SHA du commit GitHub.");
+    }
 
     // 6b. Vérifier qu'il y a un réel diff sur GitHub avant d'ouvrir la PR
     onStep?.("GITHUB_CHECKING_DIFF", { head: branchName, base: defaultBranch });
