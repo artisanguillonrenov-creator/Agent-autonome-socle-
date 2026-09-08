@@ -31,9 +31,15 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 }
 
 function isAuthorized(req: IncomingMessage): boolean {
-  if (!config.api.token) return true;
+  if (!config.api.token) return false;
   const auth = req.headers.authorization;
   return auth === `Bearer ${config.api.token}`;
+}
+
+function isPublicRequest(method: string | undefined, pathname: string): boolean {
+  if (method === "OPTIONS") return true;
+  if (method !== "GET") return false;
+  return pathname === "/" || /^\/[^/]+\.(?:html|css|js|png|jpg|ico|svg)$/i.test(pathname);
 }
 
 const MIME_TYPES: Record<string, string> = {
@@ -113,8 +119,13 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
     const parsedUrl = new URL(url, `http://localhost:${port}`);
     const pathname = parsedUrl.pathname;
 
-    // Check auth for non-public endpoints
-    if (!isAuthorized(req) && pathname !== "/" && !pathname.startsWith("/www/") && !pathname.match(/\.(html|css|js|png|jpg|ico|svg)$/)) {
+    // Fail closed for every non-public endpoint when the server token is absent.
+    if (!isPublicRequest(req.method, pathname) && !config.api.token) {
+      sendJson(res, 503, { error: "API_TOKEN_NOT_CONFIGURED" });
+      return;
+    }
+
+    if (!isPublicRequest(req.method, pathname) && !isAuthorized(req)) {
       sendJson(res, 401, { error: "unauthorized" });
       return;
     }

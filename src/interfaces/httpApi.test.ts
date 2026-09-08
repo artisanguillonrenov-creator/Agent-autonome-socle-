@@ -5,6 +5,7 @@ import { MockProvider } from "../llm/providers/mock.js";
 import { LocalHashingEmbeddingProvider } from "../llm/embeddings.js";
 import { startHttpApi } from "./httpApi.js";
 import { loadLLMConfig } from "../persistence/llmConfigStore.js";
+import { config } from "../config.js";
 
 import fs from "node:fs";
 import vm from "node:vm";
@@ -93,6 +94,8 @@ test("Safe Array Contract Test for Models View - Prevents undefined.map error", 
 });
 
 test("Jarvis Command Center API Endpoints Test", async () => {
+  const previousToken = config.api.token;
+  config.api.token = "api-endpoints-test-token";
   const agent = new Agent({
     llm: new MockProvider(),
     embeddings: new LocalHashingEmbeddingProvider(),
@@ -105,7 +108,9 @@ test("Jarvis Command Center API Endpoints Test", async () => {
   try {
     // Helper to fetch and assert ok status
     async function checkEndpoint(url: string, init?: RequestInit, expectedStatus = 200) {
-      const res = await fetch(url, init);
+      const headers = new Headers(init?.headers);
+      headers.set("authorization", `Bearer ${config.api.token}`);
+      const res = await fetch(url, { ...init, headers });
       if (res.status !== expectedStatus) {
         const body = await res.text();
         console.error(`Failed ${url}: status ${res.status}, body: ${body}`);
@@ -213,7 +218,9 @@ test("Jarvis Command Center API Endpoints Test", async () => {
     assert.ok(otaManifest.version);
     assert.ok(otaManifest.minimumNativeVersion);
 
-    const otaBundleRes = await fetch(`${baseUrl}/api/ota/bundle`);
+    const otaBundleRes = await fetch(`${baseUrl}/api/ota/bundle`, {
+      headers: { authorization: `Bearer ${config.api.token}` },
+    });
     assert.equal(otaBundleRes.status, 200);
     const otaBundleText = await otaBundleRes.text();
     const computedHash = (await import("node:crypto")).createHash("sha256").update(otaBundleText).digest("hex");
@@ -242,5 +249,59 @@ test("Jarvis Command Center API Endpoints Test", async () => {
     });
   } finally {
     server.close();
+    config.api.token = previousToken;
+  }
+});
+
+test("HTTP API applique l'authentification fail-closed tout en laissant les ressources publiques accessibles", async () => {
+  const previousToken = config.api.token;
+  const agent = new Agent({
+    llm: new MockProvider(),
+    embeddings: new LocalHashingEmbeddingProvider(),
+  });
+  const port = 8001 + Math.floor(Math.random() * 1000);
+  const server = startHttpApi(agent, port);
+  const baseUrl = `http://localhost:${port}`;
+
+  try {
+    const configuredToken = "configured-secret-token";
+    config.api.token = configuredToken;
+
+    const authorized = await fetch(`${baseUrl}/api/status`, {
+      headers: { authorization: `Bearer ${configuredToken}` },
+    });
+    assert.equal(authorized.status, 200);
+
+    const missing = await fetch(`${baseUrl}/api/status`);
+    assert.equal(missing.status, 401);
+
+    const incorrect = await fetch(`${baseUrl}/api/status`, {
+      headers: { authorization: "Bearer incorrect-token" },
+    });
+    assert.equal(incorrect.status, 401);
+    assert.ok(!(await incorrect.text()).includes(configuredToken));
+
+    config.api.token = "";
+    for (const [path, method] of [
+      ["/api/status", "GET"],
+      ["/chat", "POST"],
+      ["/api/chat", "POST"],
+      ["/api/chat/stream", "GET"],
+      ["/tasks", "POST"],
+      ["/api/tasks/dispatch", "POST"],
+    ] as const) {
+      const notConfigured = await fetch(`${baseUrl}${path}`, { method });
+      assert.equal(notConfigured.status, 503, `${method} ${path} doit échouer en mode fail-closed`);
+      assert.deepEqual(await notConfigured.json(), { error: "API_TOKEN_NOT_CONFIGURED" });
+    }
+
+    assert.equal((await fetch(`${baseUrl}/`)).status, 200);
+    assert.equal((await fetch(`${baseUrl}/index.html`)).status, 200);
+    assert.equal((await fetch(`${baseUrl}/app.js`)).status, 200);
+    assert.equal((await fetch(`${baseUrl}/style.css`)).status, 200);
+    assert.equal((await fetch(`${baseUrl}/api/status`, { method: "OPTIONS" })).status, 204);
+  } finally {
+    server.close();
+    config.api.token = previousToken;
   }
 });
