@@ -1,5 +1,6 @@
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import type { RiskLevel } from "./contract.js";
 
 export interface ServiceDefinition {
   id: string;
@@ -8,6 +9,15 @@ export interface ServiceDefinition {
   endpoint: string;
   capabilities: string[];
   priority: number;
+  riskByCapability?: Record<string, RiskLevel>;
+}
+
+const RISK_LEVELS = new Set<RiskLevel>(["LOW", "MEDIUM", "HIGH", "CRITICAL"]);
+
+export function riskForCapability(service: ServiceDefinition, capability: string): RiskLevel | null {
+  const configured = service.riskByCapability?.[capability];
+  if (configured === undefined) return "LOW";
+  return RISK_LEVELS.has(configured) ? configured : null;
 }
 
 export function resolveServiceEndpoint(service: ServiceDefinition): ServiceDefinition {

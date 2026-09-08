@@ -331,16 +331,36 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
           return;
         }
 
-        if (body.action === "authorize") {
-          agent.serviceOrchestrator.store.updateStatus(taskId, "RUNNING", "Autorisation accordée par l'utilisateur.");
-        } else if (body.action === "reject") {
-          agent.serviceOrchestrator.store.updateStatus(taskId, "REJECTED", undefined, "Refusé par l'utilisateur.");
-        } else if (body.action === "input" && body.value) {
-          agent.serviceOrchestrator.store.updateStatus(taskId, "RUNNING", `Réponse utilisateur: ${body.value}`);
+        if (body.action === "input") {
+          sendJson(res, 409, { error: "SERVICE_CONTINUATION_NOT_SUPPORTED" });
+          return;
         }
-
-        const updated = agent.serviceOrchestrator.store.getOperation(taskId);
-        sendJson(res, 200, { ok: true, operation: updated });
+        if (body.action === "authorize") {
+          if (op.status !== "WAITING_PERMISSION" || op.approvalState !== "PENDING") {
+            sendJson(res, 409, { error: "OPERATION_NOT_PENDING_PRE_DISPATCH_APPROVAL" });
+            return;
+          }
+          if (op.riskLevel === "CRITICAL" && body.value !== "APPROVE_CRITICAL") {
+            sendJson(res, 409, { error: "CRITICAL_CONFIRMATION_REQUIRED" });
+            return;
+          }
+          const result = await agent.serviceOrchestrator.approvePendingOperation(taskId, body.value);
+          if (!result) {
+            sendJson(res, 409, { error: "APPROVAL_ALREADY_DECIDED" });
+            return;
+          }
+          sendJson(res, 200, { ok: true, operation: agent.serviceOrchestrator.store.getOperation(taskId), result });
+          return;
+        }
+        if (body.action === "reject") {
+          if (!agent.serviceOrchestrator.rejectPendingOperation(taskId)) {
+            sendJson(res, 409, { error: "OPERATION_NOT_PENDING_PRE_DISPATCH_APPROVAL" });
+            return;
+          }
+          sendJson(res, 200, { ok: true, operation: agent.serviceOrchestrator.store.getOperation(taskId) });
+          return;
+        }
+        sendJson(res, 400, { error: "INVALID_OPERATION_RESPONSE" });
         return;
       }
 

@@ -5,7 +5,8 @@
     "enabled": true,
     "endpoint": "http://localhost:4000",
     "capabilities": ["software_development", "code_generation"],
-    "priority": 10
+    "priority": 10,
+    "riskByCapability": { "software_development": "MEDIUM", "code_generation": "LOW" }
   },
   {
     "id": "mock_software_factory",
@@ -13,6 +14,7 @@
     "enabled": true,
     "endpoint": "http://localhost:4000",
     "capabilities": ["software_development", "code_generation"],
-    "priority": 5
+    "priority": 5,
+    "riskByCapability": { "software_development": "MEDIUM", "code_generation": "LOW" }
   }
 ]

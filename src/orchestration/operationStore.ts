@@ -1,5 +1,5 @@
 import { getDb } from "../persistence/db.js";
-import type { OperationStatus, ServiceEvent } from "./contract.js";
+import type { ApprovalState, OperationStatus, RiskLevel, ServiceEvent, TaskRequest } from "./contract.js";
 
 export interface ServiceOperation {
   taskId: string;
@@ -12,6 +12,11 @@ export interface ServiceOperation {
   result?: string;
   error?: string;
   retryable?: boolean;
+  riskLevel: RiskLevel;
+  approvalState: ApprovalState;
+  approvalReason?: string;
+  approvalRequestedAt?: number;
+  approvalDecidedAt?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -21,27 +26,31 @@ const ALLOWED_TRANSITIONS: Record<OperationStatus, OperationStatus[]> = {
   DISPATCHING: ["RUNNING", "COMPLETED", "FAILED", "REJECTED"],
   RUNNING: ["WAITING_INPUT", "WAITING_PERMISSION", "COMPLETED", "FAILED", "REJECTED"],
   WAITING_INPUT: ["RUNNING", "FAILED", "REJECTED"],
-  WAITING_PERMISSION: ["RUNNING", "REJECTED", "FAILED"],
+  WAITING_PERMISSION: ["DISPATCHING", "REJECTED", "FAILED"],
   COMPLETED: [], // Terminal
   REJECTED: [], // Terminal
   FAILED: ["RUNNING", "DISPATCHING"], // Terminal unless retryable
 };
 
 export class OperationStore {
-  createOperation(op: Omit<ServiceOperation, "createdAt" | "updatedAt">): ServiceOperation {
+  createOperation(op: Omit<ServiceOperation, "createdAt" | "updatedAt" | "riskLevel" | "approvalState"> &
+    Partial<Pick<ServiceOperation, "riskLevel" | "approvalState">>): ServiceOperation {
     const db = getDb();
     const now = Date.now();
     const fullOp: ServiceOperation = {
       ...op,
       retryable: op.retryable ?? false,
+      riskLevel: op.riskLevel ?? "LOW",
+      approvalState: op.approvalState ?? "NOT_REQUIRED",
       createdAt: now,
       updatedAt: now,
     };
 
     db.prepare(`
       INSERT INTO service_operations (
-        task_id, trace_id, idempotency_key, objective, capability, selected_service, status, result, error, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        task_id, trace_id, idempotency_key, objective, capability, selected_service, status, result, error,
+        risk_level, approval_state, approval_reason, approval_requested_at, pending_request_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       fullOp.taskId,
       fullOp.traceId,
@@ -52,6 +61,11 @@ export class OperationStore {
       fullOp.status,
       fullOp.result ?? null,
       fullOp.error ?? null,
+      fullOp.riskLevel,
+      fullOp.approvalState,
+      fullOp.approvalReason ?? null,
+      fullOp.approvalRequestedAt ?? null,
+      null,
       fullOp.createdAt,
       fullOp.updatedAt,
     );
@@ -68,14 +82,8 @@ export class OperationStore {
       // Direct result update on same status allowed
     } else {
       const allowed = ALLOWED_TRANSITIONS[currentOp.status] || [];
-      if (!allowed.includes(status)) {
-        if (currentOp.status === "FAILED" && !currentOp.retryable && (status === "RUNNING" || status === "DISPATCHING")) {
-          return false;
-        }
-        if (currentOp.status === "COMPLETED" || currentOp.status === "REJECTED") {
-          return false;
-        }
-      }
+      if (!allowed.includes(status)) return false;
+      if (currentOp.status === "FAILED" && !currentOp.retryable) return false;
     }
 
     const db = getDb();
@@ -88,6 +96,39 @@ export class OperationStore {
     `).run(status, result ?? null, error ?? null, now, taskId);
 
     return true;
+  }
+
+  setPendingApproval(taskId: string, request: TaskRequest, riskLevel: RiskLevel, reason: string): boolean {
+    const now = Date.now();
+    const result = getDb().prepare(`UPDATE service_operations SET status = 'WAITING_PERMISSION', risk_level = ?,
+      approval_state = 'PENDING', approval_reason = ?, approval_requested_at = ?, pending_request_json = ?, updated_at = ?
+      WHERE task_id = ? AND status = 'QUEUED'`).run(riskLevel, reason, now, JSON.stringify(request), now, taskId);
+    return result.changes === 1;
+  }
+
+  claimPendingApproval(taskId: string): TaskRequest | null {
+    const db = getDb();
+    return db.transaction(() => {
+      const row = db.prepare(`SELECT pending_request_json FROM service_operations
+        WHERE task_id = ? AND status = 'WAITING_PERMISSION' AND approval_state = 'PENDING'`).get(taskId) as
+        | { pending_request_json: string | null } | undefined;
+      if (!row?.pending_request_json) return null;
+      let request: TaskRequest;
+      try { request = JSON.parse(row.pending_request_json) as TaskRequest; } catch { return null; }
+      const now = Date.now();
+      const changed = db.prepare(`UPDATE service_operations SET approval_state = 'APPROVED', approval_decided_at = ?,
+        status = 'DISPATCHING', updated_at = ? WHERE task_id = ? AND status = 'WAITING_PERMISSION' AND approval_state = 'PENDING'`)
+        .run(now, now, taskId).changes;
+      return changed === 1 ? request : null;
+    })();
+  }
+
+  rejectPendingApproval(taskId: string): boolean {
+    const now = Date.now();
+    return getDb().prepare(`UPDATE service_operations SET approval_state = 'REJECTED', approval_decided_at = ?,
+      status = 'REJECTED', error = 'Refusé par l’utilisateur.', updated_at = ?
+      WHERE task_id = ? AND status = 'WAITING_PERMISSION' AND approval_state = 'PENDING'`)
+      .run(now, now, taskId).changes === 1;
   }
 
   getOperation(taskId: string): ServiceOperation | null {
@@ -105,6 +146,11 @@ export class OperationStore {
           error: string | null;
           created_at: number;
           updated_at: number;
+          risk_level: RiskLevel;
+          approval_state: ApprovalState;
+          approval_reason: string | null;
+          approval_requested_at: number | null;
+          approval_decided_at: number | null;
         }
       | undefined;
 
@@ -124,6 +170,11 @@ export class OperationStore {
       result: row.result ?? undefined,
       error: row.error ?? undefined,
       retryable: isRetryable,
+      riskLevel: row.risk_level,
+      approvalState: row.approval_state,
+      approvalReason: row.approval_reason ?? undefined,
+      approvalRequestedAt: row.approval_requested_at ?? undefined,
+      approvalDecidedAt: row.approval_decided_at ?? undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -144,6 +195,8 @@ export class OperationStore {
           error: string | null;
           created_at: number;
           updated_at: number;
+          risk_level: RiskLevel; approval_state: ApprovalState; approval_reason: string | null;
+          approval_requested_at: number | null; approval_decided_at: number | null;
         }
       | undefined;
 
@@ -163,6 +216,9 @@ export class OperationStore {
       result: row.result ?? undefined,
       error: row.error ?? undefined,
       retryable: isRetryable,
+      riskLevel: row.risk_level, approvalState: row.approval_state,
+      approvalReason: row.approval_reason ?? undefined, approvalRequestedAt: row.approval_requested_at ?? undefined,
+      approvalDecidedAt: row.approval_decided_at ?? undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -182,6 +238,8 @@ export class OperationStore {
       error: string | null;
       created_at: number;
       updated_at: number;
+      risk_level: RiskLevel; approval_state: ApprovalState; approval_reason: string | null;
+      approval_requested_at: number | null; approval_decided_at: number | null;
     }>;
 
     return rows.map((row) => {
@@ -198,6 +256,9 @@ export class OperationStore {
         result: row.result ?? undefined,
         error: row.error ?? undefined,
         retryable: isRetryable,
+        riskLevel: row.risk_level, approvalState: row.approval_state,
+        approvalReason: row.approval_reason ?? undefined, approvalRequestedAt: row.approval_requested_at ?? undefined,
+        approvalDecidedAt: row.approval_decided_at ?? undefined,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
       };

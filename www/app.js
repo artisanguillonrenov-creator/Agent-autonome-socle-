@@ -495,6 +495,47 @@ function validHttpUrl(value) {
   }
 }
 
+function appendApprovalControls(host, operation, onDecision) {
+  if (operation.status !== 'WAITING_PERMISSION' || operation.approvalState !== 'PENDING') return;
+  const panel = document.createElement('div');
+  panel.className = 'approval-controls';
+  const title = document.createElement('strong');
+  title.textContent = 'Approbation requise';
+  const risk = document.createElement('div');
+  risk.textContent = `Niveau : ${operation.riskLevel}`;
+  const reason = document.createElement('div');
+  reason.textContent = operation.approvalReason || 'Approbation humaine requise avant dispatch.';
+  const approve = document.createElement('button');
+  approve.className = 'btn btn-primary';
+  approve.textContent = 'Autoriser';
+  const reject = document.createElement('button');
+  reject.className = 'btn btn-secondary';
+  reject.textContent = 'Refuser';
+  const decide = async (action) => {
+    approve.disabled = reject.disabled = true;
+    try {
+      let value;
+      if (action === 'authorize' && operation.riskLevel === 'CRITICAL') {
+        value = window.prompt('Saisissez APPROVE_CRITICAL pour confirmer :');
+        if (value !== 'APPROVE_CRITICAL') return;
+      }
+      await fetchApi(`/api/operations/${encodeURIComponent(operation.taskId)}/respond`, {
+        method: 'POST', body: JSON.stringify({ action, value }),
+      });
+      await onDecision();
+    } finally {
+      approve.disabled = reject.disabled = false;
+    }
+  };
+  approve.addEventListener('click', () => void decide('authorize'));
+  reject.addEventListener('click', () => void decide('reject'));
+  const buttons = document.createElement('div');
+  buttons.className = 'approval-buttons';
+  buttons.append(approve, reject);
+  panel.append(title, risk, reason, buttons);
+  host.appendChild(panel);
+}
+
 function renderTimelineCard(view, operation, events) {
   view.status.textContent = operation.status;
   view.status.dataset.status = operation.status;
@@ -522,6 +563,11 @@ function renderTimelineCard(view, operation, events) {
       }
     }
     view.steps.appendChild(row);
+  });
+  appendApprovalControls(view.steps, operation, async () => {
+    const refreshed = await fetchApi(`/api/operations/${encodeURIComponent(operation.taskId)}`);
+    const eventData = await fetchApi(`/api/operations/${encodeURIComponent(operation.taskId)}/events`);
+    renderTimelineCard(view, refreshed, Array.isArray(eventData.events) ? eventData.events : []);
   });
 
   view.raw.textContent = JSON.stringify({
@@ -721,6 +767,8 @@ async function renderOperationsView() {
         `).join('')}
       </div>
     `;
+    const cards = container.querySelectorAll('.card');
+    ops.forEach((op, index) => appendApprovalControls(cards[index], op, renderOperationsView));
   } catch (err) {
     container.innerHTML = `<div class="card" style="border-color: var(--accent-danger);"><div class="card-title" style="color: var(--accent-danger);">${err.message}</div></div>`;
   }

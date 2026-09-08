@@ -98,6 +98,9 @@ body {
   white-space: pre-wrap;
 }
 
+.approval-controls { margin-top: 12px; padding: 12px; border: 1px solid var(--accent-warning, #f59e0b); border-radius: 8px; }
+.approval-buttons { display: flex; gap: 8px; margin-top: 10px; }
+
 /* APP LAYOUT */
 #app {
   display: flex;

@@ -5,6 +5,9 @@
 
 export const CONTRACT_SCHEMA_VERSION = "1.0";
 
+export type RiskLevel = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+export type ApprovalState = "NOT_REQUIRED" | "PENDING" | "APPROVED" | "REJECTED";
+
 export type OperationStatus =
   | "QUEUED"
   | "DISPATCHING"
