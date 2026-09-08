@@ -16,7 +16,10 @@ export type OperationStatus =
   | "WAITING_PERMISSION"
   | "COMPLETED"
   | "FAILED"
-  | "REJECTED";
+  | "REJECTED"
+  | "CANCELLED";
+
+export type ExecutionMode = "foreground" | "background";
 
 /**
  * Structure de requête pour délégation de capacité externe vers ServiceOrchestrator

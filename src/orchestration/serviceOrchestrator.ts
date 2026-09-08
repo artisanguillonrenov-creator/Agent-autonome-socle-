@@ -68,7 +68,7 @@ export class ServiceOrchestrator {
 
   async dispatchCapability(
     decision: DispatchCapabilityDecision,
-    opts?: { traceId?: string; idempotencyKey?: string },
+    opts?: { traceId?: string; idempotencyKey?: string; executionMode?: "foreground" | "background"; scheduleTaskId?: string },
   ): Promise<OrchestrationResult> {
     const traceId = opts?.traceId || `trace-${randomUUID()}`;
     const idempotencyKey = opts?.idempotencyKey || `idemp-${randomUUID()}`;
@@ -144,9 +144,12 @@ export class ServiceOrchestrator {
         objective: decision.objective,
         capability: decision.capability,
         selectedService: service.id,
-        status: riskLevel === "HIGH" || riskLevel === "CRITICAL" ? "QUEUED" : "DISPATCHING",
+        status: riskLevel === "HIGH" || riskLevel === "CRITICAL" ? "QUEUED" : opts?.executionMode === "background" ? "QUEUED" : "DISPATCHING",
         riskLevel,
         approvalState: "NOT_REQUIRED",
+        executionMode: opts?.executionMode ?? "foreground",
+        queuedAt: opts?.executionMode === "background" && riskLevel !== "HIGH" && riskLevel !== "CRITICAL" ? Date.now() : undefined,
+        scheduleTaskId: opts?.scheduleTaskId,
       });
     } else {
       this.store.updateStatus(taskId, "DISPATCHING", undefined, "Nouvelle tentative après échec réseau.");
@@ -166,6 +169,8 @@ export class ServiceOrchestrator {
       permissions: [],
     };
 
+    if (!existingOp && opts?.executionMode === "background") this.store.setDispatchRequest(taskId, request, riskLevel !== "HIGH" && riskLevel !== "CRITICAL");
+
     if (!existingOp && (riskLevel === "HIGH" || riskLevel === "CRITICAL")) {
       const reason = riskLevel === "CRITICAL"
         ? "Risque critique : confirmation renforcée obligatoire avant tout envoi au service."
@@ -178,6 +183,8 @@ export class ServiceOrchestrator {
       }
       return { taskId, traceId, status: "WAITING_PERMISSION", selectedService: service.id };
     }
+
+    if (opts?.executionMode === "background") return { taskId, traceId, status: "QUEUED", selectedService: service.id };
 
     // 5. Determine specific timeout for service
     const timeoutMs =
@@ -223,6 +230,11 @@ export class ServiceOrchestrator {
     const operation = this.store.getOperation(taskId);
     if (!operation || operation.status !== "WAITING_PERMISSION" || operation.approvalState !== "PENDING") return null;
     if (operation.riskLevel === "CRITICAL" && confirmation !== "APPROVE_CRITICAL") return null;
+    if (operation.executionMode === "background") {
+      if (!this.store.approveBackground(taskId)) return null;
+      const updated=this.store.getOperation(taskId)!;
+      return {taskId,traceId:updated.traceId,status:updated.status,selectedService:updated.selectedService};
+    }
     const request = this.store.claimPendingApproval(taskId);
     if (!request) return null;
     const service = this.registry.getServiceById(operation.selectedService);
@@ -237,6 +249,18 @@ export class ServiceOrchestrator {
     const updated = this.store.getOperation(taskId)!;
     return { taskId, traceId: updated.traceId, status: updated.status, selectedService: updated.selectedService,
       result: updated.result, error: updated.error, ...extractOperationMetadata(updated.result) };
+  }
+
+
+  async executeClaimed(request: TaskRequest): Promise<ServiceOperation> {
+    const operation=this.store.getOperation(request.task_id); if(!operation) throw new Error("OPERATION_NOT_FOUND");
+    const service=this.registry.getServiceById(operation.selectedService);
+    if(!service){this.store.updateStatus(operation.taskId,"FAILED",undefined,"Service introuvable.");return this.store.getOperation(operation.taskId)!;}
+    const timeoutMs=service.id==="software_factory"?config.softwareFactory.timeoutMs:5000;
+    const response=await this.adapter.dispatchTask(service.endpoint,request,timeoutMs);
+    if(!response.success)this.store.updateStatus(operation.taskId,"FAILED",undefined,`TRANSPORT_UNKNOWN: ${response.message}`,true);
+    else for(const event of response.events)this.store.processEvent(event);
+    return this.store.getOperation(operation.taskId)!;
   }
 
   rejectPendingOperation(taskId: string): boolean {

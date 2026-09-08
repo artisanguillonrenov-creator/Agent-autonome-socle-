@@ -1,5 +1,5 @@
 import { getDb } from "../persistence/db.js";
-import type { ApprovalState, OperationStatus, RiskLevel, ServiceEvent, TaskRequest } from "./contract.js";
+import type { ApprovalState, ExecutionMode, OperationStatus, RiskLevel, ServiceEvent, TaskRequest } from "./contract.js";
 
 export interface ServiceOperation {
   taskId: string;
@@ -17,19 +17,26 @@ export interface ServiceOperation {
   approvalReason?: string;
   approvalRequestedAt?: number;
   approvalDecidedAt?: number;
+  executionMode: ExecutionMode;
+  queuedAt?: number;
+  startedAt?: number;
+  finishedAt?: number;
+  cancelRequestedAt?: number;
+  scheduleTaskId?: string;
   createdAt: number;
   updatedAt: number;
 }
 
 const ALLOWED_TRANSITIONS: Record<OperationStatus, OperationStatus[]> = {
-  QUEUED: ["DISPATCHING", "RUNNING", "FAILED", "REJECTED"],
+  QUEUED: ["DISPATCHING", "RUNNING", "FAILED", "REJECTED", "CANCELLED"],
   DISPATCHING: ["RUNNING", "COMPLETED", "FAILED", "REJECTED"],
   RUNNING: ["WAITING_INPUT", "WAITING_PERMISSION", "COMPLETED", "FAILED", "REJECTED"],
   WAITING_INPUT: ["RUNNING", "FAILED", "REJECTED"],
-  WAITING_PERMISSION: ["DISPATCHING", "REJECTED", "FAILED"],
+  WAITING_PERMISSION: ["QUEUED", "DISPATCHING", "REJECTED", "FAILED", "CANCELLED"],
   COMPLETED: [], // Terminal
   REJECTED: [], // Terminal
   FAILED: ["RUNNING", "DISPATCHING"], // Terminal unless retryable
+  CANCELLED: [],
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -59,8 +66,8 @@ function validatePendingTaskRequest(
 }
 
 export class OperationStore {
-  createOperation(op: Omit<ServiceOperation, "createdAt" | "updatedAt" | "riskLevel" | "approvalState"> &
-    Partial<Pick<ServiceOperation, "riskLevel" | "approvalState">>): ServiceOperation {
+  createOperation(op: Omit<ServiceOperation, "createdAt" | "updatedAt" | "riskLevel" | "approvalState" | "executionMode"> &
+    Partial<Pick<ServiceOperation, "riskLevel" | "approvalState" | "executionMode">>): ServiceOperation {
     const db = getDb();
     const now = Date.now();
     const fullOp: ServiceOperation = {
@@ -68,6 +75,7 @@ export class OperationStore {
       retryable: op.retryable ?? false,
       riskLevel: op.riskLevel ?? "LOW",
       approvalState: op.approvalState ?? "NOT_REQUIRED",
+      executionMode: op.executionMode ?? "foreground",
       createdAt: now,
       updatedAt: now,
     };
@@ -75,8 +83,9 @@ export class OperationStore {
     db.prepare(`
       INSERT INTO service_operations (
         task_id, trace_id, idempotency_key, objective, capability, selected_service, status, result, error,
-        risk_level, approval_state, approval_reason, approval_requested_at, pending_request_json, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        risk_level, approval_state, approval_reason, approval_requested_at, pending_request_json,
+        execution_mode, dispatch_request_json, queued_at, schedule_task_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       fullOp.taskId,
       fullOp.traceId,
@@ -92,11 +101,53 @@ export class OperationStore {
       fullOp.approvalReason ?? null,
       fullOp.approvalRequestedAt ?? null,
       null,
+      fullOp.executionMode,
+      null,
+      fullOp.queuedAt ?? null,
+      fullOp.scheduleTaskId ?? null,
       fullOp.createdAt,
       fullOp.updatedAt,
     );
 
     return fullOp;
+  }
+
+  setDispatchRequest(taskId: string, request: TaskRequest, queued: boolean): boolean {
+    const now = Date.now();
+    return getDb().prepare(`UPDATE service_operations SET dispatch_request_json=?, queued_at=CASE WHEN ? THEN ? ELSE queued_at END, updated_at=? WHERE task_id=?`)
+      .run(JSON.stringify(request), queued ? 1 : 0, now, now, taskId).changes === 1;
+  }
+
+  claimNextBackground(): { operation: ServiceOperation; request: TaskRequest } | null {
+    const db = getDb();
+    return db.transaction(() => {
+      const row = db.prepare(`SELECT task_id,dispatch_request_json FROM service_operations WHERE execution_mode='background' AND status='QUEUED' ORDER BY queued_at,created_at LIMIT 1`).get() as any;
+      if (!row?.dispatch_request_json) return null;
+      const op = this.getOperation(row.task_id); if (!op) return null;
+      let parsed: unknown; try { parsed = JSON.parse(row.dispatch_request_json); } catch { return null; }
+      const request = validatePendingTaskRequest(parsed, op); if (!request) {
+        db.prepare(`UPDATE service_operations SET status='FAILED',error='INVALID_DISPATCH_REQUEST',finished_at=?,updated_at=? WHERE task_id=? AND status='QUEUED'`).run(Date.now(),Date.now(),op.taskId); return null;
+      }
+      const now=Date.now(); const changed=db.prepare(`UPDATE service_operations SET status='DISPATCHING',started_at=?,updated_at=? WHERE task_id=? AND status='QUEUED'`).run(now,now,op.taskId).changes;
+      return changed === 1 ? { operation: { ...op, status: "DISPATCHING" as const, startedAt: now }, request } : null;
+    })();
+  }
+
+  approveBackground(taskId: string): boolean {
+    const now=Date.now(); return getDb().prepare(`UPDATE service_operations SET approval_state='APPROVED',approval_decided_at=?,status='QUEUED',queued_at=?,dispatch_request_json=pending_request_json,updated_at=? WHERE task_id=? AND status='WAITING_PERMISSION' AND approval_state='PENDING' AND execution_mode='background'`).run(now,now,now,taskId).changes===1;
+  }
+
+  cancel(taskId: string): { cancelled: boolean; requested: boolean; operation: ServiceOperation } | null {
+    const op=this.getOperation(taskId); if(!op)return null; const now=Date.now();
+    if(op.status==="QUEUED"||op.status==="WAITING_PERMISSION") getDb().prepare(`UPDATE service_operations SET status='CANCELLED',cancel_requested_at=?,finished_at=?,updated_at=? WHERE task_id=? AND status=?`).run(now,now,now,taskId,op.status);
+    else if(op.status==="DISPATCHING"||op.status==="RUNNING") getDb().prepare(`UPDATE service_operations SET cancel_requested_at=?,updated_at=? WHERE task_id=?`).run(now,now,taskId);
+    const updated=this.getOperation(taskId)!; return {cancelled:updated.status==="CANCELLED",requested:updated.cancelRequestedAt!==undefined,operation:updated};
+  }
+
+  recoverInterrupted(): ServiceOperation[] {
+    const db=getDb(); const rows=db.prepare(`SELECT task_id FROM service_operations WHERE execution_mode='background' AND status IN ('DISPATCHING','RUNNING')`).all() as Array<{task_id:string}>; const now=Date.now();
+    for(const row of rows) db.prepare(`UPDATE service_operations SET status='FAILED',error='INTERRUPTED_EXECUTION_STATE_UNKNOWN',finished_at=?,updated_at=? WHERE task_id=?`).run(now,now,row.task_id);
+    return rows.map(r=>this.getOperation(r.task_id)!).filter(Boolean);
   }
 
   updateStatus(taskId: string, status: OperationStatus, result?: string, error?: string, retryable?: boolean): boolean {
@@ -117,9 +168,10 @@ export class OperationStore {
 
     db.prepare(`
       UPDATE service_operations
-      SET status = ?, result = COALESCE(?, result), error = COALESCE(?, error), updated_at = ?
+      SET status = ?, result = COALESCE(?, result), error = COALESCE(?, error),
+          finished_at = CASE WHEN ? IN ('COMPLETED','FAILED','REJECTED','CANCELLED') THEN ? ELSE finished_at END, updated_at = ?
       WHERE task_id = ?
-    `).run(status, result ?? null, error ?? null, now, taskId);
+    `).run(status, result ?? null, error ?? null, status, now, now, taskId);
 
     return true;
   }
@@ -151,7 +203,7 @@ export class OperationStore {
       if (!request) return null;
       const now = Date.now();
       const changed = db.prepare(`UPDATE service_operations SET approval_state = 'APPROVED', approval_decided_at = ?,
-        status = 'DISPATCHING', updated_at = ? WHERE task_id = ? AND status = 'WAITING_PERMISSION' AND approval_state = 'PENDING'`)
+        status = 'DISPATCHING', updated_at = ? WHERE task_id = ? AND status = 'WAITING_PERMISSION' AND approval_state = 'PENDING' AND execution_mode='foreground'`)
         .run(now, now, taskId).changes;
       return changed === 1 ? request : null;
     })();
@@ -185,6 +237,8 @@ export class OperationStore {
           approval_reason: string | null;
           approval_requested_at: number | null;
           approval_decided_at: number | null;
+          execution_mode: ExecutionMode; queued_at: number | null; started_at: number | null; finished_at: number | null;
+          cancel_requested_at: number | null; schedule_task_id: string | null;
         }
       | undefined;
 
@@ -209,6 +263,9 @@ export class OperationStore {
       approvalReason: row.approval_reason ?? undefined,
       approvalRequestedAt: row.approval_requested_at ?? undefined,
       approvalDecidedAt: row.approval_decided_at ?? undefined,
+      executionMode: row.execution_mode ?? "foreground", queuedAt: row.queued_at ?? undefined,
+      startedAt: row.started_at ?? undefined, finishedAt: row.finished_at ?? undefined,
+      cancelRequestedAt: row.cancel_requested_at ?? undefined, scheduleTaskId: row.schedule_task_id ?? undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -231,6 +288,8 @@ export class OperationStore {
           updated_at: number;
           risk_level: RiskLevel; approval_state: ApprovalState; approval_reason: string | null;
           approval_requested_at: number | null; approval_decided_at: number | null;
+          execution_mode: ExecutionMode; queued_at: number | null; started_at: number | null; finished_at: number | null;
+          cancel_requested_at: number | null; schedule_task_id: string | null;
         }
       | undefined;
 
@@ -253,6 +312,9 @@ export class OperationStore {
       riskLevel: row.risk_level, approvalState: row.approval_state,
       approvalReason: row.approval_reason ?? undefined, approvalRequestedAt: row.approval_requested_at ?? undefined,
       approvalDecidedAt: row.approval_decided_at ?? undefined,
+      executionMode: row.execution_mode ?? "foreground", queuedAt: row.queued_at ?? undefined,
+      startedAt: row.started_at ?? undefined, finishedAt: row.finished_at ?? undefined,
+      cancelRequestedAt: row.cancel_requested_at ?? undefined, scheduleTaskId: row.schedule_task_id ?? undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -274,6 +336,8 @@ export class OperationStore {
       updated_at: number;
       risk_level: RiskLevel; approval_state: ApprovalState; approval_reason: string | null;
       approval_requested_at: number | null; approval_decided_at: number | null;
+      execution_mode: ExecutionMode; queued_at: number | null; started_at: number | null; finished_at: number | null;
+      cancel_requested_at: number | null; schedule_task_id: string | null;
     }>;
 
     return rows.map((row) => {
@@ -293,6 +357,9 @@ export class OperationStore {
         riskLevel: row.risk_level, approvalState: row.approval_state,
         approvalReason: row.approval_reason ?? undefined, approvalRequestedAt: row.approval_requested_at ?? undefined,
         approvalDecidedAt: row.approval_decided_at ?? undefined,
+        executionMode: row.execution_mode ?? "foreground", queuedAt: row.queued_at ?? undefined,
+        startedAt: row.started_at ?? undefined, finishedAt: row.finished_at ?? undefined,
+        cancelRequestedAt: row.cancel_requested_at ?? undefined, scheduleTaskId: row.schedule_task_id ?? undefined,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
       };

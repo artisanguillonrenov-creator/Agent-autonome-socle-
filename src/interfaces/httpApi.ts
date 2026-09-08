@@ -9,8 +9,10 @@ import { createLLMProvider } from "../llm/providers/index.js";
 import { saveLLMConfig } from "../persistence/llmConfigStore.js";
 import { SoftwareFactoryService } from "../services/softwareFactoryService.js";
 import type { TaskRequest } from "../orchestration/contract.js";
+import { NotificationStore } from "../autonomy/notificationStore.js";
 
 const taskStore = new TaskStore();
+const notificationStore = new NotificationStore();
 const softwareFactoryService = new SoftwareFactoryService();
 let lastServerError: string | null = null;
 
@@ -171,6 +173,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
           {
             traceId: taskReq.trace_id,
             idempotencyKey: taskReq.idempotency_key,
+            executionMode: (taskReq as TaskRequest & {execution_mode?:string}).execution_mode === "background" ? "background" : "foreground",
           },
         );
 
@@ -292,6 +295,23 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         sendJson(res, 200, agent.serviceOrchestrator.store.listOperations());
         return;
       }
+
+      const cancelMatch=pathname.match(/^\/api\/operations\/([^/]+)\/cancel$/);
+      if(req.method==="POST"&&cancelMatch){const result=agent.serviceOrchestrator.store.cancel(cancelMatch[1]);if(!result){sendJson(res,404,{error:"opération non trouvée"});return;}sendJson(res,200,{...result,message:result.cancelled?"Opération annulée avant dispatch.":result.requested?"Annulation demandée, sans garantie pour l’effet externe.":"Opération déjà terminée."});return;}
+
+      if(req.method==="GET"&&pathname==="/api/notifications/unread-count"){sendJson(res,200,{count:notificationStore.unreadCount()});return;}
+      if(req.method==="GET"&&pathname==="/api/notifications"){sendJson(res,200,notificationStore.list(parsedUrl.searchParams.get("unread")==="true"));return;}
+      const readMatch=pathname.match(/^\/api\/notifications\/([^/]+)\/read$/);
+      if(req.method==="POST"&&readMatch){const ok=notificationStore.markRead(readMatch[1]);sendJson(res,ok?200:404,ok?{ok:true}:{error:"notification non trouvée"});return;}
+
+      if(req.method==="GET"&&pathname==="/api/schedules"){sendJson(res,200,taskStore.listSchedules());return;}
+      if(req.method==="POST"&&pathname==="/api/schedules"){
+        let body:any;try{body=JSON.parse((await readBody(req))||"{}");}catch{sendJson(res,400,{error:"JSON invalide"});return;}
+        if(typeof body.title!=="string"||!body.title.trim()||!["REMINDER","DISPATCH","WATCH"].includes(body.taskType)||!Number.isSafeInteger(body.nextRunAt)||body.nextRunAt<0||(body.repeatIntervalMs!==undefined&&(!Number.isSafeInteger(body.repeatIntervalMs)||body.repeatIntervalMs<=0))||((body.taskType==="DISPATCH"||body.taskType==="WATCH")&&(!body.payload||body.payload.action!=="DISPATCH_CAPABILITY"||typeof body.payload.capability!=="string"||typeof body.payload.objective!=="string"))){sendJson(res,400,{error:"INVALID_SCHEDULE"});return;}
+        sendJson(res,201,taskStore.createSchedule({title:body.title.trim(),taskType:body.taskType,nextRunAt:body.nextRunAt,repeatIntervalMs:body.repeatIntervalMs,payload:body.payload}));return;
+      }
+      const toggleSchedule=pathname.match(/^\/api\/schedules\/([^/]+)\/(enable|disable)$/);
+      if(req.method==="POST"&&toggleSchedule){const ok=taskStore.setEnabled(toggleSchedule[1],toggleSchedule[2]==="enable");sendJson(res,ok?200:404,ok?{ok:true}:{error:"schedule non trouvé"});return;}
 
       const operationEventsMatch = pathname.match(/^\/api\/operations\/([^/]+)\/events$/);
       if (req.method === "GET" && operationEventsMatch) {

@@ -290,6 +290,9 @@ async function loadViewData(viewName) {
       case 'tasks':
         await renderTasksView();
         break;
+      case 'autonomy':
+        await renderAutonomyView();
+        break;
       case 'memory':
         await renderMemoryView();
         break;
@@ -768,10 +771,30 @@ async function renderOperationsView() {
       </div>
     `;
     const cards = container.querySelectorAll('.card');
-    ops.forEach((op, index) => appendApprovalControls(cards[index], op, renderOperationsView));
+    ops.forEach((op, index) => {
+      const card = cards[index];
+      if (op.executionMode === 'background') { const badge=document.createElement('span'); badge.className='badge badge-info'; badge.textContent='Background'; card.appendChild(badge); }
+      if (op.status === 'QUEUED' || op.status === 'WAITING_PERMISSION') { const button=document.createElement('button'); button.className='btn btn-secondary'; button.textContent='Annuler'; button.onclick=async()=>{await fetchApi(`/api/operations/${encodeURIComponent(op.taskId)}/cancel`,{method:'POST'});await renderOperationsView();};card.appendChild(button); }
+      if (op.cancelRequestedAt && (op.status === 'RUNNING' || op.status === 'DISPATCHING')) { const note=document.createElement('div');note.className='card-subtext';note.textContent='Annulation demandée — effet externe non garanti.';card.appendChild(note); }
+      appendApprovalControls(card, op, renderOperationsView);
+    });
   } catch (err) {
     container.innerHTML = `<div class="card" style="border-color: var(--accent-danger);"><div class="card-title" style="color: var(--accent-danger);">${err.message}</div></div>`;
   }
+}
+
+async function renderAutonomyView() {
+  const container=document.getElementById('view-autonomy'); container.replaceChildren();
+  const heading=document.createElement('h2');heading.textContent='Autonomie';container.appendChild(heading);
+  try {
+    const [notifications,schedules,count]=await Promise.all([fetchApi('/api/notifications'),fetchApi('/api/schedules'),fetchApi('/api/notifications/unread-count')]);
+    document.getElementById('notification-count').textContent=count.count?`(${count.count})`:'';
+    const makeSection=(title)=>{const card=document.createElement('div');card.className='card';const h=document.createElement('div');h.className='card-title';h.textContent=title;card.appendChild(h);container.appendChild(card);return card;};
+    const inbox=makeSection('Notifications');
+    for(const item of notifications){const row=document.createElement('div');row.className='autonomy-row';const text=document.createElement('span');text.textContent=`${item.title} — ${item.message}`;row.appendChild(text);if(!item.readAt){const b=document.createElement('button');b.className='btn btn-secondary';b.textContent='Marquer comme lu';b.onclick=async()=>{await fetchApi(`/api/notifications/${encodeURIComponent(item.id)}/read`,{method:'POST'});await renderAutonomyView();};row.appendChild(b);}inbox.appendChild(row);}
+    const scheduleBox=makeSection('Planifications');
+    for(const item of schedules){const row=document.createElement('div');row.className='autonomy-row';const text=document.createElement('span');text.textContent=`${item.title} · ${item.taskType} · ${item.nextRunAt?new Date(item.nextRunAt).toLocaleString():'terminé'} · ${item.repeatIntervalMs?`toutes les ${item.repeatIntervalMs} ms`:'une fois'}`;row.appendChild(text);const b=document.createElement('button');b.className='btn btn-secondary';b.textContent=item.enabled?'Désactiver':'Activer';b.onclick=async()=>{await fetchApi(`/api/schedules/${encodeURIComponent(item.id)}/${item.enabled?'disable':'enable'}`,{method:'POST'});await renderAutonomyView();};row.appendChild(b);scheduleBox.appendChild(row);}
+  } catch(err) { const error=document.createElement('div');error.textContent=err.message;container.appendChild(error); }
 }
 
 // 4. SERVICES VIEW
