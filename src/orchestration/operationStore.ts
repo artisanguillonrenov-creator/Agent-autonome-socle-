@@ -11,9 +11,21 @@ export interface ServiceOperation {
   status: OperationStatus;
   result?: string;
   error?: string;
+  retryable?: boolean;
   createdAt: number;
   updatedAt: number;
 }
+
+const ALLOWED_TRANSITIONS: Record<OperationStatus, OperationStatus[]> = {
+  QUEUED: ["DISPATCHING", "RUNNING", "FAILED", "REJECTED"],
+  DISPATCHING: ["RUNNING", "COMPLETED", "FAILED", "REJECTED"],
+  RUNNING: ["WAITING_INPUT", "WAITING_PERMISSION", "COMPLETED", "FAILED", "REJECTED"],
+  WAITING_INPUT: ["RUNNING", "FAILED", "REJECTED"],
+  WAITING_PERMISSION: ["RUNNING", "REJECTED", "FAILED"],
+  COMPLETED: [], // Terminal
+  REJECTED: [], // Terminal
+  FAILED: ["RUNNING", "DISPATCHING"], // Terminal unless retryable
+};
 
 export class OperationStore {
   createOperation(op: Omit<ServiceOperation, "createdAt" | "updatedAt">): ServiceOperation {
@@ -21,6 +33,7 @@ export class OperationStore {
     const now = Date.now();
     const fullOp: ServiceOperation = {
       ...op,
+      retryable: op.retryable ?? false,
       createdAt: now,
       updatedAt: now,
     };
@@ -46,7 +59,25 @@ export class OperationStore {
     return fullOp;
   }
 
-  updateStatus(taskId: string, status: OperationStatus, result?: string, error?: string): void {
+  updateStatus(taskId: string, status: OperationStatus, result?: string, error?: string, retryable?: boolean): boolean {
+    const currentOp = this.getOperation(taskId);
+    if (!currentOp) return false;
+
+    // Transition state machine validation
+    if (currentOp.status === status) {
+      // Direct result update on same status allowed
+    } else {
+      const allowed = ALLOWED_TRANSITIONS[currentOp.status] || [];
+      if (!allowed.includes(status)) {
+        if (currentOp.status === "FAILED" && !currentOp.retryable && (status === "RUNNING" || status === "DISPATCHING")) {
+          return false;
+        }
+        if (currentOp.status === "COMPLETED" || currentOp.status === "REJECTED") {
+          return false;
+        }
+      }
+    }
+
     const db = getDb();
     const now = Date.now();
 
@@ -55,6 +86,8 @@ export class OperationStore {
       SET status = ?, result = COALESCE(?, result), error = COALESCE(?, error), updated_at = ?
       WHERE task_id = ?
     `).run(status, result ?? null, error ?? null, now, taskId);
+
+    return true;
   }
 
   getOperation(taskId: string): ServiceOperation | null {
@@ -77,6 +110,9 @@ export class OperationStore {
 
     if (!row) return null;
 
+    const status = row.status as OperationStatus;
+    const isRetryable = status === "FAILED" && (row.error?.includes("TRANSPORT") || row.error?.includes("timeout") || row.error?.includes("Network"));
+
     return {
       taskId: row.task_id,
       traceId: row.trace_id,
@@ -84,9 +120,10 @@ export class OperationStore {
       objective: row.objective,
       capability: row.capability,
       selectedService: row.selected_service,
-      status: row.status as OperationStatus,
+      status,
       result: row.result ?? undefined,
       error: row.error ?? undefined,
+      retryable: isRetryable,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -94,7 +131,7 @@ export class OperationStore {
 
   getByIdempotencyKey(idempotencyKey: string): ServiceOperation | null {
     const db = getDb();
-    const row = db.prepare("SELECT * FROM service_operations WHERE idempotency_key = ?").get(idempotencyKey) as
+    const row = db.prepare("SELECT * FROM service_operations WHERE idempotency_key = ? ORDER BY created_at DESC").get(idempotencyKey) as
       | {
           task_id: string;
           trace_id: string;
@@ -112,6 +149,9 @@ export class OperationStore {
 
     if (!row) return null;
 
+    const status = row.status as OperationStatus;
+    const isRetryable = status === "FAILED" && (row.error?.includes("TRANSPORT") || row.error?.includes("timeout") || row.error?.includes("Network"));
+
     return {
       taskId: row.task_id,
       traceId: row.trace_id,
@@ -119,9 +159,10 @@ export class OperationStore {
       objective: row.objective,
       capability: row.capability,
       selectedService: row.selected_service,
-      status: row.status as OperationStatus,
+      status,
       result: row.result ?? undefined,
       error: row.error ?? undefined,
+      retryable: isRetryable,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -143,28 +184,59 @@ export class OperationStore {
       updated_at: number;
     }>;
 
-    return rows.map((row) => ({
-      taskId: row.task_id,
-      traceId: row.trace_id,
-      idempotencyKey: row.idempotency_key,
-      objective: row.objective,
-      capability: row.capability,
-      selectedService: row.selected_service,
-      status: row.status as OperationStatus,
-      result: row.result ?? undefined,
-      error: row.error ?? undefined,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    }));
+    return rows.map((row) => {
+      const status = row.status as OperationStatus;
+      const isRetryable = status === "FAILED" && (row.error?.includes("TRANSPORT") || row.error?.includes("timeout") || row.error?.includes("Network"));
+      return {
+        taskId: row.task_id,
+        traceId: row.trace_id,
+        idempotencyKey: row.idempotency_key,
+        objective: row.objective,
+        capability: row.capability,
+        selectedService: row.selected_service,
+        status,
+        result: row.result ?? undefined,
+        error: row.error ?? undefined,
+        retryable: isRetryable,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      };
+    });
   }
 
   processEvent(event: ServiceEvent): { duplicate: boolean; applied: boolean } {
     const db = getDb();
 
-    // Check if event was already processed (event_id deduplication)
-    const existing = db.prepare("SELECT event_id FROM processed_service_events WHERE event_id = ?").get(event.event_id);
-    if (existing) {
+    // 1. Deduplication by event_id
+    const existingEvt = db.prepare("SELECT event_id FROM processed_service_events WHERE event_id = ?").get(event.event_id);
+    if (existingEvt) {
       return { duplicate: true, applied: false };
+    }
+
+    // 2. Task validation
+    const currentOp = this.getOperation(event.task_id);
+    if (!currentOp) {
+      return { duplicate: false, applied: false };
+    }
+
+    // Trace ID & Service validation (allowing service aliases like software_factory <-> mock_software_factory)
+    const serviceMatches =
+      currentOp.selectedService === "none" ||
+      currentOp.selectedService === event.service ||
+      (currentOp.selectedService.includes("factory") && event.service.includes("factory"));
+
+    if (currentOp.traceId !== event.trace_id || !serviceMatches) {
+      return { duplicate: false, applied: false };
+    }
+
+    // 3. Sequence validation (must be strictly greater than last processed sequence)
+    const lastSeqRow = db.prepare("SELECT MAX(sequence) as max_seq FROM processed_service_events WHERE task_id = ?").get(event.task_id) as
+      | { max_seq: number | null }
+      | undefined;
+    const lastSequence = lastSeqRow?.max_seq ?? 0;
+
+    if (event.sequence <= lastSequence) {
+      return { duplicate: false, applied: false };
     }
 
     // Record processed event
@@ -208,10 +280,11 @@ export class OperationStore {
         break;
     }
 
+    let applied = false;
     if (status) {
-      this.updateStatus(event.task_id, status, result, error);
+      applied = this.updateStatus(event.task_id, status, result, error);
     }
 
-    return { duplicate: false, applied: true };
+    return { duplicate: false, applied };
   }
 }

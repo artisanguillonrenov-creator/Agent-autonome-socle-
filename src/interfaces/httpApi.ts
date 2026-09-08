@@ -350,20 +350,13 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
           return;
         }
 
-        try {
-          const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 3000);
-          const response = await fetch(service.endpoint, { method: "HEAD", signal: controller.signal }).catch(() => null);
-          clearTimeout(timeout);
-
-          sendJson(res, 200, {
-            id: service.id,
-            reachable: response ? true : false,
-            status: response ? response.status : "unreachable",
-          });
-        } catch (err) {
-          sendJson(res, 200, { id: service.id, reachable: false, error: (err as Error).message });
-        }
+        const healthRes = await agent.serviceOrchestrator.adapter.checkHealth(service.endpoint);
+        sendJson(res, 200, {
+          id: service.id,
+          reachable: healthRes.reachable,
+          status: healthRes.status,
+          authenticated: healthRes.authenticated ?? true,
+        });
         return;
       }
 
@@ -702,6 +695,15 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         const factoryService = agent.serviceOrchestrator.registry.getServiceById("software_factory");
         const githubDiag = await softwareFactoryService.getGitHubDiagnostics();
 
+        let factoryReachable = false;
+        let factoryAuthenticated = false;
+
+        if (factoryService) {
+          const healthRes = await agent.serviceOrchestrator.adapter.checkHealth(factoryService.endpoint);
+          factoryReachable = healthRes.reachable;
+          factoryAuthenticated = healthRes.authenticated ?? true;
+        }
+
         sendJson(res, 200, {
           jarvis: {
             running: true,
@@ -721,6 +723,8 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
             registered: Boolean(factoryService),
             enabled: factoryService?.enabled ?? false,
             endpoint: factoryService?.endpoint ?? "in-process",
+            reachable: factoryReachable,
+            authenticated: factoryAuthenticated,
           },
           github: githubDiag,
         });

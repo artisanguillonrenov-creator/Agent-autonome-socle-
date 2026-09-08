@@ -1,5 +1,6 @@
 import type { TaskRequest, ServiceEvent } from "./contract.js";
 import { SoftwareFactoryService } from "../services/softwareFactoryService.js";
+import { config } from "../config.js";
 
 export type ServiceAdapterResponse =
   | { success: true; events: ServiceEvent[] }
@@ -7,6 +8,42 @@ export type ServiceAdapterResponse =
 
 export class ServiceAdapter {
   private localSoftwareFactory = new SoftwareFactoryService();
+
+  private getAuthHeaders(): Record<string, string> {
+    const token = config.softwareFactory.token || config.api.token;
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+    };
+    if (token) {
+      headers["authorization"] = `Bearer ${token}`;
+    }
+    return headers;
+  }
+
+  async checkHealth(endpoint: string, timeoutMs = 5000): Promise<{ reachable: boolean; status: number | string; authenticated?: boolean }> {
+    const isLocalDirect = endpoint === "in-process" || endpoint === "local" || endpoint === "direct";
+    if (isLocalDirect) {
+      const diag = await this.localSoftwareFactory.getGitHubDiagnostics();
+      return { reachable: true, status: 200, authenticated: diag.authenticated };
+    }
+
+    const healthUrl = `${endpoint.replace(/\/+$/, "")}/health`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const res = await fetch(healthUrl, {
+        method: "GET",
+        headers: this.getAuthHeaders(),
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      return { reachable: res.ok, status: res.status, authenticated: res.status !== 401 };
+    } catch (err: unknown) {
+      clearTimeout(timer);
+      return { reachable: false, status: "unreachable" };
+    }
+  }
 
   async dispatchTask(endpoint: string, request: TaskRequest, timeoutMs = 5000): Promise<ServiceAdapterResponse> {
     const isLocalDirect = endpoint === "in-process" || endpoint === "local" || endpoint === "direct";
@@ -32,9 +69,7 @@ export class ServiceAdapter {
     try {
       const res = await fetch(targetUrl, {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-        },
+        headers: this.getAuthHeaders(),
         body: JSON.stringify(request),
         signal: controller.signal,
       });
