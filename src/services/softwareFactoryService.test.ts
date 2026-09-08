@@ -277,11 +277,14 @@ test("SoftwareFactoryService exécute le workflow complet avec branche unique pa
 
 function targetedWorkflowMock(options: {
   branchExists?: boolean;
+  branchHeadAfterUpdate?: string;
+  updateHasCommitSha?: boolean;
   pull?: { number: number; state: string; headBranch: string; fullName: string; url: string };
   pullGetFails?: boolean;
   existingPull?: { number: number; html_url: string };
 } = {}) {
   const calls: string[] = [];
+  let updatePerformed = false;
   const mock = {
     rest: {
       repos: {
@@ -292,7 +295,10 @@ function targetedWorkflowMock(options: {
         },
         createOrUpdateFileContents: async ({ branch }: { branch: string }) => {
           calls.push(`update:${branch}`);
-          return { data: { commit: { sha: `commit-${branch}` } } };
+          updatePerformed = true;
+          return options.updateHasCommitSha === false
+            ? { data: {} }
+            : { data: { commit: { sha: `commit-${branch}` } } };
         },
         compareCommits: async () => ({ data: { files: [{ filename: "src/app.ts" }] } }),
       },
@@ -301,7 +307,10 @@ function targetedWorkflowMock(options: {
           calls.push(`getRef:${ref}`);
           if (ref === "heads/main") return { data: { object: { sha: "base-sha" } } };
           if (options.branchExists === false) throw new Error("404");
-          return { data: { object: { sha: `sha-${ref}` } } };
+          const sha = updatePerformed && options.branchHeadAfterUpdate
+            ? options.branchHeadAfterUpdate
+            : `sha-${ref}`;
+          return { data: { object: { sha } } };
         },
         createRef: async () => {
           calls.push("createRef");
@@ -418,6 +427,56 @@ test("TARGET_BRANCH inexistante échoue sans créer la branche", async () => {
   const service = new SoftwareFactoryService({ githubToken: "token", octokitClient: mock });
   await assert.rejects(service.executeWorkflow(targetedParams("TARGET_BRANCH=missing"), "task-missing"), /TARGET_BRANCH_INVALID/);
   assert.ok(!calls.includes("createRef"));
+});
+
+test("TARGET_BRANCH=main est rejetée avant toute écriture", async () => {
+  const { mock, calls } = targetedWorkflowMock();
+  const service = new SoftwareFactoryService({ githubToken: "token", octokitClient: mock });
+  await assert.rejects(
+    service.executeWorkflow(targetedParams("TARGET_BRANCH=main"), "task-default-branch"),
+    /TARGET_BRANCH_INVALID: La branche cible ne peut pas être la branche par défaut\./,
+  );
+  assert.ok(!calls.some((call) => call.startsWith("update:")));
+});
+
+test("TARGET_PR dont la branche head est main est rejetée avant toute écriture", async () => {
+  const { mock, calls } = targetedWorkflowMock({
+    pull: { number: 32, state: "open", headBranch: "main", fullName: "artisanguillonrenov-creator/Agent-autonome-socle-", url: "url-32" },
+  });
+  const service = new SoftwareFactoryService({ githubToken: "token", octokitClient: mock });
+  await assert.rejects(
+    service.executeWorkflow(targetedParams("TARGET_PR=32"), "task-pr-default-branch"),
+    /TARGET_BRANCH_INVALID: La branche cible ne peut pas être la branche par défaut\./,
+  );
+  assert.ok(!calls.some((call) => call.startsWith("update:")));
+});
+
+test("TARGET_BRANCH accepte le nouveau HEAD du fallback après l'écriture", async () => {
+  const { mock } = targetedWorkflowMock({ updateHasCommitSha: false, branchHeadAfterUpdate: "new-target-head" });
+  const result = await new SoftwareFactoryService({ githubToken: "token", octokitClient: mock })
+    .executeWorkflow(targetedParams("TARGET_BRANCH=feature/existing"), "task-target-new-head");
+  assert.equal(result.commitSha, "new-target-head");
+});
+
+test("TARGET_BRANCH refuse l'ancien HEAD inchangé comme SHA du commit", async () => {
+  const { mock } = targetedWorkflowMock({ updateHasCommitSha: false });
+  const service = new SoftwareFactoryService({ githubToken: "token", octokitClient: mock });
+  await assert.rejects(
+    service.executeWorkflow(targetedParams("TARGET_BRANCH=feature/existing"), "task-target-old-head"),
+    /GITHUB_COMMIT_SHA_MISSING: Impossible de déterminer le véritable SHA du commit GitHub\./,
+  );
+});
+
+test("TARGET_PR refuse l'ancien HEAD inchangé comme SHA du commit", async () => {
+  const { mock } = targetedWorkflowMock({
+    updateHasCommitSha: false,
+    pull: { number: 32, state: "open", headBranch: "feature/existing", fullName: "artisanguillonrenov-creator/Agent-autonome-socle-", url: "url-32" },
+  });
+  const service = new SoftwareFactoryService({ githubToken: "token", octokitClient: mock });
+  await assert.rejects(
+    service.executeWorkflow(targetedParams("TARGET_PR=32"), "task-pr-old-head"),
+    /GITHUB_COMMIT_SHA_MISSING: Impossible de déterminer le véritable SHA du commit GitHub\./,
+  );
 });
 
 test("TEST A — exactContent simple", () => {

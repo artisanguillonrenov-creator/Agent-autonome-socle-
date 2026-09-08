@@ -294,6 +294,8 @@ export class SoftwareFactoryService {
       ref: `heads/${defaultBranch}`,
     });
     const baseSha = baseRef.data.object.sha;
+    const usesExistingTarget = targetPr !== undefined || targetBranch !== undefined;
+    let targetBranchHeadBeforeUpdate: string | undefined;
 
     let targetPullRequest: { number: number; html_url: string } | undefined;
     if (targetPr !== undefined) {
@@ -320,9 +322,14 @@ export class SoftwareFactoryService {
       branchName = targetBranch;
     }
 
-    if (targetPr !== undefined || targetBranch !== undefined) {
+    if (usesExistingTarget && branchName === defaultBranch) {
+      throw new Error("TARGET_BRANCH_INVALID: La branche cible ne peut pas être la branche par défaut.");
+    }
+
+    if (usesExistingTarget) {
       try {
-        await this.octokit.rest.git.getRef({ owner, repo, ref: `heads/${branchName}` });
+        const targetBranchRef = await this.octokit.rest.git.getRef({ owner, repo, ref: `heads/${branchName}` });
+        targetBranchHeadBeforeUpdate = targetBranchRef.data.object.sha;
       } catch {
         const code = targetPr !== undefined ? "TARGET_PR_INVALID" : "TARGET_BRANCH_INVALID";
         throw new Error(`${code}: La branche cible '${branchName}' est introuvable.`);
@@ -338,7 +345,7 @@ export class SoftwareFactoryService {
         owner,
         repo,
         path: filePath,
-        ref: targetPr !== undefined || targetBranch !== undefined ? branchName : defaultBranch,
+        ref: usesExistingTarget ? branchName : defaultBranch,
       });
 
       if ("content" in fileRes.data && typeof fileRes.data.content === "string") {
@@ -361,7 +368,7 @@ export class SoftwareFactoryService {
 
     // 5. Une branche explicitement ciblée doit déjà exister; le mode historique
     // conserve la création de la branche unique par tâche.
-    if (targetPr === undefined && targetBranch === undefined) {
+    if (!usesExistingTarget) {
       onStep?.("GITHUB_CREATING_BRANCH", { branch: branchName });
       try {
         await this.octokit.rest.git.getRef({ owner, repo, ref: `heads/${branchName}` });
@@ -416,7 +423,8 @@ export class SoftwareFactoryService {
           ref: `heads/${branchName}`,
         });
         const refSha = refRes.data.object?.sha;
-        if (refSha && refSha !== baseSha) {
+        const hasNewTargetHead = Boolean(targetBranchHeadBeforeUpdate) && refSha !== targetBranchHeadBeforeUpdate;
+        if (refSha && (usesExistingTarget ? hasNewTargetHead : refSha !== baseSha)) {
           commitSha = refSha;
         }
       } catch {
