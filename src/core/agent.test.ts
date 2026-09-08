@@ -260,3 +260,247 @@ test("Native Tool Calling : dispatch_capability natif vers ServiceOrchestrator (
   assert.equal(result.response.includes("DISPATCH_CAPABILITY"), false);
   assert.equal(result.response.includes("{"), false);
 });
+
+// Tests de non-régression pour sécuriser le protocole de tool calling natif
+
+test("Native Tool Calling : gestion d'un outil non disponible (TEST I)", async () => {
+  let calls = 0;
+  let receivedErrorInToolResult = false;
+
+  const unknownToolProvider: LLMProvider = {
+    name: "unknown_tool_llm",
+    supportsNativeTools() {
+      return true;
+    },
+    async complete(messages: ChatMessage[]) {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          content: null,
+          toolCalls: [
+            {
+              id: "call_unknown_tool",
+              type: "function",
+              function: {
+                name: "unknown_tool",
+                arguments: "{}",
+              },
+            },
+          ],
+        };
+      }
+
+      const toolMsg = messages.find((m) => m.role === "tool" && m.toolCallId === "call_unknown_tool");
+      if (toolMsg && toolMsg.content?.includes("Erreur")) {
+        receivedErrorInToolResult = true;
+      }
+
+      return {
+        content: "L'outil demandé n'est pas disponible.",
+      };
+    },
+  };
+
+  const agent = new Agent({ llm: unknownToolProvider, embeddings: new LocalHashingEmbeddingProvider() });
+  for (const skill of builtinSkills) agent.skills.register(skill);
+
+  const result = await agent.step("Utilise un outil inconnu");
+
+  assert.equal(calls, 2);
+  assert.equal(receivedErrorInToolResult, true);
+  assert.match(result.response, /Désolé/i);
+});
+
+test("Native Tool Calling : gestion d'un appel à un outil avec des arguments manquants (TEST J)", async () => {
+  let calls = 0;
+  let receivedErrorInToolResult = false;
+
+  const missingArgsProvider: LLMProvider = {
+    name: "missing_args_llm",
+    supportsNativeTools() {
+      return true;
+    },
+    async complete(messages: ChatMessage[]) {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          content: null,
+          toolCalls: [
+            {
+              id: "call_missing_args",
+              type: "function",
+              function: {
+                name: "web_search",
+                arguments: "{}", // Arguments manquants
+              },
+            },
+          ],
+        };
+      }
+
+      const toolMsg = messages.find((m) => m.role === "tool" && m.toolCallId === "call_missing_args");
+      if (toolMsg && toolMsg.content?.includes("Erreur")) {
+        receivedErrorInToolResult = true;
+      }
+
+      return {
+        content: "Les arguments requis sont manquants.",
+      };
+    },
+  };
+
+  const agent = new Agent({ llm: missingArgsProvider, embeddings: new LocalHashingEmbeddingProvider() });
+  for (const skill of builtinSkills) agent.skills.register(skill);
+
+  const result = await agent.step("Recherche sans arguments");
+
+  assert.equal(calls, 2);
+  assert.equal(receivedErrorInToolResult, true);
+  assert.match(result.response, /Désolé/i);
+});
+
+test("Native Tool Calling : gestion d'un fournisseur ne supportant pas les outils natifs (TEST K)", async () => {
+  let calls = 0;
+
+  const nonNativeProvider: LLMProvider = {
+    name: "non_native_llm",
+    supportsNativeTools() {
+      return false;
+    },
+    async complete(messages: ChatMessage[], options?: CompletionOptions) {
+      calls += 1;
+      // Ce fournisseur ne devrait pas recevoir d'options.tools
+      assert.equal(options?.tools, undefined);
+      return {
+        content: "Je ne supporte pas les outils natifs.",
+      };
+    },
+  };
+
+  const agent = new Agent({ llm: nonNativeProvider, embeddings: new LocalHashingEmbeddingProvider() });
+  for (const skill of builtinSkills) agent.skills.register(skill);
+
+  const result = await agent.step("Test fournisseur non natif");
+
+  assert.equal(calls, 1);
+  assert.equal(result.iterations, 1);
+  assert.match(result.response, /Je ne supporte pas les outils natifs/i);
+});
+
+test("Native Tool Calling : gestion d'un flux avec plusieurs tour d'échanges (TEST L)", async () => {
+  let calls = 0;
+  const toolCallIdsReceived: string[] = [];
+
+  const multiTurnProvider: LLMProvider = {
+    name: "multi_turn_llm",
+    supportsNativeTools() {
+      return true;
+    },
+    async complete(messages: ChatMessage[]) {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          content: "Je vais chercher l'information.",
+          toolCalls: [
+            {
+              id: "call_search_1",
+              type: "function",
+              function: {
+                name: "web_search",
+                arguments: '{"query":"météo aujourd\'hui"}',
+              },
+            },
+          ],
+        };
+      }
+
+      if (calls === 2) {
+        const toolMsg = messages.find((m) => m.role === "tool" && m.name === "web_search");
+        if (toolMsg && toolMsg.toolCallId) {
+          toolCallIdsReceived.push(toolMsg.toolCallId);
+        }
+        return {
+          content: "Je vais maintenant vérifier les prévisions détaillées.",
+          toolCalls: [
+            {
+              id: "call_forecast_2",
+              type: "function",
+              function: {
+                name: "web_search",
+                arguments: '{"query":"prévisions météo détaillées aujourd\'hui"}',
+              },
+            },
+          ],
+        };
+      }
+
+      const toolMsgs = messages.filter((m) => m.role === "tool");
+      toolMsgs.forEach((m) => {
+        if (m.toolCallId) toolCallIdsReceived.push(m.toolCallId);
+      });
+
+      return {
+        content: "Il fera ensoleillé aujourd'hui avec 25 degrés.",
+      };
+    },
+  };
+
+  const agent = new Agent({ llm: multiTurnProvider, embeddings: new LocalHashingEmbeddingProvider() });
+  for (const skill of builtinSkills) agent.skills.register(skill);
+
+  const result = await agent.step("Quelle est la météo aujourd'hui ?");
+
+  assert.equal(calls, 3);
+  assert.equal(result.iterations, 3);
+  assert.ok(toolCallIdsReceived.includes("call_search_1"));
+  assert.ok(toolCallIdsReceived.includes("call_forecast_2"));
+  assert.match(result.response, /ensoleillé/i);
+});
+
+test("Native Tool Calling : gestion d'un outil qui retourne une erreur (TEST M)", async () => {
+  let calls = 0;
+  let receivedErrorInToolResult = false;
+
+  const errorToolProvider: LLMProvider = {
+    name: "error_tool_llm",
+    supportsNativeTools() {
+      return true;
+    },
+    async complete(messages: ChatMessage[]) {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          content: null,
+          toolCalls: [
+            {
+              id: "call_error_tool",
+              type: "function",
+              function: {
+                name: "web_search",
+                arguments: '{"query":"test erreur"}',
+              },
+            },
+          ],
+        };
+      }
+
+      const toolMsg = messages.find((m) => m.role === "tool" && m.toolCallId === "call_error_tool");
+      if (toolMsg && toolMsg.content?.includes("Erreur")) {
+        receivedErrorInToolResult = true;
+      }
+
+      return {
+        content: "Une erreur s'est produite lors de l'exécution de l'outil.",
+      };
+    },
+  };
+
+  const agent = new Agent({ llm: errorToolProvider, embeddings: new LocalHashingEmbeddingProvider() });
+  for (const skill of builtinSkills) agent.skills.register(skill);
+
+  const result = await agent.step("Test erreur outil");
+
+  assert.equal(calls, 2);
+  assert.equal(receivedErrorInToolResult, true);
+  assert.match(result.response, /Désolé/i);
+});
