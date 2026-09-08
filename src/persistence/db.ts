@@ -117,6 +117,24 @@ export function getDb(): Database.Database {
     }
   }
 
+  // Additive migration: existing operation data must never be recreated or dropped.
+  const operationColumns = new Set(
+    (db.pragma("table_info(service_operations)") as Array<{ name: string }>).map((column) => column.name),
+  );
+  const missingOperationColumns: Record<string, string> = {
+    risk_level: "TEXT NOT NULL DEFAULT 'LOW'",
+    approval_state: "TEXT NOT NULL DEFAULT 'NOT_REQUIRED'",
+    approval_reason: "TEXT",
+    approval_requested_at: "INTEGER",
+    approval_decided_at: "INTEGER",
+    pending_request_json: "TEXT",
+  };
+  for (const [column, definition] of Object.entries(missingOperationColumns)) {
+    if (!operationColumns.has(column)) {
+      db.exec(`ALTER TABLE service_operations ADD COLUMN ${column} ${definition}`);
+    }
+  }
+
   sqliteInstance = db;
   return db;
 }

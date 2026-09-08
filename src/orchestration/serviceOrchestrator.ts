@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { ServiceRegistry, type ServiceDefinition } from "./serviceRegistry.js";
+import { ServiceRegistry, riskForCapability } from "./serviceRegistry.js";
 import { ServiceAdapter } from "./serviceAdapter.js";
 import { OperationStore, type ServiceOperation } from "./operationStore.js";
 import { CONTRACT_SCHEMA_VERSION, type TaskRequest, type ServiceEvent, type DispatchCapabilityDecision } from "./contract.js";
@@ -124,6 +124,16 @@ export class ServiceOrchestrator {
       };
     }
 
+    const riskLevel = riskForCapability(service, decision.capability);
+    if (!riskLevel) {
+      const taskId = `task-${randomUUID()}`;
+      const error = `Configuration de risque invalide pour '${decision.capability}'`;
+      this.store.createOperation({ taskId, traceId, idempotencyKey, objective: decision.objective,
+        capability: decision.capability, selectedService: service.id, status: "REJECTED", error,
+        riskLevel: "CRITICAL", approvalState: "REJECTED" });
+      return { taskId, traceId, status: "REJECTED", selectedService: service.id, error };
+    }
+
     // 3. Create Operation record (or reuse taskId if retrying existingOp)
     const taskId = existingOp?.taskId || `task-${randomUUID()}`;
     if (!existingOp) {
@@ -134,7 +144,9 @@ export class ServiceOrchestrator {
         objective: decision.objective,
         capability: decision.capability,
         selectedService: service.id,
-        status: "DISPATCHING",
+        status: riskLevel === "HIGH" || riskLevel === "CRITICAL" ? "QUEUED" : "DISPATCHING",
+        riskLevel,
+        approvalState: "NOT_REQUIRED",
       });
     } else {
       this.store.updateStatus(taskId, "DISPATCHING", undefined, "Nouvelle tentative après échec réseau.");
@@ -153,6 +165,19 @@ export class ServiceOrchestrator {
       priority: decision.priority || "medium",
       permissions: [],
     };
+
+    if (!existingOp && (riskLevel === "HIGH" || riskLevel === "CRITICAL")) {
+      const reason = riskLevel === "CRITICAL"
+        ? "Risque critique : confirmation renforcée obligatoire avant tout envoi au service."
+        : "Risque élevé : approbation humaine obligatoire avant tout envoi au service.";
+      if (!this.store.setPendingApproval(taskId, request, riskLevel, reason)) {
+        this.store.updateStatus(taskId, "FAILED", undefined, "APPROVAL_PREPARATION_FAILED");
+        const failed = this.store.getOperation(taskId)!;
+        return { taskId, traceId: failed.traceId, status: failed.status, selectedService: failed.selectedService,
+          result: failed.result, error: failed.error };
+      }
+      return { taskId, traceId, status: "WAITING_PERMISSION", selectedService: service.id };
+    }
 
     // 5. Determine specific timeout for service
     const timeoutMs =
@@ -192,6 +217,30 @@ export class ServiceOrchestrator {
       error: updatedOp.error,
       ...meta,
     };
+  }
+
+  async approvePendingOperation(taskId: string, confirmation?: string): Promise<OrchestrationResult | null> {
+    const operation = this.store.getOperation(taskId);
+    if (!operation || operation.status !== "WAITING_PERMISSION" || operation.approvalState !== "PENDING") return null;
+    if (operation.riskLevel === "CRITICAL" && confirmation !== "APPROVE_CRITICAL") return null;
+    const request = this.store.claimPendingApproval(taskId);
+    if (!request) return null;
+    const service = this.registry.getServiceById(operation.selectedService);
+    if (!service) {
+      this.store.updateStatus(taskId, "FAILED", undefined, "Service approuvé introuvable.");
+    } else {
+      const timeoutMs = service.id === "software_factory" ? config.softwareFactory.timeoutMs : 5000;
+      const response = await this.adapter.dispatchTask(service.endpoint, request, timeoutMs);
+      if (!response.success) this.store.updateStatus(taskId, "FAILED", undefined, `TRANSPORT_UNKNOWN: ${response.message}`, true);
+      else for (const event of response.events) this.store.processEvent(event);
+    }
+    const updated = this.store.getOperation(taskId)!;
+    return { taskId, traceId: updated.traceId, status: updated.status, selectedService: updated.selectedService,
+      result: updated.result, error: updated.error, ...extractOperationMetadata(updated.result) };
+  }
+
+  rejectPendingOperation(taskId: string): boolean {
+    return this.store.rejectPendingApproval(taskId);
   }
 
   getOperationStatus(taskId: string): ServiceOperation | null {

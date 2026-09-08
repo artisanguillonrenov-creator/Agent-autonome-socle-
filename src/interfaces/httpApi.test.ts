@@ -232,11 +232,25 @@ test("Jarvis Command Center API Endpoints Test", async () => {
     assert.equal(operation.taskId, eventTaskId);
     await checkEndpoint(`${baseUrl}/api/operations/unknown-task/events`, undefined, 404);
 
+    // A service-originated wait and an input wait must never be changed to RUNNING artificially.
+    agent.serviceOrchestrator.store.updateStatus(eventTaskId, "WAITING_PERMISSION");
+    await checkEndpoint(`${baseUrl}/api/operations/${eventTaskId}/respond`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "authorize" }),
+    }, 409);
+    assert.equal(agent.serviceOrchestrator.store.getOperation(eventTaskId)?.status, "WAITING_PERMISSION");
+    await checkEndpoint(`${baseUrl}/api/operations/${eventTaskId}/respond`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "input", value: "suite" }),
+    }, 409);
+
     const previousToken = config.api.token;
     config.api.token = "events-endpoint-token";
     try {
       const unauthorizedEvents = await fetch(`${baseUrl}/api/operations/${eventTaskId}/events`);
       assert.equal(unauthorizedEvents.status, 401);
+      const unauthorizedRespond = await fetch(`${baseUrl}/api/operations/${eventTaskId}/respond`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "reject" }),
+      });
+      assert.equal(unauthorizedRespond.status, 401);
     } finally {
       config.api.token = previousToken;
     }
