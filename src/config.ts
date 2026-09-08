@@ -31,6 +31,10 @@ export const config = {
     tavilyApiKey: process.env.TAVILY_API_KEY || "",
     serperApiKey: process.env.SERPER_API_KEY || "",
   },
+  softwareFactory: {
+    token: process.env.SOFTWARE_FACTORY_TOKEN || process.env.API_TOKEN || "",
+    timeoutMs: int(process.env.SOFTWARE_FACTORY_TIMEOUT_MS, 120000),
+  },
   codeExecution: {
     enabled: process.env.ENABLE_CODE_EXECUTION === "true",
     timeoutMs: int(process.env.CODE_EXECUTION_TIMEOUT_MS, 5000),

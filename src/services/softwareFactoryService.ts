@@ -1,6 +1,7 @@
-import { createServer, type IncomingMessage } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { Octokit } from "@octokit/rest";
 import { CONTRACT_SCHEMA_VERSION, type TaskRequest, type ServiceEvent } from "../orchestration/contract.js";
+import { config } from "../config.js";
 
 export interface SoftwareFactoryConfig {
   githubToken?: string;
@@ -51,12 +52,12 @@ export class SoftwareFactoryService {
   private githubToken: string;
   public readonly maxRetries: number;
 
-  constructor(config: SoftwareFactoryConfig = {}) {
-    this.githubToken = process.env.GITHUB_FACTORY_TOKEN || config.githubToken || process.env.GITHUB_TOKEN || "";
-    this.octokit = config.octokitClient || new Octokit({ auth: this.githubToken || undefined });
-    this.openrouterApiKey = config.openrouterApiKey || process.env.OPENROUTER_API_KEY || "";
-    this.openrouterModel = config.openrouterModel || process.env.SOFTWARE_FACTORY_MODEL || "google/gemini-2.0-flash-lite-preview-02-05:free";
-    this.maxRetries = config.maxRetries ?? 3;
+  constructor(configObj: SoftwareFactoryConfig = {}) {
+    this.githubToken = process.env.GITHUB_FACTORY_TOKEN || configObj.githubToken || process.env.GITHUB_TOKEN || "";
+    this.octokit = configObj.octokitClient || new Octokit({ auth: this.githubToken || undefined });
+    this.openrouterApiKey = configObj.openrouterApiKey || process.env.OPENROUTER_API_KEY || "";
+    this.openrouterModel = configObj.openrouterModel || process.env.SOFTWARE_FACTORY_MODEL || "google/gemini-2.0-flash-lite-preview-02-05:free";
+    this.maxRetries = configObj.maxRetries ?? 3;
   }
 
   getOctokit(): Octokit {
@@ -225,7 +226,7 @@ export class SoftwareFactoryService {
     onStep?.("GENERATING_CODE_UPDATE", { filePath });
     const updatedCode = await this.generateCodeUpdate(existingContent, filePath, instructions);
 
-    // 5. Créer la branche unique pour cette tâche
+    // 5. Créer la branche unique pour cette tâche (vérifier existence d'abord)
     onStep?.("GITHUB_CREATING_BRANCH", { branch: branchName });
     try {
       await this.octokit.rest.git.getRef({ owner, repo, ref: `heads/${branchName}` });
@@ -239,7 +240,7 @@ export class SoftwareFactoryService {
     }
     onStep?.("GITHUB_BRANCH_CREATED", { branch: branchName });
 
-    // 6. Commiter et pousser le fichier modifié
+    // 6. Commiter et pousser le fichier modifié (vérifier SHA existant sur la branche)
     let targetBranchFileSha: string | undefined = existingSha;
     try {
       const targetFileRes = await this.octokit.rest.repos.getContent({
@@ -267,7 +268,7 @@ export class SoftwareFactoryService {
     });
     onStep?.("GITHUB_FILE_UPDATED", { path: filePath, branch: branchName });
 
-    // 7. Créer ou récupérer la PR
+    // 7. Créer ou récupérer la PR (vérifier PR existante d'abord)
     onStep?.("GITHUB_CREATING_PR", { head: branchName, base: defaultBranch });
     const existingPrs = await this.octokit.rest.pulls.list({
       owner,
@@ -426,6 +427,13 @@ export class SoftwareFactoryService {
   }
 }
 
+function checkServerAuth(req: IncomingMessage): boolean {
+  const token = config.softwareFactory.token || config.api.token;
+  if (!token) return true;
+  const auth = req.headers.authorization;
+  return auth === `Bearer ${token}`;
+}
+
 export class SoftwareFactoryServer {
   private server: ReturnType<typeof createServer> | null = null;
   private processedKeys = new Map<string, ServiceEvent[]>();
@@ -438,6 +446,12 @@ export class SoftwareFactoryServer {
   start(): Promise<void> {
     return new Promise((resolve) => {
       this.server = createServer(async (req, res) => {
+        if (!checkServerAuth(req) && req.url !== "/health") {
+          res.writeHead(401, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "unauthorized" }));
+          return;
+        }
+
         if (req.method === "POST" && req.url === "/tasks") {
           const bodyStr = await this.readBody(req);
           let taskReq: TaskRequest;
@@ -465,8 +479,16 @@ export class SoftwareFactoryServer {
         }
 
         if (req.method === "GET" && req.url === "/health") {
+          const diag = await this.service.getGitHubDiagnostics();
           res.writeHead(200, { "content-type": "application/json" });
-          res.end(JSON.stringify({ status: "ok", service: "software_factory" }));
+          res.end(
+            JSON.stringify({
+              status: "ok",
+              service: "software_factory",
+              authenticated: checkServerAuth(req),
+              github: diag,
+            }),
+          );
           return;
         }
 

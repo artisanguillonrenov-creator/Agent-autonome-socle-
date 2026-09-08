@@ -3,6 +3,7 @@ import { ServiceRegistry, type ServiceDefinition } from "./serviceRegistry.js";
 import { ServiceAdapter } from "./serviceAdapter.js";
 import { OperationStore, type ServiceOperation } from "./operationStore.js";
 import { CONTRACT_SCHEMA_VERSION, type TaskRequest, type ServiceEvent, type DispatchCapabilityDecision } from "./contract.js";
+import { config } from "../config.js";
 
 export interface OrchestrationResult {
   taskId: string;
@@ -34,14 +35,25 @@ export class ServiceOrchestrator {
     // 1. Check idempotency in OperationStore
     const existingOp = this.store.getByIdempotencyKey(idempotencyKey);
     if (existingOp) {
-      return {
-        taskId: existingOp.taskId,
-        traceId: existingOp.traceId,
-        status: existingOp.status,
-        selectedService: existingOp.selectedService,
-        result: existingOp.result,
-        error: existingOp.error,
-      };
+      if (
+        existingOp.status === "COMPLETED" ||
+        existingOp.status === "RUNNING" ||
+        existingOp.status === "DISPATCHING" ||
+        existingOp.status === "WAITING_INPUT" ||
+        existingOp.status === "WAITING_PERMISSION" ||
+        existingOp.status === "REJECTED" ||
+        (existingOp.status === "FAILED" && !existingOp.retryable)
+      ) {
+        return {
+          taskId: existingOp.taskId,
+          traceId: existingOp.traceId,
+          status: existingOp.status,
+          selectedService: existingOp.selectedService,
+          result: existingOp.result,
+          error: existingOp.error,
+        };
+      }
+      // If FAILED and retryable, proceed with controlled retry dispatch below
     }
 
     // 2. Lookup Service by capability
@@ -69,17 +81,21 @@ export class ServiceOrchestrator {
       };
     }
 
-    // 3. Create Operation record
-    const taskId = `task-${randomUUID()}`;
-    this.store.createOperation({
-      taskId,
-      traceId,
-      idempotencyKey,
-      objective: decision.objective,
-      capability: decision.capability,
-      selectedService: service.id,
-      status: "DISPATCHING",
-    });
+    // 3. Create Operation record (or reuse taskId if retrying existingOp)
+    const taskId = existingOp?.taskId || `task-${randomUUID()}`;
+    if (!existingOp) {
+      this.store.createOperation({
+        taskId,
+        traceId,
+        idempotencyKey,
+        objective: decision.objective,
+        capability: decision.capability,
+        selectedService: service.id,
+        status: "DISPATCHING",
+      });
+    } else {
+      this.store.updateStatus(taskId, "DISPATCHING", undefined, "Nouvelle tentative après échec réseau.");
+    }
 
     // 4. Build Task Request
     const request: TaskRequest = {
@@ -95,12 +111,18 @@ export class ServiceOrchestrator {
       permissions: [],
     };
 
-    // 5. Dispatch via ServiceAdapter
-    const adapterRes = await this.adapter.dispatchTask(service.endpoint, request);
+    // 5. Determine specific timeout for service
+    const timeoutMs =
+      service.id === "software_factory"
+        ? config.softwareFactory.timeoutMs
+        : 5000;
+
+    // 6. Dispatch via ServiceAdapter
+    const adapterRes = await this.adapter.dispatchTask(service.endpoint, request, timeoutMs);
 
     if (!adapterRes.success) {
-      // Transport/Network Error: mark as FAILED with transport info (can be retried with same idempotencyKey)
-      this.store.updateStatus(taskId, "FAILED", undefined, adapterRes.message);
+      // Transport/Network Error: mark as FAILED (retryable = true) with transport info
+      this.store.updateStatus(taskId, "FAILED", undefined, `TRANSPORT_UNKNOWN: ${adapterRes.message}`, true);
       return {
         taskId,
         traceId,
@@ -110,7 +132,7 @@ export class ServiceOrchestrator {
       };
     }
 
-    // 6. Process received events
+    // 7. Process received events
     for (const event of adapterRes.events) {
       this.store.processEvent(event);
     }

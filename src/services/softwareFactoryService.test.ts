@@ -7,7 +7,12 @@ import {
   parseRepoUrl,
   extractTaskParams,
 } from "./softwareFactoryService.js";
-import type { TaskRequest } from "../orchestration/contract.js";
+import { OperationStore } from "../orchestration/operationStore.js";
+import { ServiceAdapter } from "../orchestration/serviceAdapter.js";
+import { Agent } from "../core/agent.js";
+import { MockProvider } from "../llm/providers/mock.js";
+import { LocalHashingEmbeddingProvider } from "../llm/embeddings.js";
+import type { TaskRequest, ServiceEvent } from "../orchestration/contract.js";
 
 test("parseRepoUrl extrait correctement owner et repo depuis différentes formats", () => {
   assert.deepEqual(parseRepoUrl("https://github.com/myorg/myrepo"), { owner: "myorg", repo: "myrepo" });
@@ -40,6 +45,88 @@ test("extractTaskParams retourne les valeurs fixées du projet (owner et repo av
   assert.equal(params.repo, "Agent-autonome-socle-");
   assert.equal(params.filePath, "src/header.ts");
   assert.equal(params.instructions, "Ajouter un bouton de déconnexion");
+});
+
+test("TEST 1 - dispatch_capability est toujours présent dans les skills disponibles de l'agent", async () => {
+  const agent = new Agent({
+    llm: new MockProvider(),
+    embeddings: new LocalHashingEmbeddingProvider(),
+  });
+
+  const mandatory = agent.skills.get("dispatch_capability");
+  assert.ok(mandatory, "dispatch_capability doit être enregistré dans les skills");
+});
+
+test("TEST 6 & 7 - OperationStore protège les états terminaux et rejette la désynchronisation de séquence/trace", () => {
+  const store = new OperationStore();
+  const taskId = `task-state-test-${Date.now()}`;
+  const traceId = `trace-state-test-${Date.now()}`;
+
+  store.createOperation({
+    taskId,
+    traceId,
+    idempotencyKey: `idemp-state-test-${Date.now()}`,
+    objective: "Test state machine",
+    capability: "software_development",
+    selectedService: "software_factory",
+    status: "DISPATCHING",
+  });
+
+  const evt1: ServiceEvent = {
+    schema_version: "1.0",
+    event_id: `evt-seq-1-${Date.now()}`,
+    task_id: taskId,
+    trace_id: traceId,
+    service: "software_factory",
+    sequence: 1,
+    type: "TASK_COMPLETED",
+    timestamp: Date.now(),
+    payload: { status: "ready" },
+  };
+
+  const res1 = store.processEvent(evt1);
+  assert.ok(res1.applied);
+  assert.equal(store.getOperation(taskId)?.status, "COMPLETED");
+
+  // TEST 6 : un événement TASK_PROGRESS (seq 2) sur un état terminal COMPLETED ne doit PAS le faire repasser en RUNNING
+  const evt2: ServiceEvent = {
+    schema_version: "1.0",
+    event_id: `evt-seq-2-${Date.now()}`,
+    task_id: taskId,
+    trace_id: traceId,
+    service: "software_factory",
+    sequence: 2,
+    type: "TASK_PROGRESS",
+    timestamp: Date.now(),
+    payload: { progress: 50 },
+  };
+
+  const res2 = store.processEvent(evt2);
+  assert.equal(res2.applied, false);
+  assert.equal(store.getOperation(taskId)?.status, "COMPLETED");
+
+  // TEST 8 : un événement avec un trace_id erroné est rejeté
+  const evtWrongTrace: ServiceEvent = {
+    schema_version: "1.0",
+    event_id: `evt-seq-3-${Date.now()}`,
+    task_id: taskId,
+    trace_id: "wrong-trace-id",
+    service: "software_factory",
+    sequence: 3,
+    type: "TASK_PROGRESS",
+    timestamp: Date.now(),
+    payload: {},
+  };
+
+  const resWrongTrace = store.processEvent(evtWrongTrace);
+  assert.equal(resWrongTrace.applied, false);
+});
+
+test("TEST 9 - ServiceAdapter checkHealth effectue un GET /health authentifié", async () => {
+  const adapter = new ServiceAdapter();
+  const health = await adapter.checkHealth("in-process");
+  assert.equal(health.reachable, true);
+  assert.equal(health.status, 200);
 });
 
 test("SoftwareFactoryService initialise Octokit et respecte la limite de 3 retries max", async () => {
@@ -151,7 +238,6 @@ test("SoftwareFactoryService exécute le workflow complet avec branche unique pa
     octokitClient: mockOctokit,
   });
 
-  // Overriding generateCodeUpdate for offline unit test
   service.generateCodeUpdate = async (content, path, inst) => `${content}\n// Patched: ${inst}`;
 
   const req: TaskRequest = {
