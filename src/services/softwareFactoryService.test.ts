@@ -6,6 +6,7 @@ import {
   SoftwareFactoryServer,
   parseRepoUrl,
   extractTaskParams,
+  type ParsedSoftwareTask,
 } from "./softwareFactoryService.js";
 import { OperationStore } from "../orchestration/operationStore.js";
 import { ServiceAdapter } from "../orchestration/serviceAdapter.js";
@@ -272,6 +273,151 @@ test("SoftwareFactoryService exécute le workflow complet avec branche unique pa
   assert.ok(calls.includes("git.createRef:refs/heads/jarvis/task-success-test"));
   assert.ok(calls.includes("repos.createOrUpdateFileContents:jarvis/task-success-test:src/app.ts"));
   assert.ok(calls.includes("pulls.create:jarvis/task-success-test->main"));
+});
+
+function targetedWorkflowMock(options: {
+  branchExists?: boolean;
+  pull?: { number: number; state: string; headBranch: string; fullName: string; url: string };
+  pullGetFails?: boolean;
+  existingPull?: { number: number; html_url: string };
+} = {}) {
+  const calls: string[] = [];
+  const mock = {
+    rest: {
+      repos: {
+        get: async () => ({ data: { default_branch: "main" } }),
+        getContent: async ({ ref }: { ref: string }) => {
+          calls.push(`getContent:${ref}`);
+          return { data: { content: Buffer.from(`content-${ref}`).toString("base64"), sha: `blob-${ref}` } };
+        },
+        createOrUpdateFileContents: async ({ branch }: { branch: string }) => {
+          calls.push(`update:${branch}`);
+          return { data: { commit: { sha: `commit-${branch}` } } };
+        },
+        compareCommits: async () => ({ data: { files: [{ filename: "src/app.ts" }] } }),
+      },
+      git: {
+        getRef: async ({ ref }: { ref: string }) => {
+          calls.push(`getRef:${ref}`);
+          if (ref === "heads/main") return { data: { object: { sha: "base-sha" } } };
+          if (options.branchExists === false) throw new Error("404");
+          return { data: { object: { sha: `sha-${ref}` } } };
+        },
+        createRef: async () => {
+          calls.push("createRef");
+          return { data: {} };
+        },
+      },
+      pulls: {
+        get: async () => {
+          calls.push("pulls.get");
+          if (options.pullGetFails) throw new Error("404");
+          const pull = options.pull!;
+          return {
+            data: {
+              number: pull.number,
+              state: pull.state,
+              html_url: pull.url,
+              head: { ref: pull.headBranch, repo: { full_name: pull.fullName } },
+            },
+          };
+        },
+        list: async () => {
+          calls.push("pulls.list");
+          return { data: options.existingPull ? [options.existingPull] : [] };
+        },
+        create: async () => {
+          calls.push("pulls.create");
+          return { data: { number: 88, html_url: "https://github.test/pull/88" } };
+        },
+      },
+    },
+  } as unknown as Octokit;
+  return { mock, calls };
+}
+
+const targetedParams = (instructions: string): ParsedSoftwareTask => ({
+  owner: "artisanguillonrenov-creator",
+  repo: "Agent-autonome-socle-",
+  filePath: "src/app.ts",
+  instructions,
+  exactContent: "updated",
+  ...(() => {
+    const request = {
+      objective: "update",
+      context: { filePath: "src/app.ts", instructions },
+    } as TaskRequest;
+    const parsed = extractTaskParams(request);
+    return { targetBranch: parsed.targetBranch, targetPr: parsed.targetPr };
+  })(),
+});
+
+test("TARGET_PR valide réutilise sa branche et sa PR sans en créer une nouvelle", async () => {
+  const { mock, calls } = targetedWorkflowMock({
+    pull: { number: 31, state: "open", headBranch: "feature/existing", fullName: "artisanguillonrenov-creator/Agent-autonome-socle-", url: "https://github.test/pull/31" },
+  });
+  const service = new SoftwareFactoryService({ githubToken: "token", octokitClient: mock });
+  const result = await service.executeWorkflow(targetedParams("TARGET_PR=31"), "task-target-pr");
+  assert.equal(result.branch, "feature/existing");
+  assert.equal(result.prNumber, 31);
+  assert.equal(result.prUrl, "https://github.test/pull/31");
+  assert.ok(calls.includes("getContent:feature/existing"));
+  assert.ok(calls.includes("update:feature/existing"));
+  assert.ok(!calls.includes("createRef"));
+  assert.ok(!calls.includes("pulls.list"));
+  assert.ok(!calls.includes("pulls.create"));
+});
+
+test("TARGET_PR + TARGET_BRANCH identiques réussissent", async () => {
+  const { mock } = targetedWorkflowMock({
+    pull: { number: 31, state: "open", headBranch: "feature/existing", fullName: "artisanguillonrenov-creator/Agent-autonome-socle-", url: "url-31" },
+  });
+  const result = await new SoftwareFactoryService({ githubToken: "token", octokitClient: mock })
+    .executeWorkflow(targetedParams("TARGET_PR=31\nTARGET_BRANCH=feature/existing"), "task-both");
+  assert.equal(result.branch, "feature/existing");
+});
+
+for (const scenario of [
+  { name: "fermée", options: { pull: { number: 31, state: "closed", headBranch: "feature/x", fullName: "artisanguillonrenov-creator/Agent-autonome-socle-", url: "url" } }, instructions: "TARGET_PR=31" },
+  { name: "inexistante", options: { pullGetFails: true }, instructions: "TARGET_PR=404" },
+  { name: "issue d'un autre dépôt", options: { pull: { number: 31, state: "open", headBranch: "feature/x", fullName: "someone/fork", url: "url" } }, instructions: "TARGET_PR=31" },
+  { name: "associée à une TARGET_BRANCH différente", options: { pull: { number: 31, state: "open", headBranch: "feature/x", fullName: "artisanguillonrenov-creator/Agent-autonome-socle-", url: "url" } }, instructions: "TARGET_PR=31\nTARGET_BRANCH=feature/y" },
+]) {
+  test(`TARGET_PR ${scenario.name} échoue avec TARGET_PR_INVALID`, async () => {
+    const { mock } = targetedWorkflowMock(scenario.options);
+    const service = new SoftwareFactoryService({ githubToken: "token", octokitClient: mock });
+    await assert.rejects(service.executeWorkflow(targetedParams(scenario.instructions), "task-invalid-pr"), /TARGET_PR_INVALID/);
+  });
+}
+
+test("TARGET_PR non entier positif échoue avec TARGET_PR_INVALID", () => {
+  assert.throws(() => targetedParams("TARGET_PR=0"), /TARGET_PR_INVALID/);
+  assert.throws(() => targetedParams("TARGET_PR=12x"), /TARGET_PR_INVALID/);
+});
+
+test("TARGET_BRANCH seule réutilise une branche existante et sa PR ouverte", async () => {
+  const { mock, calls } = targetedWorkflowMock({ existingPull: { number: 44, html_url: "https://github.test/pull/44" } });
+  const result = await new SoftwareFactoryService({ githubToken: "token", octokitClient: mock })
+    .executeWorkflow(targetedParams("TARGET_BRANCH=feature/existing"), "task-target-branch");
+  assert.equal(result.branch, "feature/existing");
+  assert.equal(result.prNumber, 44);
+  assert.ok(!calls.includes("createRef"));
+  assert.ok(!calls.includes("pulls.create"));
+});
+
+test("TARGET_BRANCH seule ouvre au maximum une PR lorsqu'il n'en existe pas", async () => {
+  const { mock, calls } = targetedWorkflowMock();
+  const result = await new SoftwareFactoryService({ githubToken: "token", octokitClient: mock })
+    .executeWorkflow(targetedParams("TARGET_BRANCH=feature/existing"), "task-target-branch-new-pr");
+  assert.equal(result.prNumber, 88);
+  assert.equal(calls.filter((call) => call === "pulls.create").length, 1);
+});
+
+test("TARGET_BRANCH inexistante échoue sans créer la branche", async () => {
+  const { mock, calls } = targetedWorkflowMock({ branchExists: false });
+  const service = new SoftwareFactoryService({ githubToken: "token", octokitClient: mock });
+  await assert.rejects(service.executeWorkflow(targetedParams("TARGET_BRANCH=missing"), "task-missing"), /TARGET_BRANCH_INVALID/);
+  assert.ok(!calls.includes("createRef"));
 });
 
 test("TEST A — exactContent simple", () => {
