@@ -35,6 +35,69 @@ body {
   font-size: 16px;
 }
 
+.chat-timeline-host {
+  width: min(85%, 680px);
+}
+
+.chat-timeline {
+  padding: 12px 14px;
+  border: 1px solid var(--border-color);
+  border-left: 3px solid var(--accent-info);
+  border-radius: 12px;
+  background: var(--bg-card);
+}
+
+.chat-timeline-heading {
+  display: inline-block;
+  font-weight: 700;
+  margin-right: 10px;
+}
+
+.chat-timeline-status {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.chat-timeline-steps {
+  display: grid;
+  gap: 5px;
+  margin: 9px 0;
+}
+
+.chat-timeline-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.chat-timeline-step.failed {
+  color: var(--accent-danger);
+}
+
+.chat-timeline-step a {
+  color: var(--accent-primary);
+  margin-left: auto;
+}
+
+.chat-timeline details summary {
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+
+.chat-timeline details pre {
+  margin-top: 8px;
+  padding: 8px;
+  overflow-x: auto;
+  border-radius: 8px;
+  background: var(--bg-input);
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  white-space: pre-wrap;
+}
+
 /* APP LAYOUT */
 #app {
   display: flex;
