@@ -120,8 +120,9 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
     }
 
     try {
-      // 0. Service Orchestration Tasks Endpoint: POST /tasks
-      if (req.method === "POST" && (pathname === "/tasks" || pathname === "/api/tasks/dispatch")) {
+      // 0a. Software Factory Service Endpoint: POST /tasks
+      // (Traite directement la tâche demandée par ServiceAdapter pour la Software Factory)
+      if (req.method === "POST" && pathname === "/tasks") {
         const bodyStr = await readBody(req);
         let taskReq: TaskRequest;
         try {
@@ -133,6 +134,36 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
 
         const events = await softwareFactoryService.handleTaskRequest(taskReq);
         sendJson(res, 200, { events });
+        return;
+      }
+
+      // 0b. Command Center External API Dispatch Endpoint: POST /api/tasks/dispatch
+      // (Passe par le ServiceOrchestrator pour tracer et choisir le service approprié)
+      if (req.method === "POST" && pathname === "/api/tasks/dispatch") {
+        const bodyStr = await readBody(req);
+        let taskReq: TaskRequest;
+        try {
+          taskReq = JSON.parse(bodyStr || "{}");
+        } catch {
+          sendJson(res, 400, { error: "JSON invalide" });
+          return;
+        }
+
+        const orchResult = await agent.serviceOrchestrator.dispatchCapability(
+          {
+            action: "DISPATCH_CAPABILITY",
+            capability: taskReq.capability || "software_development",
+            objective: taskReq.objective || "Développement logiciel",
+            context: taskReq.context || {},
+            constraints: taskReq.constraints || [],
+          },
+          {
+            traceId: taskReq.trace_id,
+            idempotencyKey: taskReq.idempotency_key,
+          },
+        );
+
+        sendJson(res, 200, orchResult);
         return;
       }
 
@@ -641,6 +672,61 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
       }
 
       // 13. System & Diagnostics
+      if (req.method === "GET" && pathname === "/api/system/factory-diagnostics") {
+        let toolCalling = false;
+        try {
+          const testProvider = agent.getLLMProvider();
+          if (testProvider.supportsNativeTools && testProvider.supportsNativeTools()) {
+            const pingRes = await testProvider.complete(
+              [{ role: "user", content: "Utilise l'outil 'ping_test' pour répondre à cet appel." }],
+              {
+                tools: [
+                  {
+                    type: "function",
+                    function: {
+                      name: "ping_test",
+                      description: "Outil de test ping",
+                      parameters: { type: "object", properties: {} },
+                    },
+                  },
+                ],
+              },
+            );
+            toolCalling = Boolean(pingRes.toolCalls && pingRes.toolCalls.length > 0);
+          }
+        } catch {
+          toolCalling = false;
+        }
+
+        const dispatchCapabilityRegistered = Boolean(agent.skills.get("dispatch_capability"));
+        const factoryService = agent.serviceOrchestrator.registry.getServiceById("software_factory");
+        const githubDiag = await softwareFactoryService.getGitHubDiagnostics();
+
+        sendJson(res, 200, {
+          jarvis: {
+            running: true,
+            provider: config.llm.provider,
+            model: config.llm.model,
+            toolCalling,
+          },
+          dispatchCapability: {
+            registered: dispatchCapabilityRegistered,
+            alwaysAvailable: true,
+          },
+          orchestrator: {
+            running: true,
+            operationsCount: agent.serviceOrchestrator.store.listOperations().length,
+          },
+          softwareFactory: {
+            registered: Boolean(factoryService),
+            enabled: factoryService?.enabled ?? false,
+            endpoint: factoryService?.endpoint ?? "in-process",
+          },
+          github: githubDiag,
+        });
+        return;
+      }
+
       if (req.method === "GET" && pathname === "/api/system") {
         sendJson(res, 200, {
           version: "0.1.0",
@@ -711,6 +797,9 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
 
   server.listen(port, () => {
     console.log(`Jarvis Command Center API démarrée sur http://localhost:${port}`);
+    if (config.llm.provider === "mock") {
+      console.warn("[WARNING] Provider mock actif : le tool calling et la délégation Software Factory sont indisponibles.");
+    }
   });
 
   return server;

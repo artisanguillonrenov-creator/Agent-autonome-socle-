@@ -45,7 +45,6 @@ test("extractTaskParams retourne les valeurs fixées du projet (owner et repo av
 test("SoftwareFactoryService initialise Octokit et respecte la limite de 3 retries max", async () => {
   let attempts = 0;
 
-  // Mock Octokit client avec échecs simulés
   const mockOctokit = {
     rest: {
       repos: {
@@ -85,7 +84,6 @@ test("SoftwareFactoryService initialise Octokit et respecte la limite de 3 retri
 
   const events = await service.handleTaskRequest(req);
 
-  // Vérifier qu'exactement 3 tentatives ont été effectuées avant de renvoyer TASK_FAILED
   assert.equal(attempts, 3);
 
   const failedEvent = events.find((e) => e.type === "TASK_FAILED");
@@ -93,7 +91,7 @@ test("SoftwareFactoryService initialise Octokit et respecte la limite de 3 retri
   assert.match(String(failedEvent?.payload.error), /après 3 tentatives/);
 });
 
-test("SoftwareFactoryService exécute le workflow complet (getContent, createRef, createOrUpdateFile, create PR)", async () => {
+test("SoftwareFactoryService exécute le workflow complet avec branche unique par tâche (jarvis/task-<id>)", async () => {
   const calls: string[] = [];
 
   const mockOctokit = {
@@ -120,7 +118,7 @@ test("SoftwareFactoryService exécute le workflow complet (getContent, createRef
       git: {
         getRef: async ({ ref }: { ref: string }) => {
           calls.push(`git.getRef:${ref}`);
-          if (ref === "heads/patch-jarvis-v1") {
+          if (ref.startsWith("heads/jarvis/")) {
             throw new Error("404 Not Found");
           }
           return { data: { object: { sha: "sha-commit-main" } } };
@@ -153,6 +151,9 @@ test("SoftwareFactoryService exécute le workflow complet (getContent, createRef
     octokitClient: mockOctokit,
   });
 
+  // Overriding generateCodeUpdate for offline unit test
+  service.generateCodeUpdate = async (content, path, inst) => `${content}\n// Patched: ${inst}`;
+
   const req: TaskRequest = {
     schema_version: "1.0",
     task_id: "task-success-test",
@@ -174,13 +175,13 @@ test("SoftwareFactoryService exécute le workflow complet (getContent, createRef
 
   const completedEvent = events.find((e) => e.type === "TASK_COMPLETED");
   assert.ok(completedEvent, "L'événement TASK_COMPLETED doit être présent");
-  assert.equal(completedEvent?.payload.branch, "patch-jarvis-v1");
+  assert.equal(completedEvent?.payload.branch, "jarvis/task-success-test");
   assert.equal(completedEvent?.payload.pr_url, "https://github.com/owner/repo/pull/42");
   assert.equal(completedEvent?.payload.pr_number, 42);
 
-  assert.ok(calls.includes("git.createRef:refs/heads/patch-jarvis-v1"));
-  assert.ok(calls.includes("repos.createOrUpdateFileContents:patch-jarvis-v1:src/app.ts"));
-  assert.ok(calls.includes("pulls.create:patch-jarvis-v1->main"));
+  assert.ok(calls.includes("git.createRef:refs/heads/jarvis/task-success-test"));
+  assert.ok(calls.includes("repos.createOrUpdateFileContents:jarvis/task-success-test:src/app.ts"));
+  assert.ok(calls.includes("pulls.create:jarvis/task-success-test->main"));
 });
 
 test("SoftwareFactoryServer démarre, traite les requêtes HTTP POST /tasks et s'arrête proprement", async () => {
@@ -193,7 +194,7 @@ test("SoftwareFactoryServer démarre, traite les requêtes HTTP POST /tasks et s
       },
       git: {
         getRef: async ({ ref }: { ref: string }) => {
-          if (ref === "heads/patch-jarvis-v1") throw new Error("404");
+          if (ref.startsWith("heads/jarvis/")) throw new Error("404 Not Found");
           return { data: { object: { sha: "sha-main" } } };
         },
         createRef: async () => ({ data: {} }),
@@ -209,6 +210,8 @@ test("SoftwareFactoryServer démarre, traite les requêtes HTTP POST /tasks et s
     githubToken: "test-token",
     octokitClient: mockOctokit,
   });
+
+  service.generateCodeUpdate = async (content) => content + "\n// Patched";
 
   const testPort = 4088;
   const server = new SoftwareFactoryServer(testPort, service);

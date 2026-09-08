@@ -48,11 +48,12 @@ export class SoftwareFactoryService {
   private octokit: Octokit;
   private openrouterApiKey: string;
   private openrouterModel: string;
+  private githubToken: string;
   public readonly maxRetries: number;
 
   constructor(config: SoftwareFactoryConfig = {}) {
-    const token = process.env.GITHUB_FACTORY_TOKEN || config.githubToken || process.env.GITHUB_TOKEN;
-    this.octokit = config.octokitClient || new Octokit({ auth: process.env.GITHUB_FACTORY_TOKEN || token });
+    this.githubToken = process.env.GITHUB_FACTORY_TOKEN || config.githubToken || process.env.GITHUB_TOKEN || "";
+    this.octokit = config.octokitClient || new Octokit({ auth: this.githubToken || undefined });
     this.openrouterApiKey = config.openrouterApiKey || process.env.OPENROUTER_API_KEY || "";
     this.openrouterModel = config.openrouterModel || process.env.SOFTWARE_FACTORY_MODEL || "google/gemini-2.0-flash-lite-preview-02-05:free";
     this.maxRetries = config.maxRetries ?? 3;
@@ -63,7 +64,42 @@ export class SoftwareFactoryService {
   }
 
   /**
+   * Diagnostic de l'accès GitHub
+   */
+  async getGitHubDiagnostics(): Promise<{
+    configured: boolean;
+    authenticated: boolean;
+    repositoryAccessible: boolean;
+  }> {
+    const configured = Boolean(this.githubToken);
+    if (!configured) {
+      return { configured: false, authenticated: false, repositoryAccessible: false };
+    }
+
+    try {
+      const userRes = await this.octokit.rest.users.getAuthenticated();
+      const authenticated = Boolean(userRes.data?.login);
+
+      let repositoryAccessible = false;
+      try {
+        const repoRes = await this.octokit.rest.repos.get({
+          owner: "artisanguillonrenov-creator",
+          repo: "Agent-autonome-socle-",
+        });
+        repositoryAccessible = Boolean(repoRes.data?.id);
+      } catch {
+        repositoryAccessible = false;
+      }
+
+      return { configured: true, authenticated, repositoryAccessible };
+    } catch {
+      return { configured: true, authenticated: false, repositoryAccessible: false };
+    }
+  }
+
+  /**
    * Génère la mise à jour de code via OpenRouter (modèles gratuits).
+   * Échoue explicitement si l'accès au LLM n'est pas disponible sans fabriquer de faux commentaires.
    */
   async generateCodeUpdate(
     existingContent: string,
@@ -71,10 +107,7 @@ export class SoftwareFactoryService {
     instructions: string,
   ): Promise<string> {
     if (!this.openrouterApiKey) {
-      return (
-        existingContent +
-        `\n/* Updated by Jarvis Software Factory V1 */\n/* Instructions: ${instructions} */\n`
-      );
+      throw new Error("LLM_NOT_CONFIGURED: Variable OPENROUTER_API_KEY manquante pour la Software Factory.");
     }
 
     const freeModels = [
@@ -130,24 +163,37 @@ export class SoftwareFactoryService {
       }
     }
 
-    throw lastError || new Error("Échec de génération de code via OpenRouter");
+    throw new Error(`CODE_GENERATION_FAILED: ${lastError?.message || "Échec de génération de code via OpenRouter"}`);
   }
 
   /**
-   * Exécute le workflow GitHub : lire fichier, générer code, brancher patch-jarvis-v1, commit et PR.
+   * Exécute le workflow GitHub avec branche unique par tâche (`jarvis/task-<task_id>`).
    */
-  async executeWorkflow(params: ParsedSoftwareTask): Promise<{
+  async executeWorkflow(
+    params: ParsedSoftwareTask,
+    taskId: string,
+    onStep?: (stage: string, detail?: Record<string, unknown>) => void,
+  ): Promise<{
     branch: string;
     prUrl: string;
     prNumber: number;
     summary: string;
   }> {
     const { owner, repo, filePath, instructions } = params;
-    const branchName = "patch-jarvis-v1";
+    const cleanTaskId = taskId.replace(/^task-/, "");
+    const branchName = `jarvis/task-${cleanTaskId}`;
 
+    if (!this.githubToken && !process.env.GITHUB_FACTORY_TOKEN && !process.env.GITHUB_TOKEN) {
+      throw new Error("GITHUB_TOKEN_MISSING: Aucun jeton GitHub (GITHUB_FACTORY_TOKEN) n'est configuré.");
+    }
+
+    // 1. Authentification / Vérification du dépôt
+    onStep?.("GITHUB_AUTHENTICATING", { owner, repo });
     const repoInfo = await this.octokit.rest.repos.get({ owner, repo });
     const defaultBranch = repoInfo.data.default_branch || "main";
+    onStep?.("GITHUB_AUTHENTICATED", { owner, repo, defaultBranch });
 
+    // 2. Récupérer la ref de base
     const baseRef = await this.octokit.rest.git.getRef({
       owner,
       repo,
@@ -155,6 +201,7 @@ export class SoftwareFactoryService {
     });
     const baseSha = baseRef.data.object.sha;
 
+    // 3. Lire le fichier courant sur la branche par défaut
     let existingContent = "";
     let existingSha: string | undefined = undefined;
 
@@ -171,11 +218,15 @@ export class SoftwareFactoryService {
         existingSha = fileRes.data.sha;
       }
     } catch {
-      // Le fichier peut être nouveau
+      // Fichier nouveau
     }
 
+    // 4. Générer le code
+    onStep?.("GENERATING_CODE_UPDATE", { filePath });
     const updatedCode = await this.generateCodeUpdate(existingContent, filePath, instructions);
 
+    // 5. Créer la branche unique pour cette tâche
+    onStep?.("GITHUB_CREATING_BRANCH", { branch: branchName });
     try {
       await this.octokit.rest.git.getRef({ owner, repo, ref: `heads/${branchName}` });
     } catch {
@@ -186,7 +237,9 @@ export class SoftwareFactoryService {
         sha: baseSha,
       });
     }
+    onStep?.("GITHUB_BRANCH_CREATED", { branch: branchName });
 
+    // 6. Commiter et pousser le fichier modifié
     let targetBranchFileSha: string | undefined = existingSha;
     try {
       const targetFileRes = await this.octokit.rest.repos.getContent({
@@ -199,9 +252,10 @@ export class SoftwareFactoryService {
         targetBranchFileSha = targetFileRes.data.sha;
       }
     } catch {
-      // Ignorer si pas encore présent sur la branche
+      // Pas encore présent sur cette branche
     }
 
+    onStep?.("GITHUB_UPDATING_FILE", { path: filePath, branch: branchName });
     await this.octokit.rest.repos.createOrUpdateFileContents({
       owner,
       repo,
@@ -211,7 +265,10 @@ export class SoftwareFactoryService {
       branch: branchName,
       sha: targetBranchFileSha,
     });
+    onStep?.("GITHUB_FILE_UPDATED", { path: filePath, branch: branchName });
 
+    // 7. Créer ou récupérer la PR
+    onStep?.("GITHUB_CREATING_PR", { head: branchName, base: defaultBranch });
     const existingPrs = await this.octokit.rest.pulls.list({
       owner,
       repo,
@@ -230,45 +287,48 @@ export class SoftwareFactoryService {
       const prRes = await this.octokit.rest.pulls.create({
         owner,
         repo,
-        title: `[Jarvis Software Factory] Patch for ${filePath}`,
+        title: `[Jarvis Software Factory] Patch for ${filePath} (${cleanTaskId})`,
         head: branchName,
         base: defaultBranch,
-        body: `## Modifications apportées par Jarvis Software Factory V1\n\n- **Fichier**: \`${filePath}\`\n- **Instructions**: ${instructions}\n\n*Généré automatiquement par Jarvis Software Factory.*`,
+        body: `## Modifications apportées par Jarvis Software Factory\n\n- **Tâche**: \`${taskId}\`\n- **Fichier**: \`${filePath}\`\n- **Instructions**: ${instructions}\n\n*Généré automatiquement par Jarvis Software Factory.*`,
       });
       prUrl = prRes.data.html_url;
       prNumber = prRes.data.number;
     }
+    onStep?.("GITHUB_PR_CREATED", { prUrl, prNumber, branch: branchName });
 
     return {
       branch: branchName,
       prUrl,
       prNumber,
-      summary: `Patch appliqué sur la branche '${branchName}' et Pull Request #${prNumber} créée (${prUrl}).`,
+      summary: `Patch appliqué sur la branche unique '${branchName}' et Pull Request #${prNumber} ouverte (${prUrl}).`,
     };
   }
 
   /**
-   * Traite une demande de tâche selon le contrat Service avec boucle anti-boucle (Max Retries = 3).
+   * Traite une demande de tâche selon le contrat Service avec événements granulaires et max 3 tentatives.
    */
   async handleTaskRequest(taskReq: TaskRequest): Promise<ServiceEvent[]> {
     const serviceName = "software_factory";
     const events: ServiceEvent[] = [];
+    let sequence = 1;
 
+    // 1. TASK_ACCEPTED
     events.push({
       schema_version: CONTRACT_SCHEMA_VERSION,
       event_id: `evt-${taskReq.task_id}-accepted`,
       task_id: taskReq.task_id,
       trace_id: taskReq.trace_id,
       service: serviceName,
-      sequence: 1,
+      sequence: sequence++,
       type: "TASK_ACCEPTED",
       timestamp: Date.now(),
       payload: { message: "Tâche acceptée par Jarvis Software Factory V1" },
     });
 
     const params = extractTaskParams(taskReq);
-    let sequence = 2;
     let lastErrorMsg = "";
+    let lastErrorCode = "";
 
     for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
       events.push({
@@ -284,12 +344,24 @@ export class SoftwareFactoryService {
           progress: Math.round((attempt / this.maxRetries) * 80),
           attempt,
           maxRetries: this.maxRetries,
-          message: `Tentative ${attempt}/${this.maxRetries} : génération et déploiement du patch pour ${params.filePath}`,
+          message: `Tentative ${attempt}/${this.maxRetries} : exécution du patch pour ${params.filePath}`,
         },
       });
 
       try {
-        const result = await this.executeWorkflow(params);
+        const result = await this.executeWorkflow(params, taskReq.task_id, (stage, detail) => {
+          events.push({
+            schema_version: CONTRACT_SCHEMA_VERSION,
+            event_id: `evt-${taskReq.task_id}-step-${sequence}`,
+            task_id: taskReq.task_id,
+            trace_id: taskReq.trace_id,
+            service: serviceName,
+            sequence: sequence++,
+            type: "TASK_PROGRESS",
+            timestamp: Date.now(),
+            payload: { stage, ...(detail || {}) },
+          });
+        });
 
         events.push({
           schema_version: CONTRACT_SCHEMA_VERSION,
@@ -313,6 +385,8 @@ export class SoftwareFactoryService {
         return events;
       } catch (err: unknown) {
         lastErrorMsg = err instanceof Error ? err.message : String(err);
+        lastErrorCode = lastErrorMsg.split(":")[0] || "WORKFLOW_ERROR";
+
         events.push({
           schema_version: CONTRACT_SCHEMA_VERSION,
           event_id: `evt-${taskReq.task_id}-retry-${attempt}`,
@@ -325,7 +399,8 @@ export class SoftwareFactoryService {
           payload: {
             attempt,
             maxRetries: this.maxRetries,
-            error: `Échec tentative ${attempt}: ${lastErrorMsg}`,
+            error_code: lastErrorCode,
+            error_message: lastErrorMsg,
           },
         });
       }
@@ -342,6 +417,7 @@ export class SoftwareFactoryService {
       timestamp: Date.now(),
       payload: {
         error: `Échec définitif après ${this.maxRetries} tentatives : ${lastErrorMsg}`,
+        error_code: lastErrorCode,
         maxRetries: this.maxRetries,
       },
     });
