@@ -5,6 +5,7 @@ import { MockProvider } from "../llm/providers/mock.js";
 import { LocalHashingEmbeddingProvider } from "../llm/embeddings.js";
 import { startHttpApi } from "./httpApi.js";
 import { loadLLMConfig } from "../persistence/llmConfigStore.js";
+import { config } from "../config.js";
 
 import fs from "node:fs";
 import vm from "node:vm";
@@ -92,6 +93,65 @@ test("Safe Array Contract Test for Models View - Prevents undefined.map error", 
   assert.equal(filtered.length, 0);
 });
 
+test("ServiceEvent est transformé en entrée de timeline sans interpréter le texte du payload comme du HTML", () => {
+  const appJsCode = fs.readFileSync("./www/app.js", "utf-8");
+  const dummyElement = { classList: { add: () => {}, remove: () => {} }, textContent: "" };
+  const contextObj = {
+    document: {
+      readyState: "loading",
+      getElementById: () => dummyElement,
+      querySelectorAll: () => [],
+      addEventListener: () => {},
+    },
+    localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+    window: {},
+    console,
+    setTimeout,
+    clearTimeout,
+    URL,
+  };
+  vm.createContext(contextObj);
+  vm.runInContext(appJsCode, contextObj);
+
+  const transform = (contextObj.window as { serviceEventToTimelineEntry: (event: unknown) => { label: string; state: string } })
+    .serviceEventToTimelineEntry;
+  const markerFor = (contextObj.window as {
+    timelineMarkerForEntry: (entry: { label: string; state: string }, isLast: boolean, status: string) => string;
+  }).timelineMarkerForEntry;
+  assert.deepEqual(
+    { ...transform({ type: "TASK_ACCEPTED", payload: {} }) },
+    { label: "Tâche acceptée", state: "complete" },
+  );
+  assert.deepEqual(
+    { ...transform({ type: "TASK_PROGRESS", payload: { stage: "GITHUB_UPDATING_FILE" } }) },
+    { label: "Mise à jour du fichier", state: "active-candidate" },
+  );
+  assert.deepEqual(
+    { ...transform({ type: "TASK_FAILED", payload: {} }) },
+    { label: "Échec", state: "failed" },
+  );
+
+  const hostileText = '<img src=x onerror="globalThis.compromised=true">';
+  assert.equal(transform({ type: "TASK_PROGRESS", payload: { message: hostileText } }).label, hostileText);
+  assert.match(appJsCode, /label\.textContent = entry\.label/);
+  assert.doesNotMatch(appJsCode, /innerHTML\s*=\s*entry\.label/);
+
+  const accepted = transform({ type: "TASK_ACCEPTED", payload: {} });
+  assert.equal(markerFor(accepted, true, "RUNNING"), "✓");
+
+  const fileUpdated = transform({ type: "TASK_PROGRESS", payload: { stage: "GITHUB_FILE_UPDATED" } });
+  assert.equal(fileUpdated.label, "Fichier mis à jour");
+  assert.equal(markerFor(fileUpdated, true, "RUNNING"), "✓");
+
+  const fileUpdating = transform({ type: "TASK_PROGRESS", payload: { stage: "GITHUB_UPDATING_FILE" } });
+  assert.equal(markerFor(fileUpdating, true, "RUNNING"), "●");
+  assert.equal(markerFor(fileUpdating, false, "RUNNING"), "✓");
+
+  const needsPermission = transform({ type: "NEEDS_PERMISSION", payload: {} });
+  assert.equal(needsPermission.label, "Approbation requise");
+  assert.equal(markerFor(needsPermission, true, "WAITING_PERMISSION"), "●");
+});
+
 test("Jarvis Command Center API Endpoints Test", async () => {
   const agent = new Agent({
     llm: new MockProvider(),
@@ -101,6 +161,40 @@ test("Jarvis Command Center API Endpoints Test", async () => {
   const port = 3000 + Math.floor(Math.random() * 5000);
   const server = startHttpApi(agent, port);
   const baseUrl = `http://localhost:${port}`;
+
+  const eventSuffix = `${Date.now()}-${Math.random()}`;
+  const eventTaskId = `task-http-events-${eventSuffix}`;
+  agent.serviceOrchestrator.store.createOperation({
+    taskId: eventTaskId,
+    traceId: "trace-http-events",
+    idempotencyKey: `idempotency-http-events-${eventSuffix}`,
+    objective: "Tester l'endpoint des événements",
+    capability: "software_development",
+    selectedService: "software_factory",
+    status: "QUEUED",
+  });
+  agent.serviceOrchestrator.store.processEvent({
+    schema_version: "1.0",
+    event_id: `http-event-1-${eventSuffix}`,
+    task_id: eventTaskId,
+    trace_id: "trace-http-events",
+    service: "software_factory",
+    sequence: 1,
+    type: "TASK_ACCEPTED",
+    timestamp: 1710000000101,
+    payload: { message: "Acceptée" },
+  });
+  agent.serviceOrchestrator.store.processEvent({
+    schema_version: "1.0",
+    event_id: `http-event-2-${eventSuffix}`,
+    task_id: eventTaskId,
+    trace_id: "trace-http-events",
+    service: "software_factory",
+    sequence: 2,
+    type: "TASK_PROGRESS",
+    timestamp: 1710000000102,
+    payload: { stage: "GITHUB_UPDATING_FILE", path: "src/test.ts" },
+  });
 
   try {
     // Helper to fetch and assert ok status
@@ -123,6 +217,48 @@ test("Jarvis Command Center API Endpoints Test", async () => {
     // 2. GET /api/operations
     const ops = await checkEndpoint(`${baseUrl}/api/operations`);
     assert.ok(Array.isArray(ops));
+
+    const eventLog = await checkEndpoint(`${baseUrl}/api/operations/${eventTaskId}/events`);
+    assert.equal(eventLog.taskId, eventTaskId);
+    assert.deepEqual(eventLog.events.map((event: { sequence: number }) => event.sequence), [1, 2]);
+    assert.equal(eventLog.events[1].type, "TASK_PROGRESS");
+    assert.deepEqual(eventLog.events[1].payload, { stage: "GITHUB_UPDATING_FILE", path: "src/test.ts" });
+
+    const operation = await checkEndpoint(`${baseUrl}/api/operations/${eventTaskId}`);
+    assert.equal(operation.taskId, eventTaskId);
+    await checkEndpoint(`${baseUrl}/api/operations/unknown-task/events`, undefined, 404);
+
+    const previousToken = config.api.token;
+    config.api.token = "events-endpoint-token";
+    try {
+      const unauthorizedEvents = await fetch(`${baseUrl}/api/operations/${eventTaskId}/events`);
+      assert.equal(unauthorizedEvents.status, 401);
+      const unauthorizedRespond = await fetch(`${baseUrl}/api/operations/${eventTaskId}/respond`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "authorize" }),
+      });
+      assert.equal(unauthorizedRespond.status, 401);
+    } finally {
+      config.api.token = previousToken;
+    }
+
+    agent.serviceOrchestrator.store.createOperation({
+      taskId: `waiting-input-${eventSuffix}`,
+      traceId: "waiting-input-trace",
+      idempotencyKey: `waiting-input-${eventSuffix}`,
+      objective: "Attente utilisateur",
+      capability: "test",
+      selectedService: "test-service",
+      status: "WAITING_INPUT",
+    });
+    const inputResponse = await checkEndpoint(`${baseUrl}/api/operations/waiting-input-${eventSuffix}/respond`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "input", value: "continuer" }),
+    }, 409);
+    assert.equal(inputResponse.error, "SERVICE_CONTINUATION_NOT_SUPPORTED");
+    assert.equal(agent.serviceOrchestrator.store.getOperation(`waiting-input-${eventSuffix}`)?.status, "WAITING_INPUT");
 
     // 3. GET /api/services
     const services = await checkEndpoint(`${baseUrl}/api/services`);

@@ -1,6 +1,8 @@
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
+export type RiskLevel = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+
 export interface ServiceDefinition {
   id: string;
   name: string;
@@ -8,6 +10,7 @@ export interface ServiceDefinition {
   endpoint: string;
   capabilities: string[];
   priority: number;
+  riskByCapability?: Record<string, RiskLevel>;
 }
 
 export function resolveServiceEndpoint(service: ServiceDefinition): ServiceDefinition {

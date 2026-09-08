@@ -282,6 +282,21 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         return;
       }
 
+      const operationEventsMatch = pathname.match(/^\/api\/operations\/([^/]+)\/events$/);
+      if (req.method === "GET" && operationEventsMatch) {
+        const taskId = operationEventsMatch[1];
+        const op = agent.serviceOrchestrator.store.getOperation(taskId);
+        if (!op) {
+          sendJson(res, 404, { error: "opération non trouvée" });
+          return;
+        }
+        sendJson(res, 200, {
+          taskId,
+          events: agent.serviceOrchestrator.store.listEvents(taskId),
+        });
+        return;
+      }
+
       if (req.method === "GET" && (pathname.startsWith("/operations/") || pathname.startsWith("/api/operations/"))) {
         const parts = pathname.split("/");
         const taskId = parts[parts.length - 1];
@@ -297,7 +312,13 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
       if (req.method === "POST" && (pathname.includes("/operations/") && pathname.endsWith("/respond"))) {
         const parts = pathname.split("/");
         const taskId = parts[parts.length - 2];
-        const body = JSON.parse((await readBody(req)) || "{}") as { action?: string; value?: string };
+        let body: { action?: string; value?: string; confirmation?: string };
+        try {
+          body = JSON.parse((await readBody(req)) || "{}") as typeof body;
+        } catch {
+          sendJson(res, 400, { error: "INVALID_REQUEST_BODY" });
+          return;
+        }
 
         const op = agent.serviceOrchestrator.store.getOperation(taskId);
         if (!op) {
@@ -305,17 +326,34 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
           return;
         }
 
-        if (body.action === "authorize") {
-          agent.serviceOrchestrator.store.updateStatus(taskId, "RUNNING", "Autorisation accordée par l'utilisateur.");
-        } else if (body.action === "reject") {
-          agent.serviceOrchestrator.store.updateStatus(taskId, "REJECTED", undefined, "Refusé par l'utilisateur.");
-        } else if (body.action === "input" && body.value) {
-          agent.serviceOrchestrator.store.updateStatus(taskId, "RUNNING", `Réponse utilisateur: ${body.value}`);
+        if (body.action === "input") {
+          sendJson(res, 409, { error: "SERVICE_CONTINUATION_NOT_SUPPORTED" });
+          return;
         }
-
-        const updated = agent.serviceOrchestrator.store.getOperation(taskId);
-        sendJson(res, 200, { ok: true, operation: updated });
-        return;
+        try {
+          if (body.action === "authorize") {
+            const result = await agent.serviceOrchestrator.approvePendingOperation(taskId, body.confirmation);
+            sendJson(res, 200, { ok: true, result, operation: agent.serviceOrchestrator.store.getOperation(taskId) });
+            return;
+          }
+          if (body.action === "reject") {
+            const operation = agent.serviceOrchestrator.rejectPendingOperation(taskId);
+            sendJson(res, 200, { ok: true, operation });
+            return;
+          }
+          sendJson(res, 400, { error: "INVALID_OPERATION_ACTION" });
+          return;
+        } catch (err) {
+          const code = err instanceof Error ? err.message : String(err);
+          if (code === "OPERATION_NOT_FOUND") {
+            sendJson(res, 404, { error: code });
+          } else if (code === "CRITICAL_CONFIRMATION_REQUIRED") {
+            sendJson(res, 400, { error: code });
+          } else {
+            sendJson(res, 409, { error: code });
+          }
+          return;
+        }
       }
 
       // 5. Services Endpoints
