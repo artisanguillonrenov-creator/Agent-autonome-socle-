@@ -97,6 +97,13 @@ export function getDb(): Database.Database {
       sequence INTEGER NOT NULL,
       processed_at INTEGER NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS notifications (
+      id TEXT PRIMARY KEY, type TEXT NOT NULL, severity TEXT NOT NULL,
+      title TEXT NOT NULL, message TEXT NOT NULL, task_id TEXT,
+      operation_task_id TEXT, dedupe_key TEXT UNIQUE, created_at INTEGER NOT NULL,
+      read_at INTEGER
+    );
   `);
 
   const processedEventColumns = new Set(
@@ -128,12 +135,34 @@ export function getDb(): Database.Database {
     approval_requested_at: "INTEGER",
     approval_decided_at: "INTEGER",
     pending_request_json: "TEXT",
+    execution_mode: "TEXT NOT NULL DEFAULT 'foreground'",
+    dispatch_request_json: "TEXT",
+    queued_at: "INTEGER",
+    started_at: "INTEGER",
+    finished_at: "INTEGER",
+    cancel_requested_at: "INTEGER",
+    schedule_task_id: "TEXT",
+    watch_processed_at: "INTEGER",
   };
   for (const [column, definition] of Object.entries(missingOperationColumns)) {
     if (!operationColumns.has(column)) {
       db.exec(`ALTER TABLE service_operations ADD COLUMN ${column} ${definition}`);
     }
   }
+
+  const taskColumns = new Set(
+    (db.pragma("table_info(tasks)") as Array<{ name: string }>).map((column) => column.name),
+  );
+  const missingTaskColumns: Record<string, string> = {
+    task_type: "TEXT NOT NULL DEFAULT 'REMINDER'", payload_json: "TEXT",
+    enabled: "INTEGER NOT NULL DEFAULT 1", repeat_interval_ms: "INTEGER",
+    last_run_at: "INTEGER", next_run_at: "INTEGER", last_result_hash: "TEXT",
+    last_error: "TEXT", claimed_at: "INTEGER", claimed_occurrence_at: "INTEGER",
+  };
+  for (const [column, definition] of Object.entries(missingTaskColumns)) {
+    if (!taskColumns.has(column)) db.exec(`ALTER TABLE tasks ADD COLUMN ${column} ${definition}`);
+  }
+  db.exec(`UPDATE tasks SET next_run_at = due_at WHERE next_run_at IS NULL AND due_at IS NOT NULL AND status = 'pending'`);
 
   sqliteInstance = db;
   return db;

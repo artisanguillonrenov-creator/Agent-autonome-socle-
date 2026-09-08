@@ -440,3 +440,4 @@ body {
 .badge-success { background: rgba(16, 185, 129, 0.2); color: var(--accent-success); }
 .badge-warning { background: rgba(245, 158, 11, 0.2); color: var(--accent-warning); }
 .badge-danger { background: rgba(239, 68, 68, 0.2); color: var(--accent-danger); }
+.autonomy-row { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:10px 0; border-bottom:1px solid var(--border-color); }

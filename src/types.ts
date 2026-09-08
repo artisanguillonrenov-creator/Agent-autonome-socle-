@@ -61,6 +61,13 @@ export interface TaskItem {
   /** Timestamp epoch ms de l'échéance/rappel, ou null si aucune. */
   dueAt: number | null;
   createdAt: number;
+  taskType?: "REMINDER" | "DISPATCH" | "WATCH";
+  enabled?: boolean;
+  repeatIntervalMs?: number;
+  nextRunAt?: number | null;
+  lastRunAt?: number;
+  lastResultHash?: string;
+  lastError?: string;
 }
 
 export interface SkillParameterSchema {

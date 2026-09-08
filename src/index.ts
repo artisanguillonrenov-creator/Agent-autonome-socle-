@@ -5,6 +5,8 @@ import { builtinSkills } from "./skills/builtin/index.js";
 import { runCli } from "./interfaces/cli.js";
 import { startHttpApi } from "./interfaces/httpApi.js";
 import { config } from "./config.js";
+import { BackgroundRunner } from "./autonomy/backgroundRunner.js";
+import { Scheduler } from "./autonomy/scheduler.js";
 
 async function main(): Promise<void> {
   const llm = createLLMProvider();
@@ -18,7 +20,12 @@ async function main(): Promise<void> {
   const modes = new Set(config.interface.modes);
 
   if (modes.has("http")) {
-    startHttpApi(agent, config.api.port);
+    const backgroundRunner=new BackgroundRunner(agent.serviceOrchestrator);
+    const scheduler=new Scheduler(agent.serviceOrchestrator);
+    backgroundRunner.start(); scheduler.start();
+    const server=startHttpApi(agent, config.api.port);
+    const shutdown=()=>{backgroundRunner.stop();scheduler.stop();server.close();};
+    process.once("SIGTERM",shutdown);process.once("SIGINT",shutdown);
   }
 
   if (modes.has("cli") || modes.size === 0) {
