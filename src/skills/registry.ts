@@ -18,6 +18,10 @@ export class SkillRegistry {
     this.skills.set(skill.name, skill);
   }
 
+  get(name: string): SkillDefinition | undefined {
+    return this.skills.get(name);
+  }
+
   list(): SkillDefinition[] {
     return [...this.skills.values()];
   }

@@ -61,21 +61,6 @@ export class ServiceAdapter {
       const isAbort = err instanceof Error && err.name === "AbortError";
       const errMsg = (err as Error).message || String(err);
 
-      // Fallback: If network fetch to a localhost/127.0.0.1 endpoint fails for software_development,
-      // execute locally via SoftwareFactoryService in-process.
-      if (!isAbort && (targetUrl.includes("localhost") || targetUrl.includes("127.0.0.1")) && request.capability === "software_development") {
-        try {
-          const events = await this.localSoftwareFactory.handleTaskRequest(request);
-          return { success: true, events };
-        } catch (localErr: unknown) {
-          return {
-            success: false,
-            transportError: true,
-            message: `Transport error (${errMsg}) and local fallback error: ${(localErr as Error).message}`,
-          };
-        }
-      }
-
       return {
         success: false,
         transportError: true,

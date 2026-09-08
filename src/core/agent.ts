@@ -64,13 +64,28 @@ export class Agent {
       iterations++;
 
       const retrieved = await this.memory.retrieve(userInput);
+
+      // Category 1: Mandatory system tools sent to LLM on EVERY turn
+      const mandatorySkillNames = ["dispatch_capability"];
+      const mandatorySkills = mandatorySkillNames
+        .map((name) => this.skills.get(name))
+        .filter((s): s is SkillDefinition => Boolean(s));
+
+      // Category 2: Dynamic relevant skills found via embedding similarity
       const relevantSkills = await this.skills.findRelevant(userInput);
+
+      // Combine mandatory & relevant skills uniquely
+      const skillMap = new Map<string, SkillDefinition>();
+      for (const skill of [...mandatorySkills, ...relevantSkills]) {
+        skillMap.set(skill.name, skill);
+      }
+      const availableSkills = Array.from(skillMap.values());
 
       const reflections = retrieved.relevantMemories.filter((m) => m.kind === "reflection");
       const episodic = retrieved.relevantMemories.filter((m) => m.kind === "episodic");
 
       const systemPrompt = this.contextBudget.assemble([
-        { label: "Instructions", content: this.buildInstructions(relevantSkills), priority: 100 },
+        { label: "Instructions", content: this.buildInstructions(availableSkills), priority: 100 },
         { label: "Faits connus", content: retrieved.facts.join("\n"), priority: 80 },
         { label: "Réflexions passées", content: reflections.map((m) => m.text).join("\n"), priority: 70 },
         { label: "Souvenirs pertinents", content: episodic.map((m) => m.text).join("\n"), priority: 50 },
@@ -78,7 +93,7 @@ export class Agent {
 
       const messages: ChatMessage[] = [{ role: "system", content: systemPrompt }, ...retrieved.recentMessages];
 
-      const toolDefinitions: ToolDefinition[] = relevantSkills.map((s) => ({
+      const toolDefinitions: ToolDefinition[] = availableSkills.map((s) => ({
         type: "function",
         function: {
           name: s.name,
@@ -144,6 +159,11 @@ export class Agent {
             name: skillName,
             toolCallId: toolCall.id || "call_unknown",
             content: formattedToolOutput,
+          });
+
+          await this.memory.recordTurn({
+            role: "user",
+            content: `[Résultat de l'outil '${skillName}']: ${result}`,
           });
         }
 
