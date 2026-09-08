@@ -160,11 +160,6 @@ export class Agent {
             toolCallId: toolCall.id || "call_unknown",
             content: formattedToolOutput,
           });
-
-          await this.memory.recordTurn({
-            role: "user",
-            content: `[Résultat de l'outil '${skillName}']: ${result}`,
-          });
         }
 
         continue;
