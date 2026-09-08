@@ -104,7 +104,6 @@ async function checkOtaUpdates(isManual = false) {
   try {
     const manifest = await fetchApi('/api/ota/manifest');
 
-    // Check native version compatibility
     if (manifest.minimumNativeVersion && compareVersions(manifest.minimumNativeVersion, NATIVE_VERSION) > 0) {
       if (isManual) {
         alert(`Cette mise à jour (version native requise : ${manifest.minimumNativeVersion}) nécessite de télécharger un nouvel APK Android.`);
@@ -159,7 +158,6 @@ async function applyOtaUpdate(version) {
   try {
     const manifest = await fetchApi('/api/ota/manifest');
 
-    // Fetch raw bundle response text to preserve exact bytes for SHA-256 calculation
     const bundleUrl = getApiUrl('/api/ota/bundle');
     const headers = {};
     if (state.token) {
@@ -171,7 +169,6 @@ async function applyOtaUpdate(version) {
     }
     const bundleString = await response.text();
 
-    // Verify SHA-256 integrity hash against raw served text
     if (manifest.sha256) {
       const computedHash = await computeSha256(bundleString);
       if (computedHash.toLowerCase() !== manifest.sha256.toLowerCase()) {
@@ -180,17 +177,14 @@ async function applyOtaUpdate(version) {
       }
     }
 
-    // Verify the bundle string is valid JSON
     const bundleData = JSON.parse(bundleString);
     if (!bundleData || !bundleData.files) {
       throw new Error('Bundle OTA invalide ou corrompu.');
     }
 
-    // Save previous version as backup for rollback
     localStorage.setItem('jarvis_ota_previous_version', state.ota.activeVersion);
     localStorage.setItem('jarvis_ota_previous_bundle', localStorage.getItem('jarvis_ota_active_bundle') || '');
 
-    // Save active new version and bundle payload
     localStorage.setItem('jarvis_ota_active_version', manifest.version);
     localStorage.setItem('jarvis_ota_active_bundle', bundleString);
 
@@ -278,7 +272,6 @@ function initNavigation() {
 }
 
 // --- DATA LOADERS FOR 11 VIEWS ---
-
 async function loadViewData(viewName) {
   try {
     switch (viewName) {
@@ -404,26 +397,40 @@ function renderChatView() {
 
   const form = document.getElementById('chat-form');
   const input = document.getElementById('chat-input');
+  const sendButton = document.getElementById('chat-send');
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
+
+    if (sendButton.disabled) return;
+
     const text = input.value.trim();
     if (!text) return;
 
     input.value = '';
+    input.disabled = true;
+    sendButton.disabled = true;
+    sendButton.textContent = 'Envoi...';
+
     appendChatMessage('user', text);
-    const pendingEl = appendChatMessage('agent pending', '🧠 Reflexion en cours...');
+    const pendingEl = appendChatMessage('agent pending', 'Jarvis is thinking...');
 
     try {
       const res = await fetchApi('/api/chat', {
         method: 'POST',
         body: JSON.stringify({ message: text }),
       });
-      pendingEl.remove();
+
+      if (pendingEl) pendingEl.remove();
       appendChatMessage('agent', res.response);
     } catch (err) {
-      pendingEl.remove();
+      if (pendingEl) pendingEl.remove();
       appendChatMessage('agent error', `⚠️ Erreur : ${err.message}`);
+    } finally {
+      input.disabled = false;
+      sendButton.disabled = false;
+      sendButton.textContent = 'Envoyer';
+      input.focus();
     }
   });
 
