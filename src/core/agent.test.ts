@@ -55,6 +55,93 @@ test("un checkpoint restaure la mémoire de travail et le plan", async () => {
   assert.ok(fresh.memory.working.all().some((m) => m.content === "Premier message"));
 });
 
+test("Native Tool Calling : protocole complet, messages tool consécutifs et identifiants préservés", async () => {
+  let calls = 0;
+  let secondCallMessages: ChatMessage[] = [];
+
+  const provider: LLMProvider = {
+    name: "protocol_native_llm",
+    supportsNativeTools() {
+      return true;
+    },
+    async complete(messages: ChatMessage[], options?: CompletionOptions) {
+      calls += 1;
+
+      if (calls === 1) {
+        assert.ok(options?.tools && options.tools.length > 0);
+
+        return {
+          content: null,
+          toolCalls: [
+            {
+              id: "tool_call_time_exact_001",
+              type: "function",
+              function: {
+                name: "get_current_time",
+                arguments: "{}",
+              },
+            },
+            {
+              id: "tool_call_tasks_exact_002",
+              type: "function",
+              function: {
+                name: "list_tasks",
+                arguments: '{"status":"pending"}',
+              },
+            },
+          ],
+        };
+      }
+
+      secondCallMessages = messages;
+
+      return {
+        content: "Voici l'heure actuelle et la liste de vos tâches.",
+      };
+    },
+  };
+
+  const agent = new Agent({
+    llm: provider,
+    embeddings: new LocalHashingEmbeddingProvider(),
+  });
+  for (const skill of builtinSkills) agent.skills.register(skill);
+
+  const result = await agent.step("Donne-moi l'heure et mes tâches");
+
+  assert.equal(calls, 2);
+  assert.equal(result.iterations, 2);
+  assert.match(result.response, /heure/i);
+
+  const assistantWithToolCalls = secondCallMessages.find(
+    (message) =>
+      message.role === "assistant" &&
+      Array.isArray((message as ChatMessage & { toolCalls?: unknown[] }).toolCalls) &&
+      ((message as ChatMessage & { toolCalls?: unknown[] }).toolCalls?.length ?? 0) === 2,
+  );
+  assert.ok(assistantWithToolCalls);
+
+  const toolMessages = secondCallMessages.filter((message) => message.role === "tool");
+  assert.equal(toolMessages.length, 2);
+  assert.deepEqual(
+    toolMessages.map((message) => message.toolCallId),
+    ["tool_call_time_exact_001", "tool_call_tasks_exact_002"],
+  );
+
+  const firstToolIndex = secondCallMessages.findIndex((message) => message.role === "tool");
+  assert.ok(firstToolIndex > 0);
+  assert.equal(secondCallMessages[firstToolIndex - 1]?.role, "assistant");
+  assert.deepEqual(
+    secondCallMessages.slice(firstToolIndex, firstToolIndex + 2).map((message) => message.role),
+    ["tool", "tool"],
+  );
+
+  assert.equal(
+    secondCallMessages.some((message, index) => index > firstToolIndex && message.role === "user"),
+    false,
+  );
+});
+
 test("Native Tool Calling : flux natif web_search unique (TEST A & G)", async () => {
   let calls = 0;
   let receivedToolCallIdInSecondCall = "";
@@ -168,6 +255,8 @@ test("Native Tool Calling : flux natif multi-outils simultanés (TEST B)", async
 test("Native Tool Calling : gestion d'arguments JSON invalides (TEST F)", async () => {
   let calls = 0;
   let receivedErrorInToolResult = false;
+  let receivedToolRole = false;
+  let receivedToolCallId = "";
 
   const badJsonProvider: LLMProvider = {
     name: "bad_json_llm",
@@ -192,9 +281,11 @@ test("Native Tool Calling : gestion d'arguments JSON invalides (TEST F)", async 
         };
       }
 
-      const toolMsg = messages.find((m) => m.role === "tool" && m.toolCallId === "call_bad_json");
-      if (toolMsg && toolMsg.content?.includes("Erreur")) {
-        receivedErrorInToolResult = true;
+      const toolMsg = messages.find((m) => m.toolCallId === "call_bad_json");
+      if (toolMsg) {
+        receivedToolRole = toolMsg.role === "tool";
+        receivedToolCallId = toolMsg.toolCallId || "";
+        receivedErrorInToolResult = toolMsg.content?.includes("Erreur") ?? false;
       }
 
       return {
@@ -209,8 +300,37 @@ test("Native Tool Calling : gestion d'arguments JSON invalides (TEST F)", async 
   const result = await agent.step("Test bad json");
 
   assert.equal(calls, 2);
+  assert.equal(receivedToolRole, true);
+  assert.equal(receivedToolCallId, "call_bad_json");
   assert.equal(receivedErrorInToolResult, true);
   assert.match(result.response, /Désolé/i);
+});
+
+test("Native Tool Calling : une réponse normale sans outil reste fonctionnelle", async () => {
+  let calls = 0;
+
+  const provider: LLMProvider = {
+    name: "normal_native_llm",
+    supportsNativeTools() {
+      return true;
+    },
+    async complete(messages: ChatMessage[]) {
+      calls += 1;
+      assert.equal(messages.some((message) => message.role === "tool"), false);
+      return { content: "Réponse normale sans appel d'outil." };
+    },
+  };
+
+  const agent = new Agent({
+    llm: provider,
+    embeddings: new LocalHashingEmbeddingProvider(),
+  });
+
+  const result = await agent.step("Réponds simplement");
+
+  assert.equal(calls, 1);
+  assert.equal(result.iterations, 1);
+  assert.equal(result.response, "Réponse normale sans appel d'outil.");
 });
 
 test("Native Tool Calling : dispatch_capability natif vers ServiceOrchestrator (TEST H)", async () => {
@@ -221,9 +341,11 @@ test("Native Tool Calling : dispatch_capability natif vers ServiceOrchestrator (
     supportsNativeTools() {
       return true;
     },
-    async complete(messages: ChatMessage[]) {
+    async complete(messages: ChatMessage[], options?: CompletionOptions) {
       calls += 1;
       if (calls === 1) {
+        assert.match(JSON.stringify(options?.tools ?? []), /dispatch_capability/);
+
         return {
           content: null,
           toolCalls: [
@@ -244,6 +366,7 @@ test("Native Tool Calling : dispatch_capability natif vers ServiceOrchestrator (
 
       const toolMsg = messages.find((m) => m.role === "tool" && m.name === "dispatch_capability");
       assert.ok(toolMsg);
+      assert.equal(toolMsg.toolCallId, "call_dispatch_999");
 
       return {
         content: "J'ai délégué la création de l'application à la Software Factory.",
