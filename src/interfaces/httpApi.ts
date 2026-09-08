@@ -36,6 +36,12 @@ function isAuthorized(req: IncomingMessage): boolean {
   return auth === `Bearer ${config.api.token}`;
 }
 
+function isSoftwareFactoryAuthorized(req: IncomingMessage): boolean {
+  if (!config.softwareFactory.token) return true;
+  const auth = req.headers.authorization;
+  return auth === `Bearer ${config.softwareFactory.token}`;
+}
+
 const MIME_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -114,15 +120,29 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
     const pathname = parsedUrl.pathname;
 
     // Check auth for non-public endpoints
-    if (!isAuthorized(req) && pathname !== "/" && !pathname.startsWith("/www/") && !pathname.match(/\.(html|css|js|png|jpg|ico|svg)$/)) {
+    if (!isAuthorized(req) && pathname !== "/" && pathname !== "/health" && !pathname.startsWith("/www/") && !pathname.match(/\.(html|css|js|png|jpg|ico|svg)$/)) {
       sendJson(res, 401, { error: "unauthorized" });
       return;
     }
 
     try {
-      // 0a. Software Factory Service Endpoint: POST /tasks
+      // 0a. Software Factory Service Health Endpoint: GET /health
+      if (req.method === "GET" && pathname === "/health") {
+        if (!isSoftwareFactoryAuthorized(req)) {
+          sendJson(res, 401, { error: "unauthorized" });
+          return;
+        }
+        sendJson(res, 200, { ok: true, status: "ok", service: "software_factory" });
+        return;
+      }
+
+      // 0b. Software Factory Service Task Endpoint: POST /tasks
       // (Traite directement la tâche demandée par ServiceAdapter pour la Software Factory)
       if (req.method === "POST" && pathname === "/tasks") {
+        if (!isSoftwareFactoryAuthorized(req)) {
+          sendJson(res, 401, { error: "unauthorized" });
+          return;
+        }
         const bodyStr = await readBody(req);
         let taskReq: TaskRequest;
         try {
