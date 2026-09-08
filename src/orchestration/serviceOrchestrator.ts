@@ -12,6 +12,47 @@ export interface OrchestrationResult {
   selectedService: string;
   result?: string;
   error?: string;
+  branch?: string;
+  commitSha?: string;
+  prNumber?: number;
+  prUrl?: string;
+}
+
+export function extractOperationMetadata(resultStr?: string): {
+  branch?: string;
+  commitSha?: string;
+  prNumber?: number;
+  prUrl?: string;
+} {
+  if (!resultStr) return {};
+  try {
+    const p = JSON.parse(resultStr);
+    if (p && typeof p === "object") {
+      const branch = typeof p.branch === "string" ? p.branch : undefined;
+      const commitSha =
+        typeof p.commit_sha === "string"
+          ? p.commit_sha
+          : typeof p.commitSha === "string"
+          ? p.commitSha
+          : undefined;
+      const prNumber =
+        typeof p.pr_number === "number"
+          ? p.pr_number
+          : typeof p.prNumber === "number"
+          ? p.prNumber
+          : undefined;
+      const prUrl =
+        typeof p.pr_url === "string"
+          ? p.pr_url
+          : typeof p.prUrl === "string"
+          ? p.prUrl
+          : undefined;
+      return { branch, commitSha, prNumber, prUrl };
+    }
+  } catch {
+    // ignore
+  }
+  return {};
 }
 
 export class ServiceOrchestrator {
@@ -44,6 +85,7 @@ export class ServiceOrchestrator {
         existingOp.status === "REJECTED" ||
         (existingOp.status === "FAILED" && !existingOp.retryable)
       ) {
+        const meta = extractOperationMetadata(existingOp.result);
         return {
           taskId: existingOp.taskId,
           traceId: existingOp.traceId,
@@ -51,6 +93,7 @@ export class ServiceOrchestrator {
           selectedService: existingOp.selectedService,
           result: existingOp.result,
           error: existingOp.error,
+          ...meta,
         };
       }
       // If FAILED and retryable, proceed with controlled retry dispatch below
@@ -138,6 +181,8 @@ export class ServiceOrchestrator {
     }
 
     const updatedOp = this.store.getOperation(taskId)!;
+    const meta = extractOperationMetadata(updatedOp.result);
+
     return {
       taskId,
       traceId,
@@ -145,6 +190,7 @@ export class ServiceOrchestrator {
       selectedService: service.id,
       result: updatedOp.result,
       error: updatedOp.error,
+      ...meta,
     };
   }
 
