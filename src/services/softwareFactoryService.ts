@@ -35,11 +35,33 @@ export function parseRepoUrl(repoUrlStr?: string): { owner: string; repo: string
 export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
   const ctx = taskReq.context || {};
 
-  // Chaînes exactes de notre dépôt sur GitHub (avec le tiret final obligatoire)
-  const owner = "artisanguillonrenov-creator";
-  const repo = "Agent-autonome-socle-";
+  // Dépôt cible
+  const parsedRepo = parseRepoUrl(String(ctx.repoUrl || ctx.repo || ""));
+  const owner = parsedRepo?.owner || "artisanguillonrenov-creator";
+  const repo = parsedRepo?.repo || "Agent-autonome-socle-";
 
-  const filePath = String(ctx.filePath || ctx.path || ctx.file || "src/index.ts").trim();
+  // 1. Extraire le chemin explicite depuis le contexte
+  let filePath = String(ctx.filePath || ctx.path || ctx.file || "").trim();
+
+  // 2. Si aucun chemin explicite, tenter une extraction regex depuis l'objectif ou les instructions
+  if (!filePath) {
+    const textToSearch = `${taskReq.objective || ""} ${ctx.instructions || ""}`;
+
+    // Regex pour détecter des chemins type docs/test.md, src/index.ts, config/services.json, www/app.js ou fichiers avec extension connue
+    const pathMatch =
+      textToSearch.match(/\b((?:[a-zA-Z0-9_-]+\/)+[a-zA-Z0-9_.-]+\.[a-zA-Z0-9]+)\b/) ||
+      textToSearch.match(/\b([a-zA-Z0-9_.-]+\.(?:md|ts|js|json|css|html|txt|yml|yaml|sh|sql))\b/);
+
+    if (pathMatch) {
+      filePath = pathMatch[1].trim();
+    }
+  }
+
+  // 3. Ne PAS faire de fallback silencieux vers src/index.ts si aucun chemin fiable n'est trouvé
+  if (!filePath) {
+    throw new Error("FILE_PATH_MISSING: Aucun chemin de fichier explicite n'a été transmis à la Software Factory.");
+  }
+
   const instructions = String(ctx.instructions || taskReq.objective || "Mettre à jour le code selon la spécification").trim();
 
   return { owner, repo, filePath, instructions };
@@ -226,6 +248,13 @@ export class SoftwareFactoryService {
     onStep?.("GENERATING_CODE_UPDATE", { filePath });
     const updatedCode = await this.generateCodeUpdate(existingContent, filePath, instructions);
 
+    // Détection des NO-OP avant GitHub
+    const normExisting = existingContent.replace(/\r\n/g, "\n").trim();
+    const normUpdated = updatedCode.replace(/\r\n/g, "\n").trim();
+    if (normExisting && normExisting === normUpdated) {
+      throw new Error("NO_CHANGES_GENERATED: Le code généré est strictement identique au contenu existant. Aucun commit ou PR nécessaire.");
+    }
+
     // 5. Créer la branche unique pour cette tâche (vérifier existence d'abord)
     onStep?.("GITHUB_CREATING_BRANCH", { branch: branchName });
     try {
@@ -257,7 +286,7 @@ export class SoftwareFactoryService {
     }
 
     onStep?.("GITHUB_UPDATING_FILE", { path: filePath, branch: branchName });
-    await this.octokit.rest.repos.createOrUpdateFileContents({
+    const updateRes = await this.octokit.rest.repos.createOrUpdateFileContents({
       owner,
       repo,
       path: filePath,
@@ -266,7 +295,30 @@ export class SoftwareFactoryService {
       branch: branchName,
       sha: targetBranchFileSha,
     });
+
+    if (!updateRes.data.content?.sha && !updateRes.data.commit?.sha) {
+      throw new Error("GITHUB_COMMIT_FAILED: Échec de confirmation du commit par l'API GitHub.");
+    }
     onStep?.("GITHUB_FILE_UPDATED", { path: filePath, branch: branchName });
+    onStep?.("GITHUB_COMMIT_CREATED", { path: filePath, branch: branchName, commitSha: updateRes.data.commit?.sha });
+
+    // Contrôle qu'il existe un vrai diff par rapport à main avant de créer la PR
+    try {
+      const compareRes = await this.octokit.rest.repos.compareCommits({
+        owner,
+        repo,
+        base: defaultBranch,
+        head: branchName,
+      });
+      if (!compareRes.data.files || compareRes.data.files.length === 0 || compareRes.data.ahead_by === 0) {
+        throw new Error("NO_GITHUB_DIFF: Aucune différence détectée sur GitHub entre la branche de tâche et main.");
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith("NO_GITHUB_DIFF")) {
+        throw err;
+      }
+      // Si la comparaison échoue pour des raisons réseau, poursuivre la tentative de PR
+    }
 
     // 7. Créer ou récupérer la PR (vérifier PR existante d'abord)
     onStep?.("GITHUB_CREATING_PR", { head: branchName, base: defaultBranch });
@@ -314,7 +366,33 @@ export class SoftwareFactoryService {
     const events: ServiceEvent[] = [];
     let sequence = 1;
 
-    const params = extractTaskParams(taskReq);
+    let params: ParsedSoftwareTask;
+    try {
+      params = extractTaskParams(taskReq);
+    } catch (err) {
+      const errMessage = err instanceof Error ? err.message : String(err);
+      const errCode = errMessage.split(":")[0] || "FILE_PATH_MISSING";
+      events.push({
+        schema_version: CONTRACT_SCHEMA_VERSION,
+        event_id: `evt-${taskReq.task_id}-failed-path`,
+        task_id: taskReq.task_id,
+        trace_id: taskReq.trace_id,
+        service: serviceName,
+        sequence: sequence++,
+        type: "TASK_FAILED",
+        timestamp: Date.now(),
+        payload: {
+          error: `Étape : FILE_PATH_RESOLUTION | Code : ${errCode} | Message : ${errMessage}`,
+          error_code: errCode,
+          error_message: errMessage,
+          step: "FILE_PATH_RESOLUTION",
+          task_id: taskReq.task_id,
+          trace_id: taskReq.trace_id,
+        },
+      });
+      return events;
+    }
+
     let lastErrorMsg = "";
     let lastErrorCode = "";
 
@@ -416,8 +494,12 @@ export class SoftwareFactoryService {
       type: "TASK_FAILED",
       timestamp: Date.now(),
       payload: {
-        error: `Échec définitif après ${this.maxRetries} tentatives : ${lastErrorMsg}`,
+        error: `FAILED | Étape : WORKFLOW | Code : ${lastErrorCode} | Message : Échec définitif après ${this.maxRetries} tentatives : ${lastErrorMsg}`,
         error_code: lastErrorCode,
+        error_message: lastErrorMsg,
+        step: "WORKFLOW",
+        task_id: taskReq.task_id,
+        trace_id: taskReq.trace_id,
         maxRetries: this.maxRetries,
       },
     });

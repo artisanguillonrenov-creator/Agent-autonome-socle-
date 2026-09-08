@@ -25,8 +25,8 @@ test("parseRepoUrl extrait correctement owner et repo depuis différentes format
   assert.equal(parseRepoUrl(undefined), null);
 });
 
-test("extractTaskParams retourne les valeurs fixées du projet (owner et repo avec tiret final)", () => {
-  const req: TaskRequest = {
+test("extractTaskParams parse le repoUrl du contexte ou utilise les valeurs par défaut du projet", () => {
+  const reqWithUrl: TaskRequest = {
     schema_version: "1.0",
     task_id: "task-123",
     trace_id: "trace-123",
@@ -43,11 +43,30 @@ test("extractTaskParams retourne les valeurs fixées du projet (owner et repo av
     permissions: [],
   };
 
-  const params = extractTaskParams(req);
-  assert.equal(params.owner, "artisanguillonrenov-creator");
-  assert.equal(params.repo, "Agent-autonome-socle-");
-  assert.equal(params.filePath, "src/header.ts");
-  assert.equal(params.instructions, "Ajouter un bouton de déconnexion");
+  const paramsWithUrl = extractTaskParams(reqWithUrl);
+  assert.equal(paramsWithUrl.owner, "octocat");
+  assert.equal(paramsWithUrl.repo, "Hello-World");
+  assert.equal(paramsWithUrl.filePath, "src/header.ts");
+  assert.equal(paramsWithUrl.instructions, "Ajouter un bouton de déconnexion");
+
+  const reqDefault: TaskRequest = {
+    schema_version: "1.0",
+    task_id: "task-456",
+    trace_id: "trace-456",
+    idempotency_key: "idemp-456",
+    capability: "software_development",
+    objective: "Mise à jour sans URL explicitée",
+    context: {
+      filePath: "src/header.ts",
+    },
+    constraints: [],
+    priority: "medium",
+    permissions: [],
+  };
+
+  const paramsDefault = extractTaskParams(reqDefault);
+  assert.equal(paramsDefault.owner, "artisanguillonrenov-creator");
+  assert.equal(paramsDefault.repo, "Agent-autonome-socle-");
 });
 
 test("TEST 1 - dispatch_capability est toujours présent dans les skills disponibles de l'agent", async () => {
@@ -387,7 +406,10 @@ test("SoftwareFactoryServer démarre, traite les requêtes HTTP POST /tasks et s
       repos: {
         get: async () => ({ data: { default_branch: "main" } }),
         getContent: async () => ({ data: { content: Buffer.from("code").toString("base64"), sha: "sha-1" } }),
-        createOrUpdateFileContents: async () => ({ data: {} }),
+        createOrUpdateFileContents: async () => ({ data: { commit: { sha: "commit-sha-http" }, content: { sha: "file-sha-http" } } }),
+        compareCommits: async () => ({
+          data: { files: [{ filename: "index.ts" }], ahead_by: 1 },
+        }),
       },
       git: {
         getRef: async ({ ref }: { ref: string }) => {
@@ -439,4 +461,247 @@ test("SoftwareFactoryServer démarre, traite les requêtes HTTP POST /tasks et s
   } finally {
     await server.stop();
   }
+});
+
+test("TEST 1 - filePath transmis dans context.filePath est respecté sans modification", () => {
+  const req: TaskRequest = {
+    schema_version: "1.0",
+    task_id: "task-fp-1",
+    trace_id: "trace-fp-1",
+    idempotency_key: "idemp-fp-1",
+    capability: "software_development",
+    objective: "Mettre à jour la documentation",
+    context: {
+      filePath: "docs/example.md",
+      instructions: "Ajouter la section d'exemple",
+    },
+    constraints: [],
+    priority: "medium",
+    permissions: [],
+  };
+
+  const params = extractTaskParams(req);
+  assert.equal(params.filePath, "docs/example.md");
+});
+
+test("TEST 2 - nouveau fichier : traitement lorsque le fichier n'existe pas sur main", async () => {
+  let createdFilePath = "";
+  let createdBranch = "";
+
+  const mockOctokit = {
+    rest: {
+      repos: {
+        get: async () => ({ data: { default_branch: "main" } }),
+        getContent: async () => {
+          throw new Error("404 Not Found");
+        },
+        createOrUpdateFileContents: async ({ path, branch }: { path: string; branch: string }) => {
+          createdFilePath = path;
+          createdBranch = branch;
+          return { data: { commit: { sha: "commit-sha-new" }, content: { sha: "file-sha-new" } } };
+        },
+        compareCommits: async () => ({
+          data: { files: [{ filename: "docs/new-file.md" }], ahead_by: 1 },
+        }),
+      },
+      git: {
+        getRef: async ({ ref }: { ref: string }) => {
+          if (ref.startsWith("heads/jarvis/")) throw new Error("404 Not Found");
+          return { data: { object: { sha: "sha-base-main" } } };
+        },
+        createRef: async () => ({ data: {} }),
+      },
+      pulls: {
+        list: async () => ({ data: [] }),
+        create: async () => ({
+          data: { html_url: "https://github.com/owner/repo/pull/101", number: 101 },
+        }),
+      },
+    },
+  } as unknown as Octokit;
+
+  const service = new SoftwareFactoryService({
+    githubToken: "test-token",
+    octokitClient: mockOctokit,
+  });
+
+  service.generateCodeUpdate = async () => "# Nouveau Fichier Documentation\nBonjour";
+
+  const req: TaskRequest = {
+    schema_version: "1.0",
+    task_id: "task-new-file",
+    trace_id: "trace-new-file",
+    idempotency_key: "idemp-new-file",
+    capability: "software_development",
+    objective: "Créer docs/new-file.md",
+    context: {
+      filePath: "docs/new-file.md",
+      instructions: "Créer le fichier de documentation",
+    },
+    constraints: [],
+    priority: "medium",
+    permissions: [],
+  };
+
+  const events = await service.handleTaskRequest(req);
+  const completed = events.find((e) => e.type === "TASK_COMPLETED");
+  assert.ok(completed);
+  assert.equal(createdFilePath, "docs/new-file.md");
+  assert.equal(completed?.payload.pr_number, 101);
+});
+
+test("TEST 3 - pas de fallback dangereux : absence de filePath jette FILE_PATH_MISSING", () => {
+  const req: TaskRequest = {
+    schema_version: "1.0",
+    task_id: "task-no-path",
+    trace_id: "trace-no-path",
+    idempotency_key: "idemp-no-path",
+    capability: "software_development",
+    objective: "Fais une mise à jour générale sans nom de fichier",
+    context: {},
+    constraints: [],
+    priority: "medium",
+    permissions: [],
+  };
+
+  assert.throws(
+    () => extractTaskParams(req),
+    (err: Error) => err.message.includes("FILE_PATH_MISSING") && !err.message.includes("src/index.ts"),
+  );
+});
+
+test("TEST 4 - extraction fallback depuis l'objectif", () => {
+  const req: TaskRequest = {
+    schema_version: "1.0",
+    task_id: "task-extract-obj",
+    trace_id: "trace-extract-obj",
+    idempotency_key: "idemp-extract-obj",
+    capability: "software_development",
+    objective: "Crée docs/example.md avec le contenu Test V2",
+    context: {},
+    constraints: [],
+    priority: "medium",
+    permissions: [],
+  };
+
+  const params = extractTaskParams(req);
+  assert.equal(params.filePath, "docs/example.md");
+});
+
+test("TEST 5 - no-op : si contenu inchangé, émet NO_CHANGES_GENERATED sans commit ni PR", async () => {
+  let commitCalled = false;
+
+  const mockOctokit = {
+    rest: {
+      repos: {
+        get: async () => ({ data: { default_branch: "main" } }),
+        getContent: async () => ({
+          data: { content: Buffer.from("Contenu inchangé").toString("base64"), sha: "sha-same" },
+        }),
+        createOrUpdateFileContents: async () => {
+          commitCalled = true;
+          return { data: {} };
+        },
+      },
+      git: {
+        getRef: async () => ({ data: { object: { sha: "sha-main" } } }),
+      },
+    },
+  } as unknown as Octokit;
+
+  const service = new SoftwareFactoryService({
+    githubToken: "test-token",
+    octokitClient: mockOctokit,
+  });
+
+  service.generateCodeUpdate = async () => "Contenu inchangé";
+
+  const req: TaskRequest = {
+    schema_version: "1.0",
+    task_id: "task-noop",
+    trace_id: "trace-noop",
+    idempotency_key: "idemp-noop",
+    capability: "software_development",
+    objective: "Tester le no-op",
+    context: {
+      filePath: "docs/test.md",
+      instructions: "Conserver le contenu",
+    },
+    constraints: [],
+    priority: "medium",
+    permissions: [],
+  };
+
+  const events = await service.handleTaskRequest(req);
+  const failed = events.find((e) => e.type === "TASK_FAILED");
+
+  assert.ok(failed);
+  assert.equal(commitCalled, false, "Aucun commit ne doit être créé pour un no-op");
+  assert.match(String(failed?.payload.error_code || failed?.payload.error), /NO_CHANGES_GENERATED/);
+});
+
+test("TEST 6 - création réelle d'une PR simulée avec diff valide", async () => {
+  let prCreated = false;
+
+  const mockOctokit = {
+    rest: {
+      repos: {
+        get: async () => ({ data: { default_branch: "main" } }),
+        getContent: async () => ({
+          data: { content: Buffer.from("Ligne 1\n").toString("base64"), sha: "sha-orig" },
+        }),
+        createOrUpdateFileContents: async () => ({
+          data: { commit: { sha: "sha-commit-new" }, content: { sha: "sha-file-new" } },
+        }),
+        compareCommits: async () => ({
+          data: { files: [{ filename: "docs/test.md", status: "modified" }], ahead_by: 1 },
+        }),
+      },
+      git: {
+        getRef: async ({ ref }: { ref: string }) => {
+          if (ref.startsWith("heads/jarvis/")) throw new Error("404 Not Found");
+          return { data: { object: { sha: "sha-base" } } };
+        },
+        createRef: async () => ({ data: {} }),
+      },
+      pulls: {
+        list: async () => ({ data: [] }),
+        create: async () => {
+          prCreated = true;
+          return { data: { html_url: "https://github.com/owner/repo/pull/202", number: 202 } };
+        },
+      },
+    },
+  } as unknown as Octokit;
+
+  const service = new SoftwareFactoryService({
+    githubToken: "test-token",
+    octokitClient: mockOctokit,
+  });
+
+  service.generateCodeUpdate = async () => "Ligne 1\nLigne 2 modifiée";
+
+  const req: TaskRequest = {
+    schema_version: "1.0",
+    task_id: "task-diff-pr",
+    trace_id: "trace-diff-pr",
+    idempotency_key: "idemp-diff-pr",
+    capability: "software_development",
+    objective: "Ajouter la ligne 2",
+    context: {
+      filePath: "docs/test.md",
+      instructions: "Ajouter la ligne 2",
+    },
+    constraints: [],
+    priority: "medium",
+    permissions: [],
+  };
+
+  const events = await service.handleTaskRequest(req);
+  const completed = events.find((e) => e.type === "TASK_COMPLETED");
+
+  assert.ok(completed);
+  assert.equal(prCreated, true);
+  assert.equal(completed?.payload.pr_number, 202);
+  assert.equal(completed?.payload.pr_url, "https://github.com/owner/repo/pull/202");
 });

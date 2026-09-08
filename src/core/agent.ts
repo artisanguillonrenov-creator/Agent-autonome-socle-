@@ -202,7 +202,7 @@ export class Agent {
       `Date et heure actuelles : ${dateStr} (${isoDate}).`,
       "ACCÈS INTERNET : Tu possèdes un accès Internet fonctionnel grâce à l'outil 'web_search'.",
       "RÈGLE IMPÉRATIVE : Lorsque la demande de l'utilisateur nécessite des informations récentes, actuelles ou externes (ex: météo, actualités, événements, films au cinéma 'ce mois-ci' ou 'cette année'), tu DOIS obligatoirement appeler l'outil 'web_search'. Ne dis JAMAIS que tu n'as pas accès à Internet.",
-      "DÉLÉGATION EXTERNE : Lorsque la demande concerne la création/développement d'un logiciel ou d'une application, utilise l'outil 'dispatch_capability' avec la capacité 'software_development'.",
+      "DÉLÉGATION EXTERNE : Lorsque la demande concerne la création/développement d'un logiciel ou d'une application, utilise l'outil 'dispatch_capability' avec la capacité 'software_development'. Pour toute tâche logicielle mentionnant un chemin de fichier (ex: docs/test.md), tu DOIS obligatoirement transmettre ce chemin dans 'context.filePath', le contenu/consignes dans 'context.instructions' et le dépôt dans 'context.repoUrl'.",
       "ENRICHISSEMENT VISUEL : Structure TOUTES tes réponses complexes (listes, classements, comparaisons, synthèses) sous forme de tableaux Markdown, listes à puces thématiques et liens cliquables.",
       "RÈGLE DE FORMAT : Utilise les outils natifs mis à ta disposition. Ne rédiges JAMAIS de structures techniques JSON ou balises XML dans le texte adressé à l'utilisateur.",
     ].join("\n");

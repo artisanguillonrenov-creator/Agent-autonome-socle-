@@ -2,8 +2,10 @@ import type { SkillDefinition } from "../../types.js";
 
 export const dispatchCapabilitySkill: SkillDefinition = {
   name: "dispatch_capability",
-  description: "Délègue une tâche ou une capacité à un service externe spécialisé (ex: développement de logiciel).",
-  argsHint: '{"capability": string, "objective": string, "context"?: object, "constraints"?: string[]}',
+  description:
+    "Délègue une tâche à un service externe spécialisé. Pour 'software_development', tu DOIS obligatoirement extraire le chemin de fichier dans context.filePath, les consignes dans context.instructions et le dépôt dans context.repoUrl.",
+  argsHint:
+    '{"capability": string, "objective": string, "context"?: {"filePath"?: string, "instructions"?: string, "repoUrl"?: string}, "constraints"?: string[]}',
   parameters: {
     type: "object",
     properties: {
@@ -13,11 +15,27 @@ export const dispatchCapabilitySkill: SkillDefinition = {
       },
       objective: {
         type: "string",
-        description: "Description claire de ce qui doit être réalisé par le service externe",
+        description: "Description globale de la demande",
       },
       context: {
         type: "object",
-        description: "Données de contexte additionnelles sous forme d'objet",
+        description:
+          "Contexte structuré. Pour software_development: tu DOIS placer le chemin de fichier exact dans 'filePath' (ex: 'docs/test.md'), le contenu/instructions dans 'instructions' et le dépôt dans 'repoUrl'.",
+        properties: {
+          filePath: {
+            type: "string",
+            description: "Chemin exact du fichier à créer ou modifier (ex: docs/jarvis-software-factory-smoke-test-v2.md, src/index.ts)",
+          },
+          instructions: {
+            type: "string",
+            description: "Instructions détaillées de modification ou contenu exact du fichier",
+          },
+          repoUrl: {
+            type: "string",
+            description: "URL ou identifiant du dépôt GitHub (ex: artisanguillonrenov-creator/Agent-autonome-socle-)",
+          },
+        },
+        additionalProperties: true,
       },
       constraints: {
         type: "array",
