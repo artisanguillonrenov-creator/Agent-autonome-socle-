@@ -118,15 +118,16 @@ export class OperationStore {
       .run(JSON.stringify(request), queued ? 1 : 0, now, now, taskId).changes === 1;
   }
 
-  claimNextBackground(): { operation: ServiceOperation; request: TaskRequest } | null {
+  claimNextBackground(): { operation: ServiceOperation; request: TaskRequest | null } | null {
     const db = getDb();
     return db.transaction(() => {
       const row = db.prepare(`SELECT task_id,dispatch_request_json FROM service_operations WHERE execution_mode='background' AND status='QUEUED' ORDER BY queued_at,created_at LIMIT 1`).get() as any;
-      if (!row?.dispatch_request_json) return null;
+      if (!row) return null;
       const op = this.getOperation(row.task_id); if (!op) return null;
-      let parsed: unknown; try { parsed = JSON.parse(row.dispatch_request_json); } catch { return null; }
+      let parsed: unknown; try { parsed = JSON.parse(row.dispatch_request_json); } catch { parsed = null; }
       const request = validatePendingTaskRequest(parsed, op); if (!request) {
-        db.prepare(`UPDATE service_operations SET status='FAILED',error='INVALID_DISPATCH_REQUEST',finished_at=?,updated_at=? WHERE task_id=? AND status='QUEUED'`).run(Date.now(),Date.now(),op.taskId); return null;
+        const now=Date.now(); const changed=db.prepare(`UPDATE service_operations SET status='FAILED',error='INVALID_DISPATCH_REQUEST',finished_at=?,updated_at=? WHERE task_id=? AND status='QUEUED'`).run(now,now,op.taskId).changes;
+        return changed === 1 ? { operation: this.getOperation(op.taskId)!, request: null } : null;
       }
       const now=Date.now(); const changed=db.prepare(`UPDATE service_operations SET status='DISPATCHING',started_at=?,updated_at=? WHERE task_id=? AND status='QUEUED'`).run(now,now,op.taskId).changes;
       return changed === 1 ? { operation: { ...op, status: "DISPATCHING" as const, startedAt: now }, request } : null;

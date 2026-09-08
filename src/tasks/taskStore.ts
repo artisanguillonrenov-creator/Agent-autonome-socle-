@@ -10,6 +10,7 @@ interface TaskRow {
   created_at: number;
   task_type: "REMINDER"|"DISPATCH"|"WATCH"; payload_json:string|null; enabled:number; repeat_interval_ms:number|null;
   next_run_at:number|null; last_run_at:number|null; last_result_hash:string|null; last_error:string|null;
+  claimed_at:number|null; claimed_occurrence_at:number|null;
 }
 
 function rowToTask(row: TaskRow): TaskItem {
@@ -41,8 +42,19 @@ export class TaskStore {
   get(id:string):TaskItem|null {const row=getDb().prepare(`SELECT * FROM tasks WHERE id=?`).get(id) as TaskRow|undefined;return row?rowToTask(row):null;}
   listSchedules():TaskItem[]{return (getDb().prepare(`SELECT * FROM tasks WHERE task_type IN ('REMINDER','DISPATCH','WATCH') AND next_run_at IS NOT NULL ORDER BY next_run_at`).all() as TaskRow[]).map(rowToTask);}
   setEnabled(id:string,enabled:boolean):boolean{return getDb().prepare(`UPDATE tasks SET enabled=? WHERE id=?`).run(enabled?1:0,id).changes===1;}
-  claimDue(now=Date.now()):Array<{task:TaskItem;payload:unknown;occurrence:number}>{const db=getDb();return db.transaction(()=>{const rows=db.prepare(`SELECT * FROM tasks WHERE enabled=1 AND status='pending' AND next_run_at<=? AND claimed_at IS NULL ORDER BY next_run_at`).all(now) as TaskRow[];const out=[] as Array<{task:TaskItem;payload:unknown;occurrence:number}>;for(const row of rows){const occurrence=row.next_run_at!;const next=row.repeat_interval_ms?occurrence+row.repeat_interval_ms:null;const changed=db.prepare(`UPDATE tasks SET claimed_at=?,last_run_at=?,next_run_at=?,status=CASE WHEN ? IS NULL THEN 'done' ELSE status END WHERE id=? AND claimed_at IS NULL AND next_run_at=?`).run(now,now,next,next,row.id,occurrence).changes;if(changed){let payload:unknown={};try{payload=JSON.parse(row.payload_json??"{}");}catch{}out.push({task:rowToTask(row),payload,occurrence});}}return out;})();}
-  releaseRecurring(id:string):void{getDb().prepare(`UPDATE tasks SET claimed_at=NULL WHERE id=? AND next_run_at IS NOT NULL`).run(id);}
+  claimDue(now=Date.now()):Array<{task:TaskItem;payload:unknown;payloadValid:boolean;occurrence:number}>{
+    const db=getDb();return db.transaction(()=>{const rows=db.prepare(`SELECT * FROM tasks WHERE enabled=1 AND status='pending' AND next_run_at<=? AND claimed_at IS NULL ORDER BY next_run_at`).all(now) as TaskRow[];
+      const out=[] as Array<{task:TaskItem;payload:unknown;payloadValid:boolean;occurrence:number}>;
+      for(const row of rows){const occurrence=row.next_run_at!;const changed=db.prepare(`UPDATE tasks SET claimed_at=?,claimed_occurrence_at=? WHERE id=? AND claimed_at IS NULL AND next_run_at=?`).run(now,occurrence,row.id,occurrence).changes;
+        if(changed){let payload:unknown=null,payloadValid=true;try{payload=JSON.parse(row.payload_json??"{}");}catch{payloadValid=false;}out.push({task:rowToTask(row),payload,payloadValid,occurrence});}}
+      return out;})();
+  }
+  finalizeOccurrence(id:string,occurrence:number,lastError?:string):boolean {
+    const db=getDb();return db.transaction(()=>{const row=db.prepare(`SELECT repeat_interval_ms FROM tasks WHERE id=? AND claimed_occurrence_at=?`).get(id,occurrence) as {repeat_interval_ms:number|null}|undefined;if(!row)return false;
+      const next=row.repeat_interval_ms===null?null:occurrence+row.repeat_interval_ms;
+      return db.prepare(`UPDATE tasks SET status=CASE WHEN ? IS NULL THEN 'done' ELSE status END,next_run_at=?,last_run_at=?,last_error=?,claimed_at=NULL,claimed_occurrence_at=NULL WHERE id=? AND claimed_occurrence_at=?`).run(next,next,Date.now(),lastError??null,id,occurrence).changes===1;})();
+  }
+  recoverClaims():number {return getDb().prepare(`UPDATE tasks SET claimed_at=NULL,claimed_occurrence_at=NULL WHERE claimed_at IS NOT NULL OR claimed_occurrence_at IS NOT NULL`).run().changes;}
   setWatchHash(id:string,hash:string):string|undefined{const old=(getDb().prepare(`SELECT last_result_hash FROM tasks WHERE id=?`).get(id) as any)?.last_result_hash??undefined;getDb().prepare(`UPDATE tasks SET last_result_hash=? WHERE id=?`).run(hash,id);return old;}
 
   complete(id: string): boolean {

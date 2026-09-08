@@ -157,7 +157,7 @@ export function getDb(): Database.Database {
     task_type: "TEXT NOT NULL DEFAULT 'REMINDER'", payload_json: "TEXT",
     enabled: "INTEGER NOT NULL DEFAULT 1", repeat_interval_ms: "INTEGER",
     last_run_at: "INTEGER", next_run_at: "INTEGER", last_result_hash: "TEXT",
-    last_error: "TEXT", claimed_at: "INTEGER",
+    last_error: "TEXT", claimed_at: "INTEGER", claimed_occurrence_at: "INTEGER",
   };
   for (const [column, definition] of Object.entries(missingTaskColumns)) {
     if (!taskColumns.has(column)) db.exec(`ALTER TABLE tasks ADD COLUMN ${column} ${definition}`);

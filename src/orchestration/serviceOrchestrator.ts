@@ -83,6 +83,7 @@ export class ServiceOrchestrator {
         existingOp.status === "WAITING_INPUT" ||
         existingOp.status === "WAITING_PERMISSION" ||
         existingOp.status === "REJECTED" ||
+        existingOp.status === "CANCELLED" ||
         (existingOp.status === "FAILED" && !existingOp.retryable)
       ) {
         const meta = extractOperationMetadata(existingOp.result);
@@ -152,7 +153,12 @@ export class ServiceOrchestrator {
         scheduleTaskId: opts?.scheduleTaskId,
       });
     } else {
-      this.store.updateStatus(taskId, "DISPATCHING", undefined, "Nouvelle tentative après échec réseau.");
+      if (!this.store.updateStatus(taskId, "DISPATCHING", undefined, "Nouvelle tentative après échec réseau.")) {
+        const persisted = this.store.getOperation(taskId)!;
+        return { taskId, traceId: persisted.traceId, status: persisted.status,
+          selectedService: persisted.selectedService, result: persisted.result, error: persisted.error,
+          ...extractOperationMetadata(persisted.result) };
+      }
     }
 
     // 4. Build Task Request

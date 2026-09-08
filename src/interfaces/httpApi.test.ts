@@ -6,6 +6,7 @@ import { LocalHashingEmbeddingProvider } from "../llm/embeddings.js";
 import { startHttpApi } from "./httpApi.js";
 import { loadLLMConfig } from "../persistence/llmConfigStore.js";
 import { config } from "../config.js";
+import { NotificationStore } from "../autonomy/notificationStore.js";
 
 import fs from "node:fs";
 import vm from "node:vm";
@@ -232,6 +233,24 @@ test("Jarvis Command Center API Endpoints Test", async () => {
     assert.equal(operation.taskId, eventTaskId);
     await checkEndpoint(`${baseUrl}/api/operations/unknown-task/events`, undefined, 404);
 
+    const cancelId=`cancel-http-${eventSuffix}`;
+    agent.serviceOrchestrator.store.createOperation({taskId:cancelId,traceId:"cancel-trace",idempotencyKey:`cancel-${eventSuffix}`,objective:"Cancel",capability:"software_development",selectedService:"software_factory",status:"QUEUED",executionMode:"background"});
+    const cancelled=await checkEndpoint(`${baseUrl}/api/operations/${cancelId}/cancel`,{method:"POST"});
+    assert.equal(cancelled.cancelled,true);assert.equal(cancelled.operation.status,"CANCELLED");
+
+    const notification=new NotificationStore().create({type:"REMINDER_DUE",severity:"info",title:"HTTP reminder",message:"Due"});
+    assert.ok((await checkEndpoint(`${baseUrl}/api/notifications`)).some((item:{id:string})=>item.id===notification.id));
+    assert.ok((await checkEndpoint(`${baseUrl}/api/notifications?unread=true`)).some((item:{id:string})=>item.id===notification.id));
+    assert.ok((await checkEndpoint(`${baseUrl}/api/notifications/unread-count`)).count>=1);
+    assert.equal((await checkEndpoint(`${baseUrl}/api/notifications/${notification.id}/read`,{method:"POST"})).ok,true);
+    await checkEndpoint(`${baseUrl}/api/notifications/missing/read`,{method:"POST"},404);
+
+    const schedule=await checkEndpoint(`${baseUrl}/api/schedules`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({title:"HTTP schedule",taskType:"REMINDER",nextRunAt:Date.now()+60_000,repeatIntervalMs:1000})},201);
+    assert.ok((await checkEndpoint(`${baseUrl}/api/schedules`)).some((item:{id:string})=>item.id===schedule.id));
+    assert.equal((await checkEndpoint(`${baseUrl}/api/schedules/${schedule.id}/disable`,{method:"POST"})).ok,true);
+    assert.equal((await checkEndpoint(`${baseUrl}/api/schedules/${schedule.id}/enable`,{method:"POST"})).ok,true);
+    await checkEndpoint(`${baseUrl}/api/schedules`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({title:"bad",taskType:"DISPATCH",nextRunAt:"tomorrow",repeatIntervalMs:0})},400);
+
     // A service-originated wait and an input wait must never be changed to RUNNING artificially.
     agent.serviceOrchestrator.store.updateStatus(eventTaskId, "WAITING_PERMISSION");
     await checkEndpoint(`${baseUrl}/api/operations/${eventTaskId}/respond`, {
@@ -415,6 +434,15 @@ test("HTTP API applique l'authentification fail-closed tout en laissant les ress
       ["/api/chat/stream", "GET"],
       ["/tasks", "POST"],
       ["/api/tasks/dispatch", "POST"],
+      ["/api/operations/anything/cancel", "POST"],
+      ["/api/notifications", "GET"],
+      ["/api/notifications?unread=true", "GET"],
+      ["/api/notifications/unread-count", "GET"],
+      ["/api/notifications/anything/read", "POST"],
+      ["/api/schedules", "GET"],
+      ["/api/schedules", "POST"],
+      ["/api/schedules/anything/enable", "POST"],
+      ["/api/schedules/anything/disable", "POST"],
     ] as const) {
       const notConfigured = await fetch(`${baseUrl}${path}`, { method });
       assert.equal(notConfigured.status, 503, `${method} ${path} doit échouer en mode fail-closed`);
