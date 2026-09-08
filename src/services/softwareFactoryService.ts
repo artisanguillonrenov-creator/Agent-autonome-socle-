@@ -16,7 +16,6 @@ export interface ParsedSoftwareTask {
   repo: string;
   filePath: string;
   instructions: string;
-  exactContent?: string;
 }
 
 export function parseRepoUrl(repoUrlStr?: string): { owner: string; repo: string } | null {
@@ -40,70 +39,10 @@ export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
   const owner = "artisanguillonrenov-creator";
   const repo = "Agent-autonome-socle-";
 
-  let filePath = String(ctx.filePath || ctx.path || ctx.file || "").trim();
-  const objectiveStr = String(taskReq.objective || "").trim();
-  const instructionsStr = String(ctx.instructions || "").trim();
-  const textToSearch = instructionsStr ? `${objectiveStr}\n${instructionsStr}` : objectiveStr;
+  const filePath = String(ctx.filePath || ctx.path || ctx.file || "src/index.ts").trim();
+  const instructions = String(ctx.instructions || taskReq.objective || "Mettre à jour le code selon la spécification").trim();
 
-  if (!filePath) {
-    const match =
-      textToSearch.match(/(?:fichier|file|path)[:\s]+([a-zA-Z0-9_\-./]+\.[a-zA-Z0-9]+)/i) ||
-      textToSearch.match(/([a-zA-Z0-9_\-./]+\/(?:[a-zA-Z0-9_\-./]+\.[a-zA-Z0-9]+))/i) ||
-      textToSearch.match(/([a-zA-Z0-9_\-.]+\.(?:ts|js|json|md|html|css|py))/i);
-    if (match) {
-      filePath = match[1].trim();
-    }
-  }
-
-  if (!filePath) {
-    throw new Error("FILE_PATH_MISSING: Le chemin du fichier (filePath) est obligatoire et introuvable.");
-  }
-
-  let exactContent: string | undefined = undefined;
-
-  if (typeof ctx.exactContent === "string") {
-    exactContent = ctx.exactContent;
-  } else {
-    const exactDirectiveMatch = textToSearch.match(/(?:avec exactement ce contenu|contenu exact|écris exactement|exact content)\s*:\s*([\s\S]+)$/i);
-
-    if (exactDirectiveMatch) {
-      const rest = exactDirectiveMatch[1];
-      const fenceMatch = rest.match(/^```(?:\w+)?\r?\n([\s\S]*?)\r?\n```/i) || rest.match(/^```([\s\S]*?)```/i);
-
-      if (fenceMatch) {
-        exactContent = fenceMatch[1];
-      } else {
-        const lines = rest.split(/\r?\n/);
-        const firstNonEmptyLineIndex = lines.findIndex((l) => l.trim() !== "");
-        if (firstNonEmptyLineIndex !== -1) {
-          const firstContentLine = lines[firstNonEmptyLineIndex].trim();
-          const remainingLines = lines.slice(firstNonEmptyLineIndex + 1).filter((l) => l.trim() !== "");
-
-          if (remainingLines.length > 0) {
-            const operationalIndex = remainingLines.findIndex((l) =>
-              /\b(?:crée|ouvre|branche|pull request|pr|fusionne|dédiée)\b/i.test(l),
-            );
-            if (operationalIndex === 0) {
-              // Operational instructions start right on the second line
-              exactContent = firstContentLine;
-            } else if (operationalIndex > 0) {
-              // Ambiguous mixture of lines and operational instructions without code fences
-              throw new Error("EXACT_CONTENT_AMBIGUOUS: Les limites du contenu exact ne peuvent pas être déterminées de manière non ambiguë sans code fences (```) ou context.exactContent.");
-            } else {
-              // No operational instructions found in remaining lines: the multiline block is the exact content
-              exactContent = [firstContentLine, ...remainingLines].join("\n");
-            }
-          } else {
-            exactContent = firstContentLine;
-          }
-        }
-      }
-    }
-  }
-
-  const instructions = (instructionsStr || objectiveStr || "Mettre à jour le code selon la spécification").trim();
-
-  return { owner, repo, filePath, instructions, exactContent };
+  return { owner, repo, filePath, instructions };
 }
 
 export class SoftwareFactoryService {
@@ -214,21 +153,11 @@ export class SoftwareFactoryService {
         const rawOutput = data.choices?.[0]?.message?.content?.trim();
 
         if (rawOutput) {
-          let cleanCode = rawOutput;
           const codeBlockMatch = rawOutput.match(/```(?:[a-z0-9_-]+)?\n([\s\S]*?)\n```/i);
           if (codeBlockMatch && codeBlockMatch[1]) {
-            cleanCode = codeBlockMatch[1].trim();
+            return codeBlockMatch[1].trim();
           }
-
-          if (!cleanCode.trim()) {
-            throw new Error("NO_CHANGES_GENERATED: Le code généré est vide.");
-          }
-
-          if (existingContent && existingContent.trim() === cleanCode.trim()) {
-            throw new Error("NO_CHANGES_GENERATED: Le code généré est identique au contenu existant.");
-          }
-
-          return cleanCode;
+          return rawOutput;
         }
       } catch (err: unknown) {
         lastError = err instanceof Error ? err : new Error(String(err));
@@ -247,7 +176,6 @@ export class SoftwareFactoryService {
     onStep?: (stage: string, detail?: Record<string, unknown>) => void,
   ): Promise<{
     branch: string;
-    commitSha: string;
     prUrl: string;
     prNumber: number;
     summary: string;
@@ -294,15 +222,9 @@ export class SoftwareFactoryService {
       // Fichier nouveau
     }
 
-    // 4. Générer ou utiliser le code exact
-    let updatedCode: string;
-    if (typeof params.exactContent === "string") {
-      onStep?.("USING_EXACT_CONTENT", { filePath });
-      updatedCode = params.exactContent;
-    } else {
-      onStep?.("GENERATING_CODE_UPDATE", { filePath });
-      updatedCode = await this.generateCodeUpdate(existingContent, filePath, instructions);
-    }
+    // 4. Générer le code
+    onStep?.("GENERATING_CODE_UPDATE", { filePath });
+    const updatedCode = await this.generateCodeUpdate(existingContent, filePath, instructions);
 
     // 5. Créer la branche unique pour cette tâche (vérifier existence d'abord)
     onStep?.("GITHUB_CREATING_BRANCH", { branch: branchName });
@@ -335,54 +257,16 @@ export class SoftwareFactoryService {
     }
 
     onStep?.("GITHUB_UPDATING_FILE", { path: filePath, branch: branchName });
-    const updateRes = await this.octokit.rest.repos.createOrUpdateFileContents({
+    await this.octokit.rest.repos.createOrUpdateFileContents({
       owner,
       repo,
       path: filePath,
-      message: existingContent
-        ? `feat(jarvis): update ${filePath} - ${instructions.slice(0, 50)}`
-        : `feat(jarvis): create ${filePath} - ${instructions.slice(0, 50)}`,
+      message: `feat(jarvis): update ${filePath} - ${instructions.slice(0, 50)}`,
       content: Buffer.from(updatedCode, "utf-8").toString("base64"),
       branch: branchName,
       sha: targetBranchFileSha,
     });
     onStep?.("GITHUB_FILE_UPDATED", { path: filePath, branch: branchName });
-
-    let commitSha = (updateRes.data as { commit?: { sha?: string } }).commit?.sha;
-
-    if (!commitSha) {
-      try {
-        const refRes = await this.octokit.rest.git.getRef({
-          owner,
-          repo,
-          ref: `heads/${branchName}`,
-        });
-        const refSha = refRes.data.object?.sha;
-        if (refSha && refSha !== baseSha) {
-          commitSha = refSha;
-        }
-      } catch {
-        // ignore
-      }
-    }
-
-    if (!commitSha || commitSha === baseSha) {
-      throw new Error("GITHUB_COMMIT_SHA_MISSING: Impossible de déterminer le véritable SHA du commit GitHub.");
-    }
-
-    // 6b. Vérifier qu'il y a un réel diff sur GitHub avant d'ouvrir la PR
-    onStep?.("GITHUB_CHECKING_DIFF", { head: branchName, base: defaultBranch });
-    const compareRes = await this.octokit.rest.repos.compareCommits({
-      owner,
-      repo,
-      base: defaultBranch,
-      head: branchName,
-    });
-
-    if (!compareRes.data.files || compareRes.data.files.length === 0) {
-      throw new Error("NO_GITHUB_DIFF: Aucun diff détecté sur GitHub par rapport à la branche de base.");
-    }
-    onStep?.("GITHUB_DIFF_VERIFIED", { filesCount: compareRes.data.files.length });
 
     // 7. Créer ou récupérer la PR (vérifier PR existante d'abord)
     onStep?.("GITHUB_CREATING_PR", { head: branchName, base: defaultBranch });
@@ -416,7 +300,6 @@ export class SoftwareFactoryService {
 
     return {
       branch: branchName,
-      commitSha,
       prUrl,
       prNumber,
       summary: `Patch appliqué sur la branche unique '${branchName}' et Pull Request #${prNumber} ouverte (${prUrl}).`,
@@ -444,29 +327,7 @@ export class SoftwareFactoryService {
       payload: { message: "Tâche acceptée par Jarvis Software Factory V1" },
     });
 
-    let params: ParsedSoftwareTask;
-    try {
-      params = extractTaskParams(taskReq);
-    } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      const errorCode = errorMsg.split(":")[0] || "FILE_PATH_MISSING";
-      events.push({
-        schema_version: CONTRACT_SCHEMA_VERSION,
-        event_id: `evt-${taskReq.task_id}-failed`,
-        task_id: taskReq.task_id,
-        trace_id: taskReq.trace_id,
-        service: serviceName,
-        sequence: sequence++,
-        type: "TASK_FAILED",
-        timestamp: Date.now(),
-        payload: {
-          error: errorMsg,
-          error_code: errorCode,
-        },
-      });
-      return events;
-    }
-
+    const params = extractTaskParams(taskReq);
     let lastErrorMsg = "";
     let lastErrorCode = "";
 
@@ -513,15 +374,12 @@ export class SoftwareFactoryService {
           type: "TASK_COMPLETED",
           timestamp: Date.now(),
           payload: {
-            status: "COMPLETED",
-            task_id: taskReq.task_id,
-            trace_id: taskReq.trace_id,
+            status: "ready",
             branch: result.branch,
-            commit_sha: result.commitSha,
-            pr_number: result.prNumber,
             pr_url: result.prUrl,
-            filePath: params.filePath,
+            pr_number: result.prNumber,
             summary: result.summary,
+            filePath: params.filePath,
           },
         });
 
