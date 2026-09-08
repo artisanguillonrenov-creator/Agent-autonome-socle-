@@ -11,6 +11,35 @@ export interface RetrievedContext {
   facts: string[];
 }
 
+function hasToolCalls(message: ChatMessage): boolean {
+  const value = message as ChatMessage & {
+    tool_calls?: unknown;
+    toolCalls?: unknown;
+  };
+
+  return Array.isArray(value.tool_calls) || Array.isArray(value.toolCalls);
+}
+
+function selectRecentMessages(messages: ChatMessage[], limit: number): ChatMessage[] {
+  if (limit <= 0 || messages.length === 0) {
+    return [];
+  }
+
+  let start = Math.max(0, messages.length - limit);
+
+  if (messages[start]?.role === "tool") {
+    while (start > 0 && messages[start - 1]?.role === "tool") {
+      start -= 1;
+    }
+
+    if (start > 0 && messages[start - 1]?.role === "assistant" && hasToolCalls(messages[start - 1])) {
+      start -= 1;
+    }
+  }
+
+  return messages.slice(start);
+}
+
 /**
  * Façade qui assemble les 4 couches de mémoire (brique 2) derrière une API unique,
  * consommée par la boucle agent et le gestionnaire de budget de contexte.
@@ -38,8 +67,9 @@ export class MemoryManager {
   async retrieve(query: string, topK = 5): Promise<RetrievedContext> {
     const relevantMemories = await this.vector.search(query, topK);
     const facts = this.facts.all().map((f) => `${f.entity}.${f.attribute} = ${f.value}`);
+
     return {
-      recentMessages: this.working.recent(10),
+      recentMessages: selectRecentMessages(this.working.all(), 10),
       relevantMemories,
       facts,
     };
