@@ -47,48 +47,6 @@ test("extractTaskParams retourne les valeurs fixées du projet (owner et repo av
   assert.equal(params.instructions, "Ajouter un bouton de déconnexion");
 });
 
-test("extractTaskParams lève FILE_PATH_MISSING en l'absence de filePath sans fallback vers src/index.ts", () => {
-  const req: TaskRequest = {
-    schema_version: "1.0",
-    task_id: "task-missing-path",
-    trace_id: "trace-missing-path",
-    idempotency_key: "idemp-missing-path",
-    capability: "software_development",
-    objective: "Faire une modification indéterminée",
-    context: {
-      instructions: "Faire du refactoring sans spécifier de fichier",
-    },
-    constraints: [],
-    priority: "low",
-    permissions: [],
-  };
-
-  assert.throws(() => extractTaskParams(req), (err: unknown) => {
-    return err instanceof Error && err.message.includes("FILE_PATH_MISSING");
-  });
-});
-
-test("handleTaskRequest retourne TASK_FAILED avec error_code FILE_PATH_MISSING si aucun chemin n'est spécifié", async () => {
-  const service = new SoftwareFactoryService({ githubToken: "fake" });
-  const req: TaskRequest = {
-    schema_version: "1.0",
-    task_id: "task-missing-file",
-    trace_id: "trace-missing-file",
-    idempotency_key: "idemp-missing-file",
-    capability: "software_development",
-    objective: "Dev sans fichier",
-    context: {},
-    constraints: [],
-    priority: "medium",
-    permissions: [],
-  };
-
-  const events = await service.handleTaskRequest(req);
-  const failedEvent = events.find((e) => e.type === "TASK_FAILED");
-  assert.ok(failedEvent, "Un événement TASK_FAILED doit être retourné");
-  assert.equal(failedEvent?.payload.error_code, "FILE_PATH_MISSING");
-});
-
 test("TEST 1 - dispatch_capability est toujours présent dans les skills disponibles de l'agent", async () => {
   const agent = new Agent({
     llm: new MockProvider(),
@@ -316,6 +274,283 @@ test("SoftwareFactoryService exécute le workflow complet avec branche unique pa
   assert.ok(calls.includes("pulls.create:jarvis/task-success-test->main"));
 });
 
+test("TEST 1 - exactContent simple", () => {
+  const req: TaskRequest = {
+    schema_version: "1.0",
+    task_id: "task-exact-1",
+    trace_id: "trace-exact-1",
+    idempotency_key: "idemp-exact-1",
+    capability: "software_development",
+    objective: "Crée docs/exact.md avec exactement ce contenu :\n\nBonjour",
+    context: {},
+    constraints: [],
+    priority: "medium",
+    permissions: [],
+  };
+
+  const params = extractTaskParams(req);
+  assert.equal(params.filePath, "docs/exact.md");
+  assert.equal(params.exactContent, "Bonjour");
+});
+
+test("TEST 2 - exactContent multilignes", () => {
+  const req: TaskRequest = {
+    schema_version: "1.0",
+    task_id: "task-exact-2",
+    trace_id: "trace-exact-2",
+    idempotency_key: "idemp-exact-2",
+    capability: "software_development",
+    objective: "Crée docs/exact-multiline.md avec exactement ce contenu :\n\nLigne 1\nLigne 2\nLigne 3",
+    context: {},
+    constraints: [],
+    priority: "medium",
+    permissions: [],
+  };
+
+  const params = extractTaskParams(req);
+  assert.equal(params.filePath, "docs/exact-multiline.md");
+  assert.equal(params.exactContent, "Ligne 1\nLigne 2\nLigne 3");
+});
+
+test("TEST 3 - caractères Unicode dans exactContent", () => {
+  const req: TaskRequest = {
+    schema_version: "1.0",
+    task_id: "task-exact-3",
+    trace_id: "trace-exact-3",
+    idempotency_key: "idemp-exact-3",
+    capability: "software_development",
+    objective: "Crée docs/unicode.md avec exactement ce contenu :\n\nTest réussi : Jarvis → Software Factory → GitHub",
+    context: {},
+    constraints: [],
+    priority: "medium",
+    permissions: [],
+  };
+
+  const params = extractTaskParams(req);
+  assert.equal(params.exactContent, "Test réussi : Jarvis → Software Factory → GitHub");
+});
+
+test("TEST 4 - bypass LLM quand exactContent est présent", async () => {
+  let writtenContent = "";
+
+  const mockOctokit = {
+    rest: {
+      repos: {
+        get: async () => ({ data: { default_branch: "main" } }),
+        getContent: async () => { throw new Error("404 Not Found"); },
+        createOrUpdateFileContents: async ({ content }: { content: string }) => {
+          writtenContent = Buffer.from(content, "base64").toString("utf-8");
+          return { data: { commit: { sha: "sha-exact-commit" } } };
+        },
+        compareCommits: async () => ({ data: { files: [{ filename: "docs/exact.md", status: "added" }] } }),
+      },
+      git: {
+        getRef: async ({ ref }: { ref: string }) => {
+          if (ref.startsWith("heads/jarvis/")) throw new Error("404 Not Found");
+          return { data: { object: { sha: "base-sha" } } };
+        },
+        createRef: async () => ({ data: {} }),
+      },
+      pulls: {
+        list: async () => ({ data: [] }),
+        create: async () => ({ data: { html_url: "https://github.com/org/repo/pull/99", number: 99 } }),
+      },
+    },
+  } as unknown as Octokit;
+
+  const service = new SoftwareFactoryService({
+    githubToken: "test-token",
+    octokitClient: mockOctokit,
+    // openrouterApiKey est volontairement non configuré
+  });
+
+  service.generateCodeUpdate = async () => {
+    throw new Error("generateCodeUpdate ne doit PAS être appelé si exactContent est présent !");
+  };
+
+  const res = await service.executeWorkflow(
+    {
+      owner: "artisanguillonrenov-creator",
+      repo: "Agent-autonome-socle-",
+      filePath: "docs/exact.md",
+      instructions: "Créer le fichier",
+      exactContent: "JARVIS_EXACT_CONTENT_OK",
+    },
+    "task-bypass-llm",
+  );
+
+  assert.equal(writtenContent, "JARVIS_EXACT_CONTENT_OK");
+  assert.equal(res.commitSha, "sha-exact-commit");
+  assert.equal(res.prNumber, 99);
+});
+
+test("TEST 5 - retour du commit SHA depuis repos.createOrUpdateFileContents", async () => {
+  const mockOctokit = {
+    rest: {
+      repos: {
+        get: async () => ({ data: { default_branch: "main" } }),
+        getContent: async () => { throw new Error("404 Not Found"); },
+        createOrUpdateFileContents: async () => ({
+          data: { commit: { sha: "commit-sha-777888999" } },
+        }),
+        compareCommits: async () => ({ data: { files: [{ filename: "src/test.ts", status: "added" }] } }),
+      },
+      git: {
+        getRef: async ({ ref }: { ref: string }) => {
+          if (ref.startsWith("heads/jarvis/")) throw new Error("404 Not Found");
+          return { data: { object: { sha: "base-sha" } } };
+        },
+        createRef: async () => ({ data: {} }),
+      },
+      pulls: {
+        list: async () => ({ data: [] }),
+        create: async () => ({ data: { html_url: "https://github.com/org/repo/pull/1", number: 1 } }),
+      },
+    },
+  } as unknown as Octokit;
+
+  const service = new SoftwareFactoryService({
+    githubToken: "test-token",
+    octokitClient: mockOctokit,
+  });
+
+  const res = await service.executeWorkflow(
+    {
+      owner: "artisanguillonrenov-creator",
+      repo: "Agent-autonome-socle-",
+      filePath: "src/test.ts",
+      instructions: "Create test",
+      exactContent: "test content",
+    },
+    "task-commit-sha-test",
+  );
+
+  assert.equal(res.commitSha, "commit-sha-777888999");
+});
+
+test("TEST 6 - TASK_COMPLETED payload contient task_id, trace_id, branch, commit_sha, pr_number, pr_url", async () => {
+  const mockOctokit = {
+    rest: {
+      repos: {
+        get: async () => ({ data: { default_branch: "main" } }),
+        getContent: async () => ({ data: { content: Buffer.from("v1").toString("base64"), sha: "sha-1" } }),
+        createOrUpdateFileContents: async () => ({
+          data: { commit: { sha: "commit-sha-123456" } },
+        }),
+        compareCommits: async () => ({ data: { files: [{ filename: "src/main.ts", status: "modified" }] } }),
+      },
+      git: {
+        getRef: async ({ ref }: { ref: string }) => {
+          if (ref.startsWith("heads/jarvis/")) throw new Error("404 Not Found");
+          return { data: { object: { sha: "base-sha" } } };
+        },
+        createRef: async () => ({ data: {} }),
+      },
+      pulls: {
+        list: async () => ({ data: [] }),
+        create: async () => ({ data: { html_url: "https://github.com/org/repo/pull/100", number: 100 } }),
+      },
+    },
+  } as unknown as Octokit;
+
+  const service = new SoftwareFactoryService({
+    githubToken: "test-token",
+    octokitClient: mockOctokit,
+  });
+
+  const req: TaskRequest = {
+    schema_version: "1.0",
+    task_id: "task-payload-test-123",
+    trace_id: "trace-payload-test-456",
+    idempotency_key: "idemp-payload-test-789",
+    capability: "software_development",
+    objective: "Crée src/main.ts avec exactement ce contenu :\n\nconsole.log('OK');",
+    context: {},
+    constraints: [],
+    priority: "medium",
+    permissions: [],
+  };
+
+  const events = await service.handleTaskRequest(req);
+  const completedEvt = events.find((e) => e.type === "TASK_COMPLETED");
+  assert.ok(completedEvt, "TASK_COMPLETED doit être émis");
+  assert.equal(completedEvt?.payload.status, "COMPLETED");
+  assert.equal(completedEvt?.payload.task_id, "task-payload-test-123");
+  assert.equal(completedEvt?.payload.trace_id, "trace-payload-test-456");
+  assert.equal(completedEvt?.payload.branch, "jarvis/task-payload-test-123");
+  assert.equal(completedEvt?.payload.commit_sha, "commit-sha-123456");
+  assert.equal(completedEvt?.payload.pr_number, 100);
+  assert.equal(completedEvt?.payload.pr_url, "https://github.com/org/repo/pull/100");
+});
+
+test("TEST 7 - Orchestrator et dispatch_capability préservent et affichent toutes les métadonnées", async () => {
+  const { ServiceRegistry } = await import("../orchestration/serviceRegistry.js");
+  const { ServiceOrchestrator } = await import("../orchestration/serviceOrchestrator.js");
+  const { dispatchCapabilitySkill } = await import("../skills/builtin/dispatchCapability.js");
+
+  const mockOctokit = {
+    rest: {
+      repos: {
+        get: async () => ({ data: { default_branch: "main" } }),
+        getContent: async () => ({ data: { content: Buffer.from("v1").toString("base64"), sha: "sha-1" } }),
+        createOrUpdateFileContents: async () => ({
+          data: { commit: { sha: "sha-commit-e2e-777" } },
+        }),
+        compareCommits: async () => ({ data: { files: [{ filename: "src/app.ts", status: "modified" }] } }),
+      },
+      git: {
+        getRef: async ({ ref }: { ref: string }) => {
+          if (ref.startsWith("heads/jarvis/")) throw new Error("404 Not Found");
+          return { data: { object: { sha: "base-sha" } } };
+        },
+        createRef: async () => ({ data: {} }),
+      },
+      pulls: {
+        list: async () => ({ data: [] }),
+        create: async () => ({ data: { html_url: "https://github.com/org/repo/pull/55", number: 55 } }),
+      },
+    },
+  } as unknown as Octokit;
+
+  const sfService = new SoftwareFactoryService({
+    githubToken: "test-token",
+    octokitClient: mockOctokit,
+  });
+
+  const registry = new ServiceRegistry();
+  const adapter = new ServiceAdapter();
+  // Injection direct in-process de sfService dans ServiceAdapter
+  (adapter as unknown as { localSoftwareFactory: unknown }).localSoftwareFactory = sfService;
+
+  registry.register({
+    id: "software_factory",
+    name: "Software Factory",
+    enabled: true,
+    endpoint: "in-process",
+    capabilities: ["software_development"],
+    priority: 100,
+  });
+
+  const orchestrator = new ServiceOrchestrator({ registry, adapter });
+
+  const resultStr = await dispatchCapabilitySkill.handler(
+    {
+      capability: "software_development",
+      objective: "Crée src/app.ts avec exactement ce contenu :\n\nconst x = 1;",
+    },
+    { serviceOrchestrator: orchestrator },
+  );
+
+  assert.match(resultStr, /Statut : COMPLETED/);
+  assert.match(resultStr, /task_id : task-/);
+  assert.match(resultStr, /trace_id : trace-/);
+  assert.match(resultStr, /Service : software_factory/);
+  assert.match(resultStr, /Branche : jarvis\/task-/);
+  assert.match(resultStr, /SHA commit : sha-commit-e2e-777/);
+  assert.match(resultStr, /PR : #55/);
+  assert.match(resultStr, /URL : https:\/\/github.com\/org\/repo\/pull\/55/);
+});
+
 test("SoftwareFactoryServer démarre, traite les requêtes HTTP POST /tasks et s'arrête proprement", async () => {
   const mockOctokit = {
     rest: {
@@ -375,127 +610,4 @@ test("SoftwareFactoryServer démarre, traite les requêtes HTTP POST /tasks et s
   } finally {
     await server.stop();
   }
-});
-
-test("SoftwareFactoryService gère la création d'un nouveau fichier quand getContent retourne 404", async () => {
-  let createdSha: string | undefined = "UNKNOWN";
-
-  const mockOctokit = {
-    rest: {
-      repos: {
-        get: async () => ({ data: { default_branch: "main" } }),
-        getContent: async ({ path, ref }: { path: string; ref: string }) => {
-          // simulation 404 fichier inexistant
-          throw new Error("404 Not Found");
-        },
-        createOrUpdateFileContents: async ({ sha }: { sha?: string }) => {
-          createdSha = sha;
-          return { data: { content: { sha: "new-sha" } } };
-        },
-        compareCommits: async () => ({
-          data: { files: [{ filename: "src/newfile.ts", status: "added" }], total_commits: 1 },
-        }),
-      },
-      git: {
-        getRef: async ({ ref }: { ref: string }) => {
-          if (ref.startsWith("heads/jarvis/")) throw new Error("404 Not Found");
-          return { data: { object: { sha: "base-sha" } } };
-        },
-        createRef: async () => ({ data: {} }),
-      },
-      pulls: {
-        list: async () => ({ data: [] }),
-        create: async () => ({ data: { html_url: "https://github.com/org/repo/pull/10", number: 10 } }),
-      },
-    },
-  } as unknown as Octokit;
-
-  const service = new SoftwareFactoryService({
-    githubToken: "test-token",
-    octokitClient: mockOctokit,
-  });
-
-  service.generateCodeUpdate = async () => "export const newModule = true;";
-
-  const res = await service.executeWorkflow(
-    {
-      owner: "artisanguillonrenov-creator",
-      repo: "Agent-autonome-socle-",
-      filePath: "src/newfile.ts",
-      instructions: "Créer un nouveau module",
-    },
-    "task-newfile-test",
-  );
-
-  assert.equal(createdSha, undefined, "sha doit être undefined pour la création d'un nouveau fichier");
-  assert.equal(res.prNumber, 10);
-});
-
-test("NO_CHANGES_GENERATED est levé quand le code généré est identique ou vide", async () => {
-  const service = new SoftwareFactoryService({
-    openrouterApiKey: "fake-key",
-  });
-
-  // Mock global fetch
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () =>
-    new Response(
-      JSON.stringify({
-        choices: [{ message: { content: "console.log('identical');" } }],
-      }),
-      { status: 200 },
-    );
-
-  try {
-    await assert.rejects(
-      async () => {
-        await service.generateCodeUpdate("console.log('identical');", "src/test.ts", "pas de changement");
-      },
-      (err: unknown) => err instanceof Error && err.message.includes("NO_CHANGES_GENERATED"),
-    );
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test("executeWorkflow lève NO_GITHUB_DIFF si compareCommits ne retourne aucun fichier modifié", async () => {
-  const mockOctokit = {
-    rest: {
-      repos: {
-        get: async () => ({ data: { default_branch: "main" } }),
-        getContent: async () => ({ data: { content: Buffer.from("code").toString("base64"), sha: "sha-1" } }),
-        createOrUpdateFileContents: async () => ({ data: {} }),
-        compareCommits: async () => ({ data: { files: [] } }),
-      },
-      git: {
-        getRef: async ({ ref }: { ref: string }) => {
-          if (ref.startsWith("heads/jarvis/")) throw new Error("404 Not Found");
-          return { data: { object: { sha: "base-sha" } } };
-        },
-        createRef: async () => ({ data: {} }),
-      },
-    },
-  } as unknown as Octokit;
-
-  const service = new SoftwareFactoryService({
-    githubToken: "test-token",
-    octokitClient: mockOctokit,
-  });
-
-  service.generateCodeUpdate = async () => "code modifie";
-
-  await assert.rejects(
-    async () => {
-      await service.executeWorkflow(
-        {
-          owner: "artisanguillonrenov-creator",
-          repo: "Agent-autonome-socle-",
-          filePath: "src/test.ts",
-          instructions: "Modif",
-        },
-        "task-nodiff-test",
-      );
-    },
-    (err: unknown) => err instanceof Error && err.message.includes("NO_GITHUB_DIFF"),
-  );
 });

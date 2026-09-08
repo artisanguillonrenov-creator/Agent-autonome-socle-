@@ -12,6 +12,10 @@ export interface OrchestrationResult {
   selectedService: string;
   result?: string;
   error?: string;
+  branch?: string;
+  commitSha?: string;
+  prNumber?: number;
+  prUrl?: string;
 }
 
 export class ServiceOrchestrator {
@@ -44,6 +48,25 @@ export class ServiceOrchestrator {
         existingOp.status === "REJECTED" ||
         (existingOp.status === "FAILED" && !existingOp.retryable)
       ) {
+        let branch: string | undefined;
+        let commitSha: string | undefined;
+        let prNumber: number | undefined;
+        let prUrl: string | undefined;
+
+        if (existingOp.result) {
+          try {
+            const p = JSON.parse(existingOp.result);
+            if (p && typeof p === "object") {
+              branch = typeof p.branch === "string" ? p.branch : undefined;
+              commitSha = typeof p.commit_sha === "string" ? p.commit_sha : typeof p.commitSha === "string" ? p.commitSha : undefined;
+              prNumber = typeof p.pr_number === "number" ? p.pr_number : typeof p.prNumber === "number" ? p.prNumber : undefined;
+              prUrl = typeof p.pr_url === "string" ? p.pr_url : typeof p.prUrl === "string" ? p.prUrl : undefined;
+            }
+          } catch {
+            // Not JSON
+          }
+        }
+
         return {
           taskId: existingOp.taskId,
           traceId: existingOp.traceId,
@@ -51,6 +74,10 @@ export class ServiceOrchestrator {
           selectedService: existingOp.selectedService,
           result: existingOp.result,
           error: existingOp.error,
+          branch,
+          commitSha,
+          prNumber,
+          prUrl,
         };
       }
       // If FAILED and retryable, proceed with controlled retry dispatch below
@@ -138,6 +165,25 @@ export class ServiceOrchestrator {
     }
 
     const updatedOp = this.store.getOperation(taskId)!;
+    let branch: string | undefined;
+    let commitSha: string | undefined;
+    let prNumber: number | undefined;
+    let prUrl: string | undefined;
+
+    if (updatedOp.result) {
+      try {
+        const p = JSON.parse(updatedOp.result);
+        if (p && typeof p === "object") {
+          branch = typeof p.branch === "string" ? p.branch : undefined;
+          commitSha = typeof p.commit_sha === "string" ? p.commit_sha : typeof p.commitSha === "string" ? p.commitSha : undefined;
+          prNumber = typeof p.pr_number === "number" ? p.pr_number : typeof p.prNumber === "number" ? p.prNumber : undefined;
+          prUrl = typeof p.pr_url === "string" ? p.pr_url : typeof p.prUrl === "string" ? p.prUrl : undefined;
+        }
+      } catch {
+        // Not JSON
+      }
+    }
+
     return {
       taskId,
       traceId,
@@ -145,6 +191,10 @@ export class ServiceOrchestrator {
       selectedService: service.id,
       result: updatedOp.result,
       error: updatedOp.error,
+      branch,
+      commitSha,
+      prNumber,
+      prUrl,
     };
   }
 

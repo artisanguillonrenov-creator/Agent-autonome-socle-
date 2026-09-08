@@ -51,7 +51,42 @@ export const dispatchCapabilitySkill: SkillDefinition = {
     });
 
     if (orchResult.status === "COMPLETED") {
-      return `[Service ${orchResult.selectedService}] Résultat de '${capability}': ${orchResult.result ?? "Tâche terminée avec succès."}`;
+      let payload: Record<string, unknown> = {};
+      if (orchResult.result) {
+        try {
+          payload = JSON.parse(orchResult.result);
+        } catch {
+          // not json
+        }
+      }
+
+      const branch = orchResult.branch || (typeof payload.branch === "string" ? payload.branch : "Non fournie");
+      const commitSha =
+        orchResult.commitSha ||
+        (typeof payload.commit_sha === "string" ? payload.commit_sha : typeof payload.commitSha === "string" ? payload.commitSha : "Non fourni");
+      const prNumber =
+        orchResult.prNumber !== undefined
+          ? orchResult.prNumber
+          : payload.pr_number !== undefined
+          ? payload.pr_number
+          : payload.prNumber !== undefined
+          ? payload.prNumber
+          : "Non fourni";
+      const prUrl = orchResult.prUrl || (typeof payload.pr_url === "string" ? payload.pr_url : typeof payload.prUrl === "string" ? payload.prUrl : "Non fournie");
+      const summary = typeof payload.summary === "string" ? payload.summary : "Tâche terminée avec succès.";
+
+      return [
+        `[Service ${orchResult.selectedService}] Tâche '${capability}' terminée avec succès.`,
+        `Statut : ${orchResult.status}`,
+        `task_id : ${orchResult.taskId}`,
+        `trace_id : ${orchResult.traceId}`,
+        `Service : ${orchResult.selectedService}`,
+        `Branche : ${branch}`,
+        `SHA commit : ${commitSha}`,
+        `PR : #${prNumber}`,
+        `URL : ${prUrl}`,
+        `Détails : ${summary}`,
+      ].join("\n");
     } else if (orchResult.status === "FAILED") {
       return `[Service ${orchResult.selectedService}] Échec de '${capability}': ${orchResult.error ?? "Erreur inconnue"}`;
     } else if (orchResult.status === "REJECTED") {
