@@ -204,6 +204,59 @@ export class OperationStore {
     });
   }
 
+  listEvents(taskId: string): ServiceEvent[] {
+    const db = getDb();
+    const rows = db.prepare(`
+      SELECT event_id, task_id, sequence, schema_version, trace_id, service, type, event_timestamp, payload_json
+      FROM processed_service_events
+      WHERE task_id = ?
+      ORDER BY sequence ASC
+    `).all(taskId) as Array<{
+      event_id: string;
+      task_id: string;
+      sequence: number;
+      schema_version: string | null;
+      trace_id: string | null;
+      service: string | null;
+      type: ServiceEvent["type"] | null;
+      event_timestamp: number | null;
+      payload_json: string | null;
+    }>;
+
+    const events: ServiceEvent[] = [];
+    for (const row of rows) {
+      if (
+        !row.schema_version ||
+        !row.trace_id ||
+        !row.service ||
+        !row.type ||
+        row.event_timestamp === null ||
+        row.payload_json === null
+      ) {
+        continue;
+      }
+
+      try {
+        const payload = JSON.parse(row.payload_json) as unknown;
+        if (!payload || typeof payload !== "object" || Array.isArray(payload)) continue;
+        events.push({
+          schema_version: row.schema_version,
+          event_id: row.event_id,
+          task_id: row.task_id,
+          trace_id: row.trace_id,
+          service: row.service,
+          sequence: row.sequence,
+          type: row.type,
+          timestamp: row.event_timestamp,
+          payload: payload as Record<string, unknown>,
+        });
+      } catch {
+        // Ignore legacy or corrupted rows rather than synthesizing an event.
+      }
+    }
+    return events;
+  }
+
   processEvent(event: ServiceEvent): { duplicate: boolean; applied: boolean } {
     const db = getDb();
 
@@ -241,9 +294,22 @@ export class OperationStore {
 
     // Record processed event
     db.prepare(`
-      INSERT INTO processed_service_events (event_id, task_id, sequence, processed_at)
-      VALUES (?, ?, ?, ?)
-    `).run(event.event_id, event.task_id, event.sequence, Date.now());
+      INSERT INTO processed_service_events (
+        event_id, task_id, sequence, processed_at,
+        schema_version, trace_id, service, type, event_timestamp, payload_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      event.event_id,
+      event.task_id,
+      event.sequence,
+      Date.now(),
+      event.schema_version,
+      event.trace_id,
+      event.service,
+      event.type,
+      event.timestamp,
+      JSON.stringify(event.payload),
+    );
 
     // Map event type to operation status
     let status: OperationStatus | null = null;

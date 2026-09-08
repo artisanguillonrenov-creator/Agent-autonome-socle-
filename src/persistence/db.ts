@@ -99,6 +99,24 @@ export function getDb(): Database.Database {
     );
   `);
 
+  const processedEventColumns = new Set(
+    (db.pragma("table_info(processed_service_events)") as Array<{ name: string }>).map((column) => column.name),
+  );
+  const missingProcessedEventColumns: Record<string, string> = {
+    schema_version: "TEXT",
+    trace_id: "TEXT",
+    service: "TEXT",
+    type: "TEXT",
+    event_timestamp: "INTEGER",
+    payload_json: "TEXT",
+  };
+
+  for (const [column, sqlType] of Object.entries(missingProcessedEventColumns)) {
+    if (!processedEventColumns.has(column)) {
+      db.exec(`ALTER TABLE processed_service_events ADD COLUMN ${column} ${sqlType}`);
+    }
+  }
+
   sqliteInstance = db;
   return db;
 }

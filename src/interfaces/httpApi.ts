@@ -282,6 +282,21 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         return;
       }
 
+      const operationEventsMatch = pathname.match(/^\/api\/operations\/([^/]+)\/events$/);
+      if (req.method === "GET" && operationEventsMatch) {
+        const taskId = operationEventsMatch[1];
+        const op = agent.serviceOrchestrator.store.getOperation(taskId);
+        if (!op) {
+          sendJson(res, 404, { error: "opération non trouvée" });
+          return;
+        }
+        sendJson(res, 200, {
+          taskId,
+          events: agent.serviceOrchestrator.store.listEvents(taskId),
+        });
+        return;
+      }
+
       if (req.method === "GET" && (pathname.startsWith("/operations/") || pathname.startsWith("/api/operations/"))) {
         const parts = pathname.split("/");
         const taskId = parts[parts.length - 1];

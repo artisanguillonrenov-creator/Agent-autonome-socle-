@@ -377,6 +377,195 @@ async function renderAccueilView() {
 }
 
 // 2. CHAT VIEW
+const SERVICE_STAGE_LABELS = {
+  GITHUB_AUTHENTICATING: 'Connexion GitHub',
+  GITHUB_AUTHENTICATED: 'GitHub connecté',
+  USING_EXACT_CONTENT: 'Contenu préparé',
+  GENERATING_CODE_UPDATE: 'Génération du code',
+  GITHUB_CREATING_BRANCH: 'Création de la branche',
+  GITHUB_BRANCH_CREATED: 'Branche prête',
+  GITHUB_UPDATING_FILE: 'Mise à jour du fichier',
+  GITHUB_FILE_UPDATED: 'Fichier mis à jour',
+  GITHUB_CHECKING_DIFF: 'Vérification du diff',
+  GITHUB_DIFF_VERIFIED: 'Diff vérifié',
+  GITHUB_CREATING_PR: 'Création de la Pull Request',
+  GITHUB_PR_CREATED: 'Pull Request prête',
+};
+
+const TERMINAL_OPERATION_STATUSES = new Set([
+  'COMPLETED',
+  'FAILED',
+  'REJECTED',
+  'WAITING_INPUT',
+  'WAITING_PERMISSION',
+]);
+
+function serviceEventToTimelineEntry(event) {
+  const payload = event && payloadIsRecord(event.payload) ? event.payload : {};
+  let label;
+  let state = 'complete';
+
+  switch (event && event.type) {
+    case 'TASK_ACCEPTED':
+      label = 'Tâche acceptée';
+      break;
+    case 'TASK_PROGRESS':
+      label = SERVICE_STAGE_LABELS[payload.stage] || (payload.message != null ? String(payload.message) : 'Progression');
+      break;
+    case 'NEEDS_INPUT':
+      label = 'Information utilisateur requise';
+      state = 'active';
+      break;
+    case 'NEEDS_PERMISSION':
+      label = 'Approbation requise';
+      state = 'active';
+      break;
+    case 'TASK_COMPLETED':
+      label = 'Terminé';
+      break;
+    case 'TASK_FAILED':
+      label = 'Échec';
+      state = 'failed';
+      break;
+    case 'TASK_REJECTED':
+      label = 'Rejeté';
+      state = 'failed';
+      break;
+    default:
+      label = event && event.type ? String(event.type) : 'Événement de service';
+  }
+
+  return { label, state };
+}
+
+function payloadIsRecord(payload) {
+  return payload !== null && typeof payload === 'object' && !Array.isArray(payload);
+}
+
+function normalizeOperations(data) {
+  return Array.isArray(data) ? data : Array.isArray(data && data.operations) ? data.operations : [];
+}
+
+function createTimelineCard(host, operation) {
+  const card = document.createElement('section');
+  card.className = 'chat-timeline';
+  const heading = document.createElement('div');
+  heading.className = 'chat-timeline-heading';
+  heading.textContent = 'Jarvis';
+  const status = document.createElement('span');
+  status.className = 'chat-timeline-status';
+  const steps = document.createElement('div');
+  steps.className = 'chat-timeline-steps';
+  const details = document.createElement('details');
+  const summary = document.createElement('summary');
+  summary.textContent = 'Détails';
+  const raw = document.createElement('pre');
+  details.append(summary, raw);
+  card.append(heading, status, steps, details);
+  host.appendChild(card);
+  host.hidden = false;
+  return { card, status, steps, raw, operation };
+}
+
+function validHttpUrl(value) {
+  try {
+    const url = new URL(String(value));
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+function renderTimelineCard(view, operation, events) {
+  view.status.textContent = operation.status;
+  view.status.dataset.status = operation.status;
+  view.steps.replaceChildren();
+
+  events.forEach((event, index) => {
+    const entry = serviceEventToTimelineEntry(event);
+    const row = document.createElement('div');
+    row.className = `chat-timeline-step ${entry.state}`;
+    const isLastActive = index === events.length - 1 && !TERMINAL_OPERATION_STATUSES.has(operation.status);
+    const marker = document.createElement('span');
+    marker.textContent = entry.state === 'failed' ? '×' : isLastActive || entry.state === 'active' ? '●' : '✓';
+    const label = document.createElement('span');
+    label.textContent = entry.label;
+    row.append(marker, label);
+
+    if (event.type === 'TASK_COMPLETED') {
+      const prUrl = validHttpUrl(event.payload && event.payload.pr_url);
+      if (prUrl) {
+        const link = document.createElement('a');
+        link.href = prUrl;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.textContent = 'Voir la Pull Request';
+        row.appendChild(link);
+      }
+    }
+    view.steps.appendChild(row);
+  });
+
+  view.raw.textContent = JSON.stringify({
+    task_id: operation.taskId,
+    trace_id: operation.traceId,
+    service: operation.selectedService,
+    status: operation.status,
+    events,
+  }, null, 2);
+}
+
+const waitForTimelinePoll = () => new Promise((resolve) => setTimeout(resolve, 900));
+
+async function pollTimelineOperation(initialOperation, view) {
+  let operation = initialOperation;
+  while (true) {
+    try {
+      const eventData = await fetchApi(`/api/operations/${encodeURIComponent(operation.taskId)}/events`);
+      operation = await fetchApi(`/api/operations/${encodeURIComponent(operation.taskId)}`);
+      const events = Array.isArray(eventData.events) ? eventData.events : [];
+      renderTimelineCard(view, operation, events);
+      if (TERMINAL_OPERATION_STATUSES.has(operation.status)) {
+        const finalEventData = await fetchApi(`/api/operations/${encodeURIComponent(operation.taskId)}/events`);
+        renderTimelineCard(view, operation, Array.isArray(finalEventData.events) ? finalEventData.events : []);
+        return;
+      }
+    } catch (err) {
+      view.status.textContent = `Indisponible : ${err.message}`;
+      return;
+    }
+    await waitForTimelinePoll();
+  }
+}
+
+async function monitorChatOperations(snapshotTaskIds, requestStartedAt, host, control) {
+  const detectedTaskIds = new Set();
+  const discover = async () => {
+    let operations;
+    try {
+      operations = normalizeOperations(await fetchApi('/api/operations'));
+    } catch {
+      return;
+    }
+    for (const operation of operations) {
+      if (
+        snapshotTaskIds.has(operation.taskId) ||
+        detectedTaskIds.has(operation.taskId) ||
+        Number(operation.createdAt) < requestStartedAt
+      ) continue;
+      detectedTaskIds.add(operation.taskId);
+      const view = createTimelineCard(host, operation);
+      void pollTimelineOperation(operation, view);
+    }
+  };
+
+  while (control.chatPending) {
+    await discover();
+    await waitForTimelinePoll();
+  }
+  await discover();
+}
+
 function renderChatView() {
   const container = document.getElementById('view-chat');
   if (container.children.length > 0) return;
@@ -412,8 +601,23 @@ function renderChatView() {
     sendButton.disabled = true;
     sendButton.textContent = 'Envoi...';
 
+    let operationSnapshot = null;
+    try {
+      operationSnapshot = new Set(normalizeOperations(await fetchApi('/api/operations')).map((operation) => operation.taskId));
+    } catch {
+      // The chat remains usable; without a reliable snapshot no timeline is correlated.
+    }
+
     appendChatMessage('user', text);
+    const timelineHost = document.createElement('div');
+    timelineHost.className = 'chat-timeline-host';
+    timelineHost.hidden = true;
+    document.getElementById('chat-messages').appendChild(timelineHost);
     const pendingEl = appendChatMessage('agent pending', 'Jarvis is thinking...');
+    const monitorControl = { chatPending: true };
+    if (operationSnapshot) {
+      void monitorChatOperations(operationSnapshot, Date.now(), timelineHost, monitorControl);
+    }
 
     try {
       const res = await fetchApi('/api/chat', {
@@ -427,6 +631,7 @@ function renderChatView() {
       if (pendingEl) pendingEl.remove();
       appendChatMessage('agent error', `⚠️ Erreur : ${err.message}`);
     } finally {
+      monitorControl.chatPending = false;
       input.disabled = false;
       sendButton.disabled = false;
       sendButton.textContent = 'Envoyer';
@@ -1007,6 +1212,7 @@ function bootstrapJarvis() {
 if (typeof window !== 'undefined') {
   window.bootstrapJarvis = bootstrapJarvis;
   window.jarvisInitialized = () => jarvisInitialized;
+  window.serviceEventToTimelineEntry = serviceEventToTimelineEntry;
 }
 
 if (typeof document !== 'undefined') {
@@ -1018,5 +1224,5 @@ if (typeof document !== 'undefined') {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { bootstrapJarvis, state, switchView };
+  module.exports = { bootstrapJarvis, state, switchView, serviceEventToTimelineEntry };
 }
