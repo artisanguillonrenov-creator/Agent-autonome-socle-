@@ -39,7 +39,23 @@ export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
   const owner = "artisanguillonrenov-creator";
   const repo = "Agent-autonome-socle-";
 
-  const filePath = String(ctx.filePath || ctx.path || ctx.file || "src/index.ts").trim();
+  let filePath = String(ctx.filePath || ctx.path || ctx.file || "").trim();
+
+  if (!filePath) {
+    const textToSearch = `${taskReq.objective || ""} ${ctx.instructions || ""}`;
+    const match =
+      textToSearch.match(/(?:fichier|file|path)[:\s]+([a-zA-Z0-9_\-./]+\.[a-zA-Z0-9]+)/i) ||
+      textToSearch.match(/([a-zA-Z0-9_\-./]+\/(?:[a-zA-Z0-9_\-./]+\.[a-zA-Z0-9]+))/i) ||
+      textToSearch.match(/([a-zA-Z0-9_\-.]+\.(?:ts|js|json|md|html|css|py))/i);
+    if (match) {
+      filePath = match[1].trim();
+    }
+  }
+
+  if (!filePath) {
+    throw new Error("FILE_PATH_MISSING: Le chemin du fichier (filePath) est obligatoire et introuvable.");
+  }
+
   const instructions = String(ctx.instructions || taskReq.objective || "Mettre à jour le code selon la spécification").trim();
 
   return { owner, repo, filePath, instructions };
@@ -134,11 +150,13 @@ export class SoftwareFactoryService {
               {
                 role: "system",
                 content:
-                  "Vous êtes Jarvis Software Factory. Votre rôle est de modifier le code du fichier fourni selon les instructions. Renvoyez UNIQUEMENT le code complet mis à jour sans explications supplémentaires.",
+              "Vous êtes Jarvis Software Factory. Votre rôle est de modifier le code du fichier fourni ou de créer un nouveau fichier selon les instructions. Renvoyez UNIQUEMENT le code complet sans explications supplémentaires.",
               },
               {
                 role: "user",
-                content: `Fichier: ${filePath}\n\nContenu actuel:\n\`\`\`\n${existingContent}\n\`\`\`\n\nInstructions:\n${instructions}\n\nCode mis à jour:`,
+            content: existingContent
+              ? `Fichier: ${filePath}\n\nContenu actuel:\n\`\`\`\n${existingContent}\n\`\`\`\n\nInstructions:\n${instructions}\n\nCode mis à jour:`
+              : `Nouveau fichier à créer: ${filePath}\n\nInstructions:\n${instructions}\n\nCode du nouveau fichier:`,
               },
             ],
             temperature: 0.2,
@@ -153,11 +171,21 @@ export class SoftwareFactoryService {
         const rawOutput = data.choices?.[0]?.message?.content?.trim();
 
         if (rawOutput) {
+      let cleanCode = rawOutput;
           const codeBlockMatch = rawOutput.match(/```(?:[a-z0-9_-]+)?\n([\s\S]*?)\n```/i);
           if (codeBlockMatch && codeBlockMatch[1]) {
-            return codeBlockMatch[1].trim();
+        cleanCode = codeBlockMatch[1].trim();
           }
-          return rawOutput;
+
+      if (!cleanCode.trim()) {
+        throw new Error("NO_CHANGES_GENERATED: Le code généré est vide.");
+      }
+
+      if (existingContent && existingContent.trim() === cleanCode.trim()) {
+        throw new Error("NO_CHANGES_GENERATED: Le code généré est identique au contenu existant.");
+      }
+
+      return cleanCode;
         }
       } catch (err: unknown) {
         lastError = err instanceof Error ? err : new Error(String(err));
@@ -261,12 +289,28 @@ export class SoftwareFactoryService {
       owner,
       repo,
       path: filePath,
-      message: `feat(jarvis): update ${filePath} - ${instructions.slice(0, 50)}`,
+      message: existingContent
+        ? `feat(jarvis): update ${filePath} - ${instructions.slice(0, 50)}`
+        : `feat(jarvis): create ${filePath} - ${instructions.slice(0, 50)}`,
       content: Buffer.from(updatedCode, "utf-8").toString("base64"),
       branch: branchName,
       sha: targetBranchFileSha,
     });
     onStep?.("GITHUB_FILE_UPDATED", { path: filePath, branch: branchName });
+
+    // 6b. Vérifier qu'il y a un réel diff sur GitHub avant d'ouvrir la PR
+    onStep?.("GITHUB_CHECKING_DIFF", { head: branchName, base: defaultBranch });
+    const compareRes = await this.octokit.rest.repos.compareCommits({
+      owner,
+      repo,
+      base: defaultBranch,
+      head: branchName,
+    });
+
+    if (!compareRes.data.files || compareRes.data.files.length === 0) {
+      throw new Error("NO_GITHUB_DIFF: Aucun diff détecté sur GitHub par rapport à la branche de base.");
+    }
+    onStep?.("GITHUB_DIFF_VERIFIED", { filesCount: compareRes.data.files.length });
 
     // 7. Créer ou récupérer la PR (vérifier PR existante d'abord)
     onStep?.("GITHUB_CREATING_PR", { head: branchName, base: defaultBranch });
@@ -327,7 +371,29 @@ export class SoftwareFactoryService {
       payload: { message: "Tâche acceptée par Jarvis Software Factory V1" },
     });
 
-    const params = extractTaskParams(taskReq);
+    let params: ParsedSoftwareTask;
+    try {
+      params = extractTaskParams(taskReq);
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      const errorCode = errorMsg.split(":")[0] || "FILE_PATH_MISSING";
+      events.push({
+        schema_version: CONTRACT_SCHEMA_VERSION,
+        event_id: `evt-${taskReq.task_id}-failed`,
+        task_id: taskReq.task_id,
+        trace_id: taskReq.trace_id,
+        service: serviceName,
+        sequence: sequence++,
+        type: "TASK_FAILED",
+        timestamp: Date.now(),
+        payload: {
+          error: errorMsg,
+          error_code: errorCode,
+        },
+      });
+      return events;
+    }
+
     let lastErrorMsg = "";
     let lastErrorCode = "";
 

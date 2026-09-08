@@ -47,6 +47,48 @@ test("extractTaskParams retourne les valeurs fixées du projet (owner et repo av
   assert.equal(params.instructions, "Ajouter un bouton de déconnexion");
 });
 
+test("extractTaskParams lève FILE_PATH_MISSING en l'absence de filePath sans fallback vers src/index.ts", () => {
+  const req: TaskRequest = {
+    schema_version: "1.0",
+    task_id: "task-missing-path",
+    trace_id: "trace-missing-path",
+    idempotency_key: "idemp-missing-path",
+    capability: "software_development",
+    objective: "Faire une modification indéterminée",
+    context: {
+      instructions: "Faire du refactoring sans spécifier de fichier",
+    },
+    constraints: [],
+    priority: "low",
+    permissions: [],
+  };
+
+  assert.throws(() => extractTaskParams(req), (err: unknown) => {
+    return err instanceof Error && err.message.includes("FILE_PATH_MISSING");
+  });
+});
+
+test("handleTaskRequest retourne TASK_FAILED avec error_code FILE_PATH_MISSING si aucun chemin n'est spécifié", async () => {
+  const service = new SoftwareFactoryService({ githubToken: "fake" });
+  const req: TaskRequest = {
+    schema_version: "1.0",
+    task_id: "task-missing-file",
+    trace_id: "trace-missing-file",
+    idempotency_key: "idemp-missing-file",
+    capability: "software_development",
+    objective: "Dev sans fichier",
+    context: {},
+    constraints: [],
+    priority: "medium",
+    permissions: [],
+  };
+
+  const events = await service.handleTaskRequest(req);
+  const failedEvent = events.find((e) => e.type === "TASK_FAILED");
+  assert.ok(failedEvent, "Un événement TASK_FAILED doit être retourné");
+  assert.equal(failedEvent?.payload.error_code, "FILE_PATH_MISSING");
+});
+
 test("TEST 1 - dispatch_capability est toujours présent dans les skills disponibles de l'agent", async () => {
   const agent = new Agent({
     llm: new MockProvider(),
@@ -201,6 +243,10 @@ test("SoftwareFactoryService exécute le workflow complet avec branche unique pa
           calls.push(`repos.createOrUpdateFileContents:${branch}:${path}`);
           return { data: { content: { sha: "sha-file-v2" } } };
         },
+        compareCommits: async () => {
+          calls.push("repos.compareCommits");
+          return { data: { files: [{ filename: "src/app.ts", status: "modified" }], total_commits: 1 } };
+        },
       },
       git: {
         getRef: async ({ ref }: { ref: string }) => {
@@ -277,6 +323,7 @@ test("SoftwareFactoryServer démarre, traite les requêtes HTTP POST /tasks et s
         get: async () => ({ data: { default_branch: "main" } }),
         getContent: async () => ({ data: { content: Buffer.from("code").toString("base64"), sha: "sha-1" } }),
         createOrUpdateFileContents: async () => ({ data: {} }),
+        compareCommits: async () => ({ data: { files: [{ filename: "index.ts", status: "modified" }] } }),
       },
       git: {
         getRef: async ({ ref }: { ref: string }) => {
@@ -328,4 +375,127 @@ test("SoftwareFactoryServer démarre, traite les requêtes HTTP POST /tasks et s
   } finally {
     await server.stop();
   }
+});
+
+test("SoftwareFactoryService gère la création d'un nouveau fichier quand getContent retourne 404", async () => {
+  let createdSha: string | undefined = "UNKNOWN";
+
+  const mockOctokit = {
+    rest: {
+      repos: {
+        get: async () => ({ data: { default_branch: "main" } }),
+        getContent: async ({ path, ref }: { path: string; ref: string }) => {
+          // simulation 404 fichier inexistant
+          throw new Error("404 Not Found");
+        },
+        createOrUpdateFileContents: async ({ sha }: { sha?: string }) => {
+          createdSha = sha;
+          return { data: { content: { sha: "new-sha" } } };
+        },
+        compareCommits: async () => ({
+          data: { files: [{ filename: "src/newfile.ts", status: "added" }], total_commits: 1 },
+        }),
+      },
+      git: {
+        getRef: async ({ ref }: { ref: string }) => {
+          if (ref.startsWith("heads/jarvis/")) throw new Error("404 Not Found");
+          return { data: { object: { sha: "base-sha" } } };
+        },
+        createRef: async () => ({ data: {} }),
+      },
+      pulls: {
+        list: async () => ({ data: [] }),
+        create: async () => ({ data: { html_url: "https://github.com/org/repo/pull/10", number: 10 } }),
+      },
+    },
+  } as unknown as Octokit;
+
+  const service = new SoftwareFactoryService({
+    githubToken: "test-token",
+    octokitClient: mockOctokit,
+  });
+
+  service.generateCodeUpdate = async () => "export const newModule = true;";
+
+  const res = await service.executeWorkflow(
+    {
+      owner: "artisanguillonrenov-creator",
+      repo: "Agent-autonome-socle-",
+      filePath: "src/newfile.ts",
+      instructions: "Créer un nouveau module",
+    },
+    "task-newfile-test",
+  );
+
+  assert.equal(createdSha, undefined, "sha doit être undefined pour la création d'un nouveau fichier");
+  assert.equal(res.prNumber, 10);
+});
+
+test("NO_CHANGES_GENERATED est levé quand le code généré est identique ou vide", async () => {
+  const service = new SoftwareFactoryService({
+    openrouterApiKey: "fake-key",
+  });
+
+  // Mock global fetch
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        choices: [{ message: { content: "console.log('identical');" } }],
+      }),
+      { status: 200 },
+    );
+
+  try {
+    await assert.rejects(
+      async () => {
+        await service.generateCodeUpdate("console.log('identical');", "src/test.ts", "pas de changement");
+      },
+      (err: unknown) => err instanceof Error && err.message.includes("NO_CHANGES_GENERATED"),
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("executeWorkflow lève NO_GITHUB_DIFF si compareCommits ne retourne aucun fichier modifié", async () => {
+  const mockOctokit = {
+    rest: {
+      repos: {
+        get: async () => ({ data: { default_branch: "main" } }),
+        getContent: async () => ({ data: { content: Buffer.from("code").toString("base64"), sha: "sha-1" } }),
+        createOrUpdateFileContents: async () => ({ data: {} }),
+        compareCommits: async () => ({ data: { files: [] } }),
+      },
+      git: {
+        getRef: async ({ ref }: { ref: string }) => {
+          if (ref.startsWith("heads/jarvis/")) throw new Error("404 Not Found");
+          return { data: { object: { sha: "base-sha" } } };
+        },
+        createRef: async () => ({ data: {} }),
+      },
+    },
+  } as unknown as Octokit;
+
+  const service = new SoftwareFactoryService({
+    githubToken: "test-token",
+    octokitClient: mockOctokit,
+  });
+
+  service.generateCodeUpdate = async () => "code modifie";
+
+  await assert.rejects(
+    async () => {
+      await service.executeWorkflow(
+        {
+          owner: "artisanguillonrenov-creator",
+          repo: "Agent-autonome-socle-",
+          filePath: "src/test.ts",
+          instructions: "Modif",
+        },
+        "task-nodiff-test",
+      );
+    },
+    (err: unknown) => err instanceof Error && err.message.includes("NO_GITHUB_DIFF"),
+  );
 });
