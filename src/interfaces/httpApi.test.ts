@@ -153,6 +153,8 @@ test("ServiceEvent est transformé en entrée de timeline sans interpréter le t
 });
 
 test("Jarvis Command Center API Endpoints Test", async () => {
+  const previousApiToken = config.api.token;
+  config.api.token = "api-endpoints-test-token";
   const agent = new Agent({
     llm: new MockProvider(),
     embeddings: new LocalHashingEmbeddingProvider(),
@@ -199,7 +201,9 @@ test("Jarvis Command Center API Endpoints Test", async () => {
   try {
     // Helper to fetch and assert ok status
     async function checkEndpoint(url: string, init?: RequestInit, expectedStatus = 200) {
-      const res = await fetch(url, init);
+      const headers = new Headers(init?.headers);
+      headers.set("authorization", `Bearer ${config.api.token}`);
+      const res = await fetch(url, { ...init, headers });
       if (res.status !== expectedStatus) {
         const body = await res.text();
         console.error(`Failed ${url}: status ${res.status}, body: ${body}`);
@@ -349,7 +353,7 @@ test("Jarvis Command Center API Endpoints Test", async () => {
     assert.ok(otaManifest.version);
     assert.ok(otaManifest.minimumNativeVersion);
 
-    const otaBundleRes = await fetch(`${baseUrl}/api/ota/bundle`);
+    const otaBundleRes = await fetch(`${baseUrl}/api/ota/bundle`, { headers: { authorization: `Bearer ${config.api.token}` } });
     assert.equal(otaBundleRes.status, 200);
     const otaBundleText = await otaBundleRes.text();
     const computedHash = (await import("node:crypto")).createHash("sha256").update(otaBundleText).digest("hex");
@@ -378,5 +382,6 @@ test("Jarvis Command Center API Endpoints Test", async () => {
     });
   } finally {
     server.close();
+    config.api.token = previousApiToken;
   }
 });

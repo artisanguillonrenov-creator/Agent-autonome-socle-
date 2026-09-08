@@ -13,6 +13,7 @@ import { Agent } from "../core/agent.js";
 import { MockProvider } from "../llm/providers/mock.js";
 import { LocalHashingEmbeddingProvider } from "../llm/embeddings.js";
 import type { TaskRequest, ServiceEvent } from "../orchestration/contract.js";
+import { config } from "../config.js";
 
 test("parseRepoUrl extrait correctement owner et repo depuis différentes formats", () => {
   assert.deepEqual(parseRepoUrl("https://github.com/myorg/myrepo"), { owner: "myorg", repo: "myrepo" });
@@ -884,6 +885,8 @@ test("TEST Q — Création d'un nouveau fichier quand getContent retourne 404", 
 });
 
 test("TEST R — Serveur HTTP Software Factory POST /tasks", async () => {
+  const previousFactoryToken = config.softwareFactory.token;
+  config.softwareFactory.token = "software-factory-test-token";
   const mockOctokit = {
     rest: {
       repos: {
@@ -920,7 +923,7 @@ test("TEST R — Serveur HTTP Software Factory POST /tasks", async () => {
   try {
     const res = await fetch(`http://localhost:${testPort}/tasks`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", authorization: "Bearer software-factory-test-token" },
       body: JSON.stringify({
         schema_version: "1.0",
         task_id: "task-http-test",
@@ -941,5 +944,6 @@ test("TEST R — Serveur HTTP Software Factory POST /tasks", async () => {
     assert.ok(json.events.some((e) => e.type === "TASK_COMPLETED"));
   } finally {
     await server.stop();
+    config.softwareFactory.token = previousFactoryToken;
   }
 });

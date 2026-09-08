@@ -17,6 +17,8 @@ export interface ParsedSoftwareTask {
   filePath: string;
   instructions: string;
   exactContent?: string;
+  targetBranch?: string;
+  targetPr?: number;
 }
 
 export function parseRepoUrl(repoUrlStr?: string): { owner: string; repo: string } | null {
@@ -43,6 +45,20 @@ export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
   let filePath = String(ctx.filePath || ctx.path || ctx.file || "").trim();
   const objectiveStr = String(taskReq.objective || "").trim();
   const instructionsStr = String(ctx.instructions || "").trim();
+  const targetBranchMatch = instructionsStr.match(/^\s*TARGET_BRANCH\s*=\s*(.*?)\s*$/im);
+  const targetPrMatch = instructionsStr.match(/^\s*TARGET_PR\s*=\s*(.*?)\s*$/im);
+  const targetBranch = targetBranchMatch?.[1]?.trim();
+  let targetPr: number | undefined;
+  if (targetPrMatch) {
+    const raw = targetPrMatch[1].trim();
+    if (!/^[1-9]\d*$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
+      throw new Error("TARGET_PR_INVALID: TARGET_PR doit être un entier positif valide.");
+    }
+    targetPr = Number(raw);
+  }
+  if (targetBranchMatch && !targetBranch) {
+    throw new Error("TARGET_BRANCH_INVALID: TARGET_BRANCH ne peut pas être vide.");
+  }
   const textToSearch = instructionsStr ? `${objectiveStr}\n${instructionsStr}` : objectiveStr;
 
   if (!filePath) {
@@ -103,7 +119,7 @@ export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
 
   const instructions = (instructionsStr || objectiveStr || "Mettre à jour le code selon la spécification").trim();
 
-  return { owner, repo, filePath, instructions, exactContent };
+  return { owner, repo, filePath, instructions, exactContent, targetBranch, targetPr };
 }
 
 export class SoftwareFactoryService {
@@ -252,9 +268,9 @@ export class SoftwareFactoryService {
     prNumber: number;
     summary: string;
   }> {
-    const { owner, repo, filePath, instructions } = params;
+    const { owner, repo, filePath, instructions, targetBranch, targetPr } = params;
     const cleanTaskId = taskId.replace(/^task-/, "");
-    const branchName = `jarvis/task-${cleanTaskId}`;
+    let branchName = `jarvis/task-${cleanTaskId}`;
 
     if (!this.githubToken && !process.env.GITHUB_FACTORY_TOKEN && !process.env.GITHUB_TOKEN) {
       throw new Error("GITHUB_TOKEN_MISSING: Aucun jeton GitHub (GITHUB_FACTORY_TOKEN) n'est configuré.");
@@ -274,7 +290,43 @@ export class SoftwareFactoryService {
     });
     const baseSha = baseRef.data.object.sha;
 
-    // 3. Lire le fichier courant sur la branche par défaut
+    const usesExistingTarget = targetPr !== undefined || targetBranch !== undefined;
+    let targetBranchHeadBeforeUpdate: string | undefined;
+    let targetPullRequest: { number: number; html_url: string } | undefined;
+    if (targetPr !== undefined) {
+      let pullRequest;
+      try {
+        pullRequest = await this.octokit.rest.pulls.get({ owner, repo, pull_number: targetPr });
+      } catch {
+        throw new Error(`TARGET_PR_INVALID: La Pull Request #${targetPr} est introuvable.`);
+      }
+      const pull = pullRequest.data;
+      if (
+        pull.state !== "open" || !pull.head?.ref ||
+        pull.head.repo?.full_name?.toLowerCase() !== `${owner}/${repo}`.toLowerCase() ||
+        (targetBranch !== undefined && targetBranch !== pull.head.ref)
+      ) {
+        throw new Error(`TARGET_PR_INVALID: La Pull Request #${targetPr} n'est pas une cible valide pour ce dépôt.`);
+      }
+      branchName = pull.head.ref;
+      targetPullRequest = { number: pull.number, html_url: pull.html_url };
+    } else if (targetBranch !== undefined) {
+      branchName = targetBranch;
+    }
+
+    if (usesExistingTarget && branchName === defaultBranch) {
+      throw new Error("TARGET_BRANCH_INVALID: La branche cible ne peut pas être la branche par défaut.");
+    }
+    if (usesExistingTarget) {
+      try {
+        const targetRef = await this.octokit.rest.git.getRef({ owner, repo, ref: `heads/${branchName}` });
+        targetBranchHeadBeforeUpdate = targetRef.data.object.sha;
+      } catch {
+        throw new Error(`${targetPr !== undefined ? "TARGET_PR_INVALID" : "TARGET_BRANCH_INVALID"}: La branche cible '${branchName}' est introuvable.`);
+      }
+    }
+
+    // 3. Lire le fichier courant sur la branche qui sera modifiée
     let existingContent = "";
     let existingSha: string | undefined = undefined;
 
@@ -283,7 +335,7 @@ export class SoftwareFactoryService {
         owner,
         repo,
         path: filePath,
-        ref: defaultBranch,
+        ref: usesExistingTarget ? branchName : defaultBranch,
       });
 
       if ("content" in fileRes.data && typeof fileRes.data.content === "string") {
@@ -304,19 +356,16 @@ export class SoftwareFactoryService {
       updatedCode = await this.generateCodeUpdate(existingContent, filePath, instructions);
     }
 
-    // 5. Créer la branche unique pour cette tâche (vérifier existence d'abord)
-    onStep?.("GITHUB_CREATING_BRANCH", { branch: branchName });
-    try {
-      await this.octokit.rest.git.getRef({ owner, repo, ref: `heads/${branchName}` });
-    } catch {
-      await this.octokit.rest.git.createRef({
-        owner,
-        repo,
-        ref: `refs/heads/${branchName}`,
-        sha: baseSha,
-      });
+    // 5. Les cibles explicites existent déjà; sinon conserver la branche par tâche.
+    if (!usesExistingTarget) {
+      onStep?.("GITHUB_CREATING_BRANCH", { branch: branchName });
+      try {
+        await this.octokit.rest.git.getRef({ owner, repo, ref: `heads/${branchName}` });
+      } catch {
+        await this.octokit.rest.git.createRef({ owner, repo, ref: `refs/heads/${branchName}`, sha: baseSha });
+      }
+      onStep?.("GITHUB_BRANCH_CREATED", { branch: branchName });
     }
-    onStep?.("GITHUB_BRANCH_CREATED", { branch: branchName });
 
     // 6. Commiter et pousser le fichier modifié (vérifier SHA existant sur la branche)
     let targetBranchFileSha: string | undefined = existingSha;
@@ -358,7 +407,8 @@ export class SoftwareFactoryService {
           ref: `heads/${branchName}`,
         });
         const refSha = refRes.data.object?.sha;
-        if (refSha && refSha !== baseSha) {
+        const changedTargetHead = Boolean(targetBranchHeadBeforeUpdate) && refSha !== targetBranchHeadBeforeUpdate;
+        if (refSha && (usesExistingTarget ? changedTargetHead : refSha !== baseSha)) {
           commitSha = refSha;
         }
       } catch {
@@ -385,32 +435,29 @@ export class SoftwareFactoryService {
     onStep?.("GITHUB_DIFF_VERIFIED", { filesCount: compareRes.data.files.length });
 
     // 7. Créer ou récupérer la PR (vérifier PR existante d'abord)
-    onStep?.("GITHUB_CREATING_PR", { head: branchName, base: defaultBranch });
-    const existingPrs = await this.octokit.rest.pulls.list({
-      owner,
-      repo,
-      head: `${owner}:${branchName}`,
-      base: defaultBranch,
-      state: "open",
-    });
-
-    let prUrl = "";
-    let prNumber = 0;
-
-    if (existingPrs.data.length > 0) {
-      prUrl = existingPrs.data[0].html_url;
-      prNumber = existingPrs.data[0].number;
+    let prUrl: string;
+    let prNumber: number;
+    if (targetPullRequest) {
+      prUrl = targetPullRequest.html_url;
+      prNumber = targetPullRequest.number;
     } else {
-      const prRes = await this.octokit.rest.pulls.create({
-        owner,
-        repo,
-        title: `[Jarvis Software Factory] Patch for ${filePath} (${cleanTaskId})`,
-        head: branchName,
-        base: defaultBranch,
-        body: `## Modifications apportées par Jarvis Software Factory\n\n- **Tâche**: \`${taskId}\`\n- **Fichier**: \`${filePath}\`\n- **Instructions**: ${instructions}\n\n*Généré automatiquement par Jarvis Software Factory.*`,
+      onStep?.("GITHUB_CREATING_PR", { head: branchName, base: defaultBranch });
+      const existingPrs = await this.octokit.rest.pulls.list({
+        owner, repo, head: `${owner}:${branchName}`, base: defaultBranch, state: "open",
       });
-      prUrl = prRes.data.html_url;
-      prNumber = prRes.data.number;
+      if (existingPrs.data.length > 0) {
+        prUrl = existingPrs.data[0].html_url;
+        prNumber = existingPrs.data[0].number;
+      } else {
+        const prRes = await this.octokit.rest.pulls.create({
+          owner, repo,
+          title: `[Jarvis Software Factory] Patch for ${filePath} (${cleanTaskId})`,
+          head: branchName, base: defaultBranch,
+          body: `## Modifications apportées par Jarvis Software Factory\n\n- **Tâche**: \`${taskId}\`\n- **Fichier**: \`${filePath}\`\n- **Instructions**: ${instructions}\n\n*Généré automatiquement par Jarvis Software Factory.*`,
+        });
+        prUrl = prRes.data.html_url;
+        prNumber = prRes.data.number;
+      }
     }
     onStep?.("GITHUB_PR_CREATED", { prUrl, prNumber, branch: branchName });
 
@@ -571,7 +618,7 @@ export class SoftwareFactoryService {
 
 function checkServerAuth(req: IncomingMessage): boolean {
   const token = config.softwareFactory.token || config.api.token;
-  if (!token) return true;
+  if (!token) return false;
   const auth = req.headers.authorization;
   return auth === `Bearer ${token}`;
 }
@@ -588,7 +635,14 @@ export class SoftwareFactoryServer {
   start(): Promise<void> {
     return new Promise((resolve) => {
       this.server = createServer(async (req, res) => {
-        if (!checkServerAuth(req) && req.url !== "/health") {
+        const isPublicHealthcheck = req.method === "GET" && req.url === "/health";
+        const serverToken = config.softwareFactory.token || config.api.token;
+        if (!isPublicHealthcheck && !serverToken) {
+          res.writeHead(503, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "TOKEN_NOT_CONFIGURED" }));
+          return;
+        }
+        if (!isPublicHealthcheck && !checkServerAuth(req)) {
           res.writeHead(401, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: "unauthorized" }));
           return;
@@ -621,16 +675,8 @@ export class SoftwareFactoryServer {
         }
 
         if (req.method === "GET" && req.url === "/health") {
-          const diag = await this.service.getGitHubDiagnostics();
           res.writeHead(200, { "content-type": "application/json" });
-          res.end(
-            JSON.stringify({
-              status: "ok",
-              service: "software_factory",
-              authenticated: checkServerAuth(req),
-              github: diag,
-            }),
-          );
+          res.end(JSON.stringify({ status: "ok", service: "software_factory" }));
           return;
         }
 
