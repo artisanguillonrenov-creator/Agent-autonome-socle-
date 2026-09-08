@@ -32,6 +32,32 @@ const ALLOWED_TRANSITIONS: Record<OperationStatus, OperationStatus[]> = {
   FAILED: ["RUNNING", "DISPATCHING"], // Terminal unless retryable
 };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function validatePendingTaskRequest(
+  value: unknown,
+  expected: Pick<ServiceOperation, "taskId" | "traceId" | "idempotencyKey" | "capability">,
+): TaskRequest | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.schema_version !== "string" || value.schema_version.length === 0) return null;
+  if (value.task_id !== expected.taskId) return null;
+  if (typeof value.trace_id !== "string" || value.trace_id.length === 0 || value.trace_id !== expected.traceId) return null;
+  if (
+    typeof value.idempotency_key !== "string" ||
+    value.idempotency_key.length === 0 ||
+    value.idempotency_key !== expected.idempotencyKey
+  ) return null;
+  if (typeof value.capability !== "string" || value.capability.length === 0 || value.capability !== expected.capability) return null;
+  if (typeof value.objective !== "string") return null;
+  if (!isRecord(value.context)) return null;
+  if (!Array.isArray(value.constraints)) return null;
+  if (typeof value.priority !== "string") return null;
+  if (!Array.isArray(value.permissions)) return null;
+  return value as unknown as TaskRequest;
+}
+
 export class OperationStore {
   createOperation(op: Omit<ServiceOperation, "createdAt" | "updatedAt" | "riskLevel" | "approvalState"> &
     Partial<Pick<ServiceOperation, "riskLevel" | "approvalState">>): ServiceOperation {
@@ -109,12 +135,20 @@ export class OperationStore {
   claimPendingApproval(taskId: string): TaskRequest | null {
     const db = getDb();
     return db.transaction(() => {
-      const row = db.prepare(`SELECT pending_request_json FROM service_operations
+      const row = db.prepare(`SELECT pending_request_json, task_id, trace_id, idempotency_key, capability FROM service_operations
         WHERE task_id = ? AND status = 'WAITING_PERMISSION' AND approval_state = 'PENDING'`).get(taskId) as
-        | { pending_request_json: string | null } | undefined;
+        | { pending_request_json: string | null; task_id: string; trace_id: string; idempotency_key: string; capability: string }
+        | undefined;
       if (!row?.pending_request_json) return null;
-      let request: TaskRequest;
-      try { request = JSON.parse(row.pending_request_json) as TaskRequest; } catch { return null; }
+      let parsed: unknown;
+      try { parsed = JSON.parse(row.pending_request_json) as unknown; } catch { return null; }
+      const request = validatePendingTaskRequest(parsed, {
+        taskId: row.task_id,
+        traceId: row.trace_id,
+        idempotencyKey: row.idempotency_key,
+        capability: row.capability,
+      });
+      if (!request) return null;
       const now = Date.now();
       const changed = db.prepare(`UPDATE service_operations SET approval_state = 'APPROVED', approval_decided_at = ?,
         status = 'DISPATCHING', updated_at = ? WHERE task_id = ? AND status = 'WAITING_PERMISSION' AND approval_state = 'PENDING'`)

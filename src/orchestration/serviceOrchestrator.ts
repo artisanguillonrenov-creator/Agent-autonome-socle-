@@ -146,7 +146,7 @@ export class ServiceOrchestrator {
         selectedService: service.id,
         status: riskLevel === "HIGH" || riskLevel === "CRITICAL" ? "QUEUED" : "DISPATCHING",
         riskLevel,
-        approvalState: riskLevel === "HIGH" || riskLevel === "CRITICAL" ? "PENDING" : "NOT_REQUIRED",
+        approvalState: "NOT_REQUIRED",
       });
     } else {
       this.store.updateStatus(taskId, "DISPATCHING", undefined, "Nouvelle tentative après échec réseau.");
@@ -170,7 +170,12 @@ export class ServiceOrchestrator {
       const reason = riskLevel === "CRITICAL"
         ? "Risque critique : confirmation renforcée obligatoire avant tout envoi au service."
         : "Risque élevé : approbation humaine obligatoire avant tout envoi au service.";
-      this.store.setPendingApproval(taskId, request, riskLevel, reason);
+      if (!this.store.setPendingApproval(taskId, request, riskLevel, reason)) {
+        this.store.updateStatus(taskId, "FAILED", undefined, "APPROVAL_PREPARATION_FAILED");
+        const failed = this.store.getOperation(taskId)!;
+        return { taskId, traceId: failed.traceId, status: failed.status, selectedService: failed.selectedService,
+          result: failed.result, error: failed.error };
+      }
       return { taskId, traceId, status: "WAITING_PERMISSION", selectedService: service.id };
     }
 

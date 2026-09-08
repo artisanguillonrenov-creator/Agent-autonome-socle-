@@ -60,6 +60,43 @@ test("HIGH attend, n'est dispatché qu'une fois après accord, ou jamais après 
   assert.equal(rejected.count(), 0); assert.equal(rejected.orchestrator.store.getOperation(p2.taskId)?.status, "REJECTED");
 });
 
+test("une requête HIGH restaurée invalide échoue fermée sans transition ni dispatch", async () => {
+  const malformedRequests = [
+    "{}",
+    "{json-corrompu",
+    JSON.stringify({
+      schema_version: "1.0", task_id: "wrong-task", trace_id: "wrong-trace", idempotency_key: "key",
+      capability: "cap", objective: "high", context: {}, constraints: [], priority: "medium", permissions: [],
+    }),
+  ];
+
+  for (const [index, pendingJson] of malformedRequests.entries()) {
+    const h = harness("HIGH");
+    const pending = await h.orchestrator.dispatchCapability(
+      { action: "DISPATCH_CAPABILITY", capability: "cap", objective: `invalid-${index}` },
+      { traceId: `trace-${index}`, idempotencyKey: `key-${index}` },
+    );
+    getDb().prepare("UPDATE service_operations SET pending_request_json = ? WHERE task_id = ?")
+      .run(pendingJson, pending.taskId);
+
+    assert.equal(await h.orchestrator.approvePendingOperation(pending.taskId), null);
+    assert.equal(h.count(), 0);
+    const unchanged = h.orchestrator.store.getOperation(pending.taskId)!;
+    assert.equal(unchanged.status, "WAITING_PERMISSION");
+    assert.equal(unchanged.approvalState, "PENDING");
+    assert.equal(unchanged.approvalDecidedAt, undefined);
+  }
+});
+
+test("un échec de préparation d'approbation retourne l'état sûr réel sans dispatch", async () => {
+  const h = harness("HIGH");
+  h.orchestrator.store.setPendingApproval = () => false;
+  const result = await h.orchestrator.dispatchCapability({ action: "DISPATCH_CAPABILITY", capability: "cap", objective: "race" });
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.error, "APPROVAL_PREPARATION_FAILED");
+  assert.equal(h.count(), 0);
+});
+
 test("CRITICAL exige la chaîne de confirmation exacte", async () => {
   const h = harness("CRITICAL");
   const pending = await h.orchestrator.dispatchCapability({ action: "DISPATCH_CAPABILITY", capability: "cap", objective: "critical" });
