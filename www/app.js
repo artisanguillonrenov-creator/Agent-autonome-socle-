@@ -484,7 +484,17 @@ function createTimelineCard(host, operation) {
   summary.textContent = 'Détails';
   const raw = document.createElement('pre');
   details.append(summary, raw);
-  card.append(heading, status, steps, details);
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'chat-timeline-toggle';
+  toggle.textContent = 'Voir les détails';
+  toggle.setAttribute('aria-expanded', 'true');
+  toggle.addEventListener('click', () => {
+    const expanded = card.classList.toggle('expanded');
+    toggle.textContent = expanded ? 'Masquer les détails' : 'Voir les détails';
+    toggle.setAttribute('aria-expanded', String(expanded));
+  });
+  card.append(heading, status, steps, details, toggle);
   host.appendChild(card);
   host.hidden = false;
   return { card, status, steps, raw, operation };
@@ -541,8 +551,13 @@ function appendApprovalControls(host, operation, onDecision) {
 }
 
 function renderTimelineCard(view, operation, events) {
-  view.status.textContent = operation.status;
+  view.status.textContent = operation.status === 'COMPLETED'
+    ? `✓ Mission terminée · ${events.length} étape${events.length > 1 ? 's' : ''}`
+    : operation.status;
   view.status.dataset.status = operation.status;
+  view.card.classList.toggle('terminal', TERMINAL_OPERATION_STATUSES.has(operation.status));
+  const toggle = view.card.querySelector('.chat-timeline-toggle');
+  if (toggle) toggle.hidden = !TERMINAL_OPERATION_STATUSES.has(operation.status);
   view.steps.replaceChildren();
 
   events.forEach((event, index) => {
@@ -640,117 +655,143 @@ async function monitorChatOperations(snapshotTaskIds, requestStartedAt, host, co
   await discover();
 }
 
+function isNearChatBottom(box, threshold = 96) {
+  return box.scrollHeight - box.scrollTop - box.clientHeight <= threshold;
+}
+
+function scrollChatIfNearBottom(box, wasNearBottom = true) {
+  if (wasNearBottom) box.scrollTop = box.scrollHeight;
+}
+
+async function copyPlainText(text, navigatorRef = window.navigator) {
+  if (navigatorRef.clipboard && typeof navigatorRef.clipboard.writeText === 'function') {
+    await navigatorRef.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand('copy');
+  textarea.remove();
+  if (!copied) throw new Error('Copie indisponible');
+}
+
+function createMessageAction(label, title, handler) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'chat-action';
+  button.textContent = label;
+  button.title = title;
+  button.setAttribute('aria-label', title);
+  button.addEventListener('click', handler);
+  return button;
+}
+
+function updateRegenerateAvailability() {
+  const responses = Array.from(document.querySelectorAll('.msg.agent[data-final="true"]'));
+  responses.forEach((message, index) => {
+    const button = message.querySelector('[data-action="regenerate"]');
+    if (button) button.hidden = index !== responses.length - 1;
+  });
+}
+
 function renderChatView() {
   const container = document.getElementById('view-chat');
   if (container.children.length > 0) return;
 
-  container.innerHTML = `
-    <div style="display: flex; flex-direction: column; height: calc(100vh - 120px); gap: 16px;">
-      <div id="chat-messages" style="flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding-right: 8px;">
-        <div class="msg agent" style="background: var(--bg-card); padding: 14px 18px; border-radius: 12px; border: 1px solid var(--border-color); max-width: 85%;">
-          Bonjour, je suis <strong>Jarvis Command Center</strong>. Comment puis-je vous aider aujourd'hui ?
-        </div>
-      </div>
-      <form id="chat-form" style="display: flex; gap: 12px; background: var(--bg-card); padding: 12px; border-radius: 16px; border: 1px solid var(--border-color);">
-        <textarea id="chat-input" class="input-field" rows="1" placeholder="Posez une question ou demandez une action..." style="resize: none; flex: 1;"></textarea>
-        <button type="submit" id="chat-send" class="btn btn-primary" style="min-width: 100px;">Envoyer</button>
-      </form>
-    </div>
-  `;
+  const layout = document.createElement('div'); layout.className = 'chat-layout';
+  const messages = document.createElement('div'); messages.id = 'chat-messages'; messages.className = 'chat-messages';
+  const form = document.createElement('form'); form.id = 'chat-form'; form.className = 'chat-composer';
+  const input = document.createElement('textarea'); input.id = 'chat-input'; input.className = 'input-field chat-input'; input.rows = 1; input.placeholder = 'Posez une question ou demandez une action…'; input.setAttribute('aria-label', 'Message à Jarvis');
+  const sendButton = document.createElement('button'); sendButton.type = 'submit'; sendButton.id = 'chat-send'; sendButton.className = 'btn btn-primary chat-send'; sendButton.textContent = 'Envoyer';
+  form.append(input, sendButton); layout.append(messages, form); container.appendChild(layout);
+  appendChatMessage('agent', "Bonjour, je suis Jarvis Command Center. Comment puis-je vous aider aujourd'hui ?", { regeneratable: false });
 
-  const form = document.getElementById('chat-form');
-  const input = document.getElementById('chat-input');
-  const sendButton = document.getElementById('chat-send');
-
+  let submitting = false;
+  const resizeInput = () => { input.style.height = 'auto'; input.style.height = `${Math.min(input.scrollHeight, 160)}px`; };
+  input.addEventListener('input', resizeInput);
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
-
-    if (sendButton.disabled) return;
-
+    if (submitting) return;
     const text = input.value.trim();
     if (!text) return;
-
-    input.value = '';
-    input.disabled = true;
-    sendButton.disabled = true;
-    sendButton.textContent = 'Envoi...';
+    submitting = true;
+    input.value = ''; resizeInput();
+    sendButton.disabled = true; sendButton.textContent = 'Envoi…';
 
     let operationSnapshot = null;
-    try {
-      operationSnapshot = new Set(normalizeOperations(await fetchApi('/api/operations')).map((operation) => operation.taskId));
-    } catch {
-      // The chat remains usable; without a reliable snapshot no timeline is correlated.
-    }
-
+    try { operationSnapshot = new Set(normalizeOperations(await fetchApi('/api/operations')).map((operation) => operation.taskId)); } catch {}
     appendChatMessage('user', text);
-    const timelineHost = document.createElement('div');
-    timelineHost.className = 'chat-timeline-host';
-    timelineHost.hidden = true;
-    document.getElementById('chat-messages').appendChild(timelineHost);
+    const timelineHost = document.createElement('div'); timelineHost.className = 'chat-timeline-host'; timelineHost.hidden = true; messages.appendChild(timelineHost);
     const pendingEl = appendChatMessage('agent pending', 'Jarvis is thinking...');
     const monitorControl = { chatPending: true };
-    if (operationSnapshot) {
-      void monitorChatOperations(operationSnapshot, Date.now(), timelineHost, monitorControl);
-    }
+    if (operationSnapshot) void monitorChatOperations(operationSnapshot, Date.now(), timelineHost, monitorControl);
 
     try {
-      const res = await fetchApi('/api/chat', {
-        method: 'POST',
-        body: JSON.stringify({ message: text }),
-      });
-
-      if (pendingEl) pendingEl.remove();
-      appendChatMessage('agent', res.response);
+      const res = await fetchApi('/api/chat', { method: 'POST', body: JSON.stringify({ message: text }) });
+      pendingEl?.remove(); appendChatMessage('agent', res.response);
     } catch (err) {
-      if (pendingEl) pendingEl.remove();
+      pendingEl?.remove();
       appendChatMessage('agent error', `⚠️ Erreur : ${err.message}`);
     } finally {
-      monitorControl.chatPending = false;
-      input.disabled = false;
-      sendButton.disabled = false;
-      sendButton.textContent = 'Envoyer';
-      input.focus();
+      monitorControl.chatPending = false; submitting = false; sendButton.disabled = false; sendButton.textContent = 'Envoyer'; input.focus();
     }
   });
-
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      form.dispatchEvent(new Event('submit'));
-    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); form.requestSubmit ? form.requestSubmit() : form.dispatchEvent(new Event('submit')); }
   });
 }
 
-function appendChatMessage(role, text) {
+function appendChatMessage(role, text, options = {}) {
   const box = document.getElementById('chat-messages');
   if (!box) return null;
+  const shouldScroll = isNearChatBottom(box);
+  const article = document.createElement('article'); article.className = `msg ${role}`;
+  const label = document.createElement('div'); label.className = 'msg-label'; label.textContent = role.includes('user') ? 'Vous' : 'Jarvis';
+  const content = document.createElement('div'); content.className = 'msg-content'; content.textContent = text;
+  article.append(label, content);
 
-  const div = document.createElement('div');
-  div.className = `msg ${role}`;
-  div.style.cssText = `
-    padding: 14px 18px;
-    border-radius: 14px;
-    max-width: 85%;
-    line-height: 1.5;
-    white-space: pre-wrap;
-    word-break: break-word;
-  `;
-
-  if (role.includes('user')) {
-    div.style.alignSelf = 'flex-end';
-    div.style.backgroundColor = 'var(--accent-primary)';
-    div.style.color = '#ffffff';
-  } else {
-    div.style.alignSelf = 'flex-start';
-    div.style.backgroundColor = 'var(--bg-card)';
-    div.style.border = '1px solid var(--border-color)';
-    div.style.color = 'var(--text-main)';
+  if (!role.includes('pending') && !role.includes('error')) {
+    const actions = document.createElement('div'); actions.className = 'msg-actions';
+    const copy = createMessageAction('Copier', 'Copier le texte du message', async () => {
+      try { await copyPlainText(content.textContent || ''); copy.textContent = 'Copié ✓'; setTimeout(() => { copy.textContent = 'Copier'; }, 1600); } catch { copy.textContent = 'Échec'; }
+    });
+    actions.appendChild(copy);
+    if (role.includes('user')) {
+      actions.prepend(createMessageAction('Modifier', 'Modifier ce message', () => {
+        const input = document.getElementById('chat-input'); input.value = content.textContent || ''; input.dispatchEvent(new Event('input')); input.focus();
+      }));
+    } else {
+      if (options.regeneratable !== false) article.dataset.final = 'true';
+      if ('speechSynthesis' in window && typeof window.SpeechSynthesisUtterance === 'function') {
+        const read = createMessageAction('Lire', 'Lire cette réponse à voix haute', () => {
+          if (read.dataset.reading === 'true') { window.speechSynthesis.cancel(); read.dataset.reading = 'false'; read.textContent = 'Lire'; return; }
+          window.speechSynthesis.cancel();
+          document.querySelectorAll('[data-action="read"]').forEach((other) => { other.dataset.reading = 'false'; other.textContent = 'Lire'; });
+          const utterance = new window.SpeechSynthesisUtterance(content.textContent || ''); utterance.lang = 'fr-FR';
+          const reset = () => { read.dataset.reading = 'false'; read.textContent = 'Lire'; }; utterance.onend = reset; utterance.onerror = reset;
+          read.dataset.action = 'read'; read.dataset.reading = 'true'; read.textContent = 'Arrêter'; window.speechSynthesis.speak(utterance);
+        }); read.dataset.action = 'read'; actions.appendChild(read);
+      }
+      const regenerate = createMessageAction('Régénérer', 'Reformuler cette réponse', async () => {
+        if (regenerate.disabled) return;
+        const oldText = content.textContent; regenerate.disabled = true; regenerate.textContent = 'Régénération…';
+        try { const result = await fetchApi('/api/chat/regenerate', { method: 'POST', body: '{}' }); content.textContent = result.response; }
+        catch { content.textContent = oldText; regenerate.textContent = 'Erreur — réessayer'; setTimeout(() => { regenerate.textContent = 'Régénérer'; }, 2200); }
+        finally { regenerate.disabled = false; if (regenerate.textContent === 'Régénération…') regenerate.textContent = 'Régénérer'; }
+      });
+      if (options.regeneratable !== false) {
+        regenerate.dataset.action = 'regenerate';
+        actions.appendChild(regenerate);
+      }
+    }
+    article.appendChild(actions);
   }
-
-  div.textContent = text;
-  box.appendChild(div);
-  box.scrollTop = box.scrollHeight;
-  return div;
+  box.appendChild(article); updateRegenerateAvailability(); scrollChatIfNearBottom(box, shouldScroll); return article;
 }
 
 // 3. OPÉRATIONS VIEW
@@ -1405,6 +1446,8 @@ if (typeof window !== 'undefined') {
   window.jarvisInitialized = () => jarvisInitialized;
   window.serviceEventToTimelineEntry = serviceEventToTimelineEntry;
   window.timelineMarkerForEntry = timelineMarkerForEntry;
+  window.copyPlainText = copyPlainText;
+  window.isNearChatBottom = isNearChatBottom;
 }
 
 if (typeof document !== 'undefined') {
@@ -1416,5 +1459,5 @@ if (typeof document !== 'undefined') {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { bootstrapJarvis, state, switchView, serviceEventToTimelineEntry, timelineMarkerForEntry };
+  module.exports = { bootstrapJarvis, state, switchView, serviceEventToTimelineEntry, timelineMarkerForEntry, copyPlainText, isNearChatBottom };
 }

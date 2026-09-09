@@ -225,6 +225,20 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         return;
       }
 
+      if (req.method === "POST" && pathname === "/api/chat/regenerate") {
+        try {
+          const result = await agent.regenerateLastResponse();
+          sendJson(res, 200, result);
+        } catch (err) {
+          if ((err as Error).message === "NO_REGENERATABLE_RESPONSE") {
+            sendJson(res, 409, { error: "NO_REGENERATABLE_RESPONSE" });
+            return;
+          }
+          throw err;
+        }
+        return;
+      }
+
       if (req.method === "GET" && pathname === "/api/chat/stream") {
         const queryMsg = parsedUrl.searchParams.get("message") || "";
         if (!queryMsg.trim()) {

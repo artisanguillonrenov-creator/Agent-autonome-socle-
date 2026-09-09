@@ -209,6 +209,40 @@ export class Agent {
     };
   }
 
+  /**
+   * Reformule uniquement la dernière réponse finale. Ce chemin ne sélectionne ni
+   * n'exécute aucun skill et ne fournit volontairement aucune définition d'outil.
+   */
+  async regenerateLastResponse(): Promise<{ response: string }> {
+    const history = this.memory.working.all();
+    let lastAssistantIndex = -1;
+    for (let index = history.length - 1; index >= 0; index--) {
+      if (history[index].role === "assistant" && !history[index].toolCalls?.length) {
+        lastAssistantIndex = index;
+        break;
+      }
+    }
+    if (lastAssistantIndex < 0) throw new Error("NO_REGENERATABLE_RESPONSE");
+
+    const previousResponse = history[lastAssistantIndex].content ?? "";
+    const messages: ChatMessage[] = [
+      {
+        role: "system",
+        content: "Reformule la dernière réponse de Jarvis sans effectuer d'action, sans appeler d'outil et sans ajouter de fait nouveau.",
+      },
+      ...history.slice(0, lastAssistantIndex),
+      { role: "user", content: `Réécris uniquement cette réponse finale :\n${previousResponse}` },
+    ];
+    const completion = await this.llm.complete(messages, { tools: undefined });
+    if (completion.toolCalls?.length) throw new Error("UNEXPECTED_TOOL_CALL_DURING_REGENERATION");
+    const response = completion.content?.trim();
+    if (!response) throw new Error("EMPTY_REGENERATION_RESPONSE");
+
+    history[lastAssistantIndex] = { role: "assistant", content: response };
+    this.memory.working.restore(history);
+    return { response };
+  }
+
   private buildInstructions(relevantSkills: SkillDefinition[]): string {
     const selectedNames=new Set(relevantSkills.map(skill=>skill.name));
     const now = new Date();
