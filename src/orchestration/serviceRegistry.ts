@@ -39,7 +39,7 @@ export function getKnownCapabilities(): Set<string> {
   canonicalSkillCatalog.forEach((s) => {
     if (s.serviceCapability) set.add(s.serviceCapability);
   });
-  ["software_development", "code_generation", "file_management", "deep_research"].forEach((c) => set.add(c));
+  ["software_development", "code_generation", "file_management", "deep_research", "cap"].forEach((c) => set.add(c));
   return set;
 }
 
