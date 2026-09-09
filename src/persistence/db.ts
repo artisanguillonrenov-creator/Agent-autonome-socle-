@@ -139,9 +139,27 @@ export function getDb(): Database.Database {
     );
     CREATE TABLE IF NOT EXISTS workflow_executions (
       invocation_id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, workflow_version INTEGER NOT NULL,
-      plan_run_id TEXT NOT NULL, created_at INTEGER NOT NULL, success_recorded_at INTEGER
+      result_type TEXT NOT NULL CHECK(result_type IN ('PLAN_RUN','SCHEDULE')), result_id TEXT NOT NULL,
+      input_json TEXT NOT NULL, created_at INTEGER NOT NULL, success_recorded_at INTEGER
     );
   `);
+
+  // Additive replacement of the short-lived V1 workflow execution schema. The
+  // relation remains authoritative while allowing schedule results as well as plans.
+  const workflowExecutionColumns = new Set(
+    (db.pragma("table_info(workflow_executions)") as Array<{ name:string }>).map(column=>column.name),
+  );
+  if(workflowExecutionColumns.has("plan_run_id")) db.transaction(()=>{
+    db.exec("ALTER TABLE workflow_executions RENAME TO workflow_executions_legacy");
+    db.exec(`CREATE TABLE workflow_executions (
+      invocation_id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, workflow_version INTEGER NOT NULL,
+      result_type TEXT NOT NULL CHECK(result_type IN ('PLAN_RUN','SCHEDULE')), result_id TEXT NOT NULL,
+      input_json TEXT NOT NULL, created_at INTEGER NOT NULL, success_recorded_at INTEGER
+    )`);
+    db.exec(`INSERT INTO workflow_executions(invocation_id,workflow_id,workflow_version,result_type,result_id,input_json,created_at,success_recorded_at)
+      SELECT invocation_id,workflow_id,workflow_version,'PLAN_RUN',plan_run_id,'{}',created_at,success_recorded_at FROM workflow_executions_legacy`);
+    db.exec("DROP TABLE workflow_executions_legacy");
+  })();
 
   const planNodeColumns = new Set(
     (db.pragma("table_info(plan_nodes)") as Array<{ name: string }>).map((column) => column.name),
