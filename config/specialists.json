@@ -1,0 +1,5 @@
+[
+  {"id":"research_specialist","name":"Research specialist","enabled":true,"priority":30,"allowedCapabilities":["deep_research"],"maxConcurrency":3},
+  {"id":"software_specialist","name":"Software specialist","enabled":true,"priority":20,"allowedCapabilities":["software_development","code_generation"],"maxConcurrency":1},
+  {"id":"workspace_specialist","name":"Workspace specialist","enabled":true,"priority":10,"allowedCapabilities":["file_management"],"maxConcurrency":1}
+]

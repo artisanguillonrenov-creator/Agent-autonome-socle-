@@ -123,6 +123,11 @@ export function getDb(): Database.Database {
       relative_path TEXT, external_url TEXT, size_bytes INTEGER, sha256 TEXT,
       metadata_json TEXT, created_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS activity_log (
+      id TEXT PRIMARY KEY, dedupe_key TEXT UNIQUE, timestamp INTEGER NOT NULL, trace_id TEXT,
+      plan_run_id TEXT, plan_node_id TEXT, operation_task_id TEXT, specialist_id TEXT,
+      event_type TEXT NOT NULL, level TEXT NOT NULL, message TEXT NOT NULL, metadata_json TEXT
+    );
   `);
 
   const planNodeColumns = new Set(
@@ -134,6 +139,7 @@ export function getDb(): Database.Database {
     priority: "TEXT", dependencies_json: "TEXT", operation_task_id: "TEXT",
     operation_idempotency_key: "TEXT", result: "TEXT", error: "TEXT", updated_at: "INTEGER",
     claimed_at: "INTEGER", attempt: "INTEGER NOT NULL DEFAULT 1",
+    specialist_id: "TEXT",
   };
   for (const [column, definition] of Object.entries(missingPlanNodeColumns)) {
     if (!planNodeColumns.has(column)) db.exec(`ALTER TABLE plan_nodes ADD COLUMN ${column} ${definition}`);
@@ -188,6 +194,10 @@ export function getDb(): Database.Database {
     schedule_task_id: "TEXT",
     watch_processed_at: "INTEGER",
     workspace_id: "TEXT",
+    specialist_id: "TEXT", plan_run_id: "TEXT", plan_node_id: "TEXT",
+    parallel_allowed: "INTEGER NOT NULL DEFAULT 0", retry_count: "INTEGER NOT NULL DEFAULT 0",
+    transport_duration_ms: "INTEGER", model: "TEXT", input_tokens: "INTEGER", output_tokens: "INTEGER",
+    total_tokens: "INTEGER", cost_usd: "REAL",
   };
   for (const [column, definition] of Object.entries(missingOperationColumns)) {
     if (!operationColumns.has(column)) {
@@ -197,6 +207,11 @@ export function getDb(): Database.Database {
 
   const planRunColumns = new Set((db.pragma("table_info(plan_runs)") as Array<{name:string}>).map(c=>c.name));
   if (!planRunColumns.has("workspace_id")) db.exec("ALTER TABLE plan_runs ADD COLUMN workspace_id TEXT");
+  const planRunAdditions:Record<string,string>={max_parallelism:"INTEGER NOT NULL DEFAULT 1",peak_parallelism:"INTEGER NOT NULL DEFAULT 0",pending_replan_node_id:"TEXT",consolidated_at:"INTEGER"};
+  for(const [column,definition] of Object.entries(planRunAdditions))if(!planRunColumns.has(column))db.exec(`ALTER TABLE plan_runs ADD COLUMN ${column} ${definition}`);
+  const artifactColumns=new Set((db.pragma("table_info(artifacts)") as Array<{name:string}>).map(c=>c.name));
+  if(!artifactColumns.has("dedupe_key"))db.exec("ALTER TABLE artifacts ADD COLUMN dedupe_key TEXT");
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_dedupe ON artifacts(dedupe_key) WHERE dedupe_key IS NOT NULL");
 
   const taskColumns = new Set(
     (db.pragma("table_info(tasks)") as Array<{ name: string }>).map((column) => column.name),

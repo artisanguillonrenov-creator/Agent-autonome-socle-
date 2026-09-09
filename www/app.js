@@ -864,7 +864,10 @@ async function renderPlanDetails(host, plans) {
   const marks = { done: '✓', in_progress: '●', pending: '○', waiting: '⏸', failed: '×', abandoned: '↻', cancelled: '×' };
   for (const plan of plans) {
     const nodes = await fetchApi(`/api/plans/${encodeURIComponent(plan.id)}/nodes`);
-    const current = nodes.find((node) => node.status === 'in_progress' || node.status === 'waiting');
+    const activeNodes = nodes.filter((node) => node.status === 'in_progress' || node.status === 'waiting');
+    const current = activeNodes[0];
+    const planMetrics = await fetchApi(`/api/plans/${encodeURIComponent(plan.id)}/metrics`);
+    const activityData = await fetchApi(`/api/activity?planRunId=${encodeURIComponent(plan.id)}&limit=200`);
     const card = document.createElement('article'); card.className = 'plan-card';
     const header = document.createElement('header');
     const objective = document.createElement('strong'); objective.textContent = String(plan.objective);
@@ -872,6 +875,10 @@ async function renderPlanDetails(host, plans) {
     header.append(objective, status); card.appendChild(header);
     appendPlanField(card, 'Génération', String(plan.generation));
     appendPlanField(card, 'Replan', `${plan.replanCount}/${plan.maxReplans}`);
+    appendPlanField(card, 'Étapes actives', String(activeNodes.length));
+    appendPlanField(card, 'Durée', planMetrics.durationMs == null ? '—' : `${Number(planMetrics.durationMs)} ms`);
+    appendPlanField(card, 'Peak parallelism', String(planMetrics.peakParallelism || 0));
+    appendPlanField(card, 'Spécialistes utilisés', Array.isArray(planMetrics.specialists) && planMetrics.specialists.length ? planMetrics.specialists.join(', ') : '—');
     if (plan.workspaceId) {
       appendPlanField(card, 'Workspace', String(plan.workspaceId));
       const workspace = document.createElement('section');
@@ -895,7 +902,9 @@ async function renderPlanDetails(host, plans) {
       const capability = document.createElement('span'); capability.textContent = ` · ${String(node.capability || 'racine')}`;
       detail.append(title, capability);
       appendPlanField(detail, 'Dépendances', Array.isArray(node.dependencies) && node.dependencies.length ? node.dependencies.join(', ') : 'aucune');
+      appendPlanField(detail, 'Spécialiste', node.specialistId ? String(node.specialistId) : '—');
       appendPlanField(detail, 'Operation task', node.operationTaskId ? String(node.operationTaskId) : '—');
+      if (node.operationTaskId) { const metrics = await fetchApi(`/api/operations/${encodeURIComponent(node.operationTaskId)}/metrics`); appendPlanField(detail, 'Service', String(metrics.selected_service || '—')); appendPlanField(detail, 'Durée', metrics.duration_ms == null ? '—' : `${Number(metrics.duration_ms)} ms`); appendPlanField(detail, 'Retries', String(metrics.retry_count || 0)); appendPlanField(detail, 'Tokens', metrics.total_tokens == null ? '—' : String(metrics.total_tokens)); appendPlanField(detail, 'Coût', metrics.cost_usd == null ? '—' : `$${Number(metrics.cost_usd)}`); appendPlanField(detail, 'Artifacts', String(metrics.artifact_count || 0)); }
       if (node.result !== undefined) { const result = document.createElement('pre'); result.textContent = String(node.result); detail.appendChild(result); }
       if (node.error !== undefined) { const error = document.createElement('div'); error.className = 'plan-error'; error.textContent = String(node.error); detail.appendChild(error); }
       if (node.operationTaskId) {
@@ -911,6 +920,7 @@ async function renderPlanDetails(host, plans) {
       item.append(mark, detail); list.appendChild(item);
     }
     card.appendChild(list);
+    const activityTitle = document.createElement('strong'); activityTitle.textContent = 'Activité factuelle'; const activityList = document.createElement('ul'); for (const event of Array.isArray(activityData.items) ? activityData.items : []) { const item = document.createElement('li'); item.textContent = `${new Date(Number(event.timestamp)).toLocaleString()} · ${String(event.event_type)} · ${String(event.message)}`; activityList.appendChild(item); } card.append(activityTitle, activityList);
     if (!['COMPLETED', 'CANCELLED', 'FAILED'].includes(plan.status)) {
       const cancel = document.createElement('button'); cancel.className = 'btn btn-secondary btn-sm'; cancel.textContent = 'Annuler le plan';
       cancel.addEventListener('click', async () => { await fetchApi(`/api/plans/${encodeURIComponent(plan.id)}/cancel`, { method: 'POST' }); await renderTasksView(); });
