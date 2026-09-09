@@ -114,6 +114,8 @@ export interface SkillContext {
   serviceOrchestrator?: any;
   planner?: any;
   skillRegistry?: any;
+  /** Native invocation identity; used for side-effect idempotency. */
+  toolCallId?: string;
 }
 
 export interface AgentStepResult {

@@ -164,6 +164,7 @@ export class Agent {
             serviceOrchestrator: this.serviceOrchestrator,
             planner: this.planner,
             skillRegistry:this.skills,
+            toolCallId:toolCall.id,
           };
           // Compatibility for persisted historical tool calls only; it is never advertised to an LLM.
           const result = compatibilityInternal?.handler

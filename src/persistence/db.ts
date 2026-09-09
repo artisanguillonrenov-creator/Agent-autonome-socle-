@@ -137,6 +137,10 @@ export function getDb(): Database.Database {
       objective_template TEXT NOT NULL, steps_json TEXT NOT NULL, created_from_plan_run_id TEXT,
       created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, last_success_at INTEGER, success_count INTEGER NOT NULL DEFAULT 0
     );
+    CREATE TABLE IF NOT EXISTS workflow_executions (
+      invocation_id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, workflow_version INTEGER NOT NULL,
+      plan_run_id TEXT NOT NULL, created_at INTEGER NOT NULL, success_recorded_at INTEGER
+    );
   `);
 
   const planNodeColumns = new Set(
