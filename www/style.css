@@ -97,6 +97,13 @@ body {
   font-size: 0.72rem;
   white-space: pre-wrap;
 }
+.plan-list { display:grid; gap:12px; margin-top:10px; }
+.plan-card { padding:14px; border:1px solid var(--border-color); border-radius:10px; background:var(--bg-dark); }
+.plan-card header { display:flex; justify-content:space-between; gap:12px; }
+.plan-step { display:flex; gap:10px; margin:10px 0; }
+.plan-step.done { color:var(--accent-success); } .plan-step.failed,.plan-error { color:var(--accent-danger); }
+.plan-step.waiting { color:var(--accent-warning); } .plan-step.abandoned { opacity:.65; }
+.plan-step pre { white-space:pre-wrap; max-height:8rem; overflow:auto; }
 
 .approval-controls { margin-top: 12px; padding: 12px; border: 1px solid var(--accent-warning, #f59e0b); border-radius: 8px; }
 .approval-buttons { display: flex; gap: 8px; margin-top: 10px; }

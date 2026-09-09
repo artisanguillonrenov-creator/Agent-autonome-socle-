@@ -5,6 +5,7 @@ import { createTaskSkill, listTasksSkill, completeTaskSkill } from "./tasks.js";
 import { webSearchSkill } from "./webSearch.js";
 import { executeCodeSkill } from "./executeCode.js";
 import { dispatchCapabilitySkill } from "./dispatchCapability.js";
+import { executeMissionSkill } from "./executeMission.js";
 
 export const builtinSkills: SkillDefinition[] = [
   getCurrentTimeSkill,
@@ -15,4 +16,5 @@ export const builtinSkills: SkillDefinition[] = [
   webSearchSkill,
   executeCodeSkill,
   dispatchCapabilitySkill,
+  executeMissionSkill,
 ];

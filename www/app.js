@@ -832,8 +832,11 @@ async function renderTasksView() {
   container.innerHTML = `<div class="card"><div class="card-title">Chargement des tâches...</div></div>`;
 
   try {
-    const tasksData = await fetchApi('/api/tasks');
+    const [tasksData, plansData] = await Promise.all([fetchApi('/api/tasks'), fetchApi('/api/plans')]);
     const tasks = Array.isArray(tasksData) ? tasksData : Array.isArray(tasksData?.tasks) ? tasksData.tasks : [];
+    const plans = Array.isArray(plansData) ? plansData : [];
+    const planDetails = await Promise.all(plans.map(async (p) => ({ ...p, nodes: await fetchApi(`/api/plans/${encodeURIComponent(p.id)}/nodes`) })));
+    const stepMark = { done: '✓', in_progress: '●', pending: '○', waiting: '⏸', failed: '×', abandoned: '↻', cancelled: '×' };
 
     container.innerHTML = `
       <h2>Tâches Personnelles & Plans</h2>
@@ -847,11 +850,23 @@ async function renderTasksView() {
           `).join('')}
         </div>
       </div>
+      <div class="card" style="margin-top: 12px;">
+        <div class="card-title">Plans d'exécution</div>
+        <div class="plan-list">${planDetails.length === 0 ? '<div style="color: var(--text-muted);">Aucun plan.</div>' : planDetails.map((p) => {
+          const current = p.nodes.find((n) => n.status === 'in_progress' || n.status === 'waiting');
+          return `<article class="plan-card"><header><strong>${p.objective}</strong><span class="chat-timeline-status" data-status="${p.status}">${p.status}</span></header>
+          <div class="card-subtext">Génération ${p.generation} · replan ${p.replanCount}/${p.maxReplans}${current ? ` · étape actuelle : ${current.title}` : ''}</div>
+          <ol>${p.nodes.map((n) => `<li class="plan-step ${n.status}"><span>${stepMark[n.status] || '○'}</span><div><strong>${n.title}</strong> · ${n.capability || 'racine'}<br><small>Dépendances : ${n.dependencies?.length ? n.dependencies.join(', ') : 'aucune'} · task : ${n.operationTaskId || '—'}</small>${n.result ? `<pre>${n.result}</pre>` : ''}${n.error ? `<div class="plan-error">${n.error}</div>` : ''}${n.operationTaskId ? `<br><button class="btn btn-secondary btn-sm" onclick="switchView('operations')">Voir la timeline réelle</button>` : ''}</div></li>`).join('')}</ol>
+          ${p.status !== 'COMPLETED' && p.status !== 'CANCELLED' && p.status !== 'FAILED' ? `<button class="btn btn-secondary btn-sm" onclick="cancelPlan('${p.id}')">Annuler le plan</button>` : ''}</article>`;
+        }).join('')}</div>
+      </div>
     `;
   } catch (err) {
     container.innerHTML = `<div class="card" style="border-color: var(--accent-danger);"><div class="card-title" style="color: var(--accent-danger);">${err.message}</div></div>`;
   }
 }
+
+async function cancelPlan(id) { await fetchApi(`/api/plans/${encodeURIComponent(id)}/cancel`, { method: 'POST' }); await renderTasksView(); }
 
 // 6. MÉMOIRE VIEW
 async function renderMemoryView() {
