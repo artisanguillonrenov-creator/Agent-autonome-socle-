@@ -153,6 +153,17 @@ test("ServiceEvent est transformé en entrée de timeline sans interpréter le t
   assert.equal(markerFor(needsPermission, true, "WAITING_PERMISSION"), "●");
 });
 
+test("la vue Plans rend toutes les données dynamiques par textContent", () => {
+  const source=fs.readFileSync("./www/app.js","utf-8");
+  const planRenderer=source.slice(source.indexOf("async function renderPlanDetails"),source.indexOf("async function renderTasksView"));
+  assert.doesNotMatch(planRenderer,/innerHTML|onclick\s*=|insertAdjacentHTML/);
+  assert.match(planRenderer,/objective\.textContent/);
+  assert.match(planRenderer,/title\.textContent/);
+  assert.match(planRenderer,/result\.textContent/);
+  assert.match(planRenderer,/error\.textContent/);
+  assert.match(planRenderer,/addEventListener\('click'/);
+});
+
 test("Jarvis Command Center API Endpoints Test", async () => {
   const previousToken = config.api.token;
   config.api.token = "api-endpoints-test-token";
@@ -458,4 +469,21 @@ test("HTTP API applique l'authentification fail-closed tout en laissant les ress
     server.close();
     config.api.token = previousToken;
   }
+});
+
+test("API plans: auth, list/detail/nodes, unknown et annulation sûre", async () => {
+  const previousToken=config.api.token;config.api.token="plans-token";
+  const agent=new Agent({llm:new MockProvider(),embeddings:new LocalHashingEmbeddingProvider()});
+  const run=agent.planner.createExecutionPlan("Mission API",[{local_id:"one",title:"One",capability:"software_development",objective:"Do one",context:{},constraints:[],priority:"medium",depends_on:[]}],agent.serviceOrchestrator.registry);
+  const port=9000+Math.floor(Math.random()*500);const server=startHttpApi(agent,port);const base=`http://localhost:${port}`;
+  const auth={authorization:"Bearer plans-token"};
+  try {
+    let response=await fetch(`${base}/api/plans`,{headers:auth});assert.equal(response.status,200);assert.ok((await response.json() as Array<{id:string}>).some(plan=>plan.id===run.id));
+    response=await fetch(`${base}/api/plans/${run.id}`,{headers:auth});assert.equal(response.status,200);assert.equal((await response.json() as {id:string}).id,run.id);
+    response=await fetch(`${base}/api/plans/${run.id}/nodes`,{headers:auth});assert.equal(response.status,200);assert.equal((await response.json() as unknown[]).length,1);
+    response=await fetch(`${base}/api/plans/unknown`,{headers:auth});assert.equal(response.status,404);
+    response=await fetch(`${base}/api/plans`,{headers:{authorization:"Bearer wrong"}});assert.equal(response.status,401);
+    response=await fetch(`${base}/api/plans/${run.id}/cancel`,{method:"POST",headers:auth});assert.equal(response.status,200);assert.equal((await response.json() as {status:string}).status,"CANCELLED");
+    config.api.token="";response=await fetch(`${base}/api/plans`);assert.equal(response.status,503);
+  } finally {config.api.token=previousToken;await new Promise<void>(resolve=>server.close(()=>resolve()));}
 });

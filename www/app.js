@@ -827,46 +827,102 @@ async function renderServicesView() {
 }
 
 // 5. TÂCHES & PLANS VIEW
+function appendPlanField(host, label, value) {
+  const row = document.createElement('div');
+  const strong = document.createElement('strong');
+  strong.textContent = `${label} : `;
+  const text = document.createElement('span');
+  text.textContent = value;
+  row.append(strong, text);
+  host.appendChild(row);
+}
+
+async function showPlanOperation(host, taskId) {
+  host.replaceChildren();
+  const operation = await fetchApi(`/api/operations/${encodeURIComponent(taskId)}`);
+  const eventData = await fetchApi(`/api/operations/${encodeURIComponent(taskId)}/events`);
+  const view = createTimelineCard(host, operation);
+  renderTimelineCard(view, operation, Array.isArray(eventData.events) ? eventData.events : []);
+  if (!TERMINAL_OPERATION_STATUSES.has(operation.status)) void pollTimelineOperation(operation, view);
+}
+
+async function renderPlanDetails(host, plans) {
+  host.replaceChildren();
+  if (plans.length === 0) {
+    const empty = document.createElement('div');
+    empty.style.color = 'var(--text-muted)';
+    empty.textContent = 'Aucun plan.';
+    host.appendChild(empty);
+    return;
+  }
+  const marks = { done: '✓', in_progress: '●', pending: '○', waiting: '⏸', failed: '×', abandoned: '↻', cancelled: '×' };
+  for (const plan of plans) {
+    const nodes = await fetchApi(`/api/plans/${encodeURIComponent(plan.id)}/nodes`);
+    const current = nodes.find((node) => node.status === 'in_progress' || node.status === 'waiting');
+    const card = document.createElement('article'); card.className = 'plan-card';
+    const header = document.createElement('header');
+    const objective = document.createElement('strong'); objective.textContent = String(plan.objective);
+    const status = document.createElement('span'); status.className = 'chat-timeline-status'; status.dataset.status = String(plan.status); status.textContent = String(plan.status);
+    header.append(objective, status); card.appendChild(header);
+    appendPlanField(card, 'Génération', String(plan.generation));
+    appendPlanField(card, 'Replan', `${plan.replanCount}/${plan.maxReplans}`);
+    if (current) appendPlanField(card, 'Étape actuelle', String(current.title));
+    const list = document.createElement('ol');
+    for (const node of nodes) {
+      const item = document.createElement('li'); item.className = `plan-step ${node.status}`;
+      const mark = document.createElement('span'); mark.textContent = marks[node.status] || '○';
+      const detail = document.createElement('div');
+      const title = document.createElement('strong'); title.textContent = String(node.title);
+      const capability = document.createElement('span'); capability.textContent = ` · ${String(node.capability || 'racine')}`;
+      detail.append(title, capability);
+      appendPlanField(detail, 'Dépendances', Array.isArray(node.dependencies) && node.dependencies.length ? node.dependencies.join(', ') : 'aucune');
+      appendPlanField(detail, 'Operation task', node.operationTaskId ? String(node.operationTaskId) : '—');
+      if (node.result !== undefined) { const result = document.createElement('pre'); result.textContent = String(node.result); detail.appendChild(result); }
+      if (node.error !== undefined) { const error = document.createElement('div'); error.className = 'plan-error'; error.textContent = String(node.error); detail.appendChild(error); }
+      if (node.operationTaskId) {
+        const operationHost = document.createElement('div'); operationHost.className = 'plan-operation';
+        const show = document.createElement('button'); show.className = 'btn btn-secondary btn-sm'; show.textContent = 'Voir la timeline réelle';
+        show.addEventListener('click', () => void showPlanOperation(operationHost, String(node.operationTaskId)));
+        detail.append(show, operationHost);
+        if (node.status === 'waiting') {
+          const operation = await fetchApi(`/api/operations/${encodeURIComponent(node.operationTaskId)}`);
+          appendApprovalControls(detail, operation, async () => { await showPlanOperation(operationHost, String(node.operationTaskId)); await renderTasksView(); });
+        }
+      }
+      item.append(mark, detail); list.appendChild(item);
+    }
+    card.appendChild(list);
+    if (!['COMPLETED', 'CANCELLED', 'FAILED'].includes(plan.status)) {
+      const cancel = document.createElement('button'); cancel.className = 'btn btn-secondary btn-sm'; cancel.textContent = 'Annuler le plan';
+      cancel.addEventListener('click', async () => { await fetchApi(`/api/plans/${encodeURIComponent(plan.id)}/cancel`, { method: 'POST' }); await renderTasksView(); });
+      card.appendChild(cancel);
+    }
+    host.appendChild(card);
+  }
+}
+
 async function renderTasksView() {
   const container = document.getElementById('view-tasks');
-  container.innerHTML = `<div class="card"><div class="card-title">Chargement des tâches...</div></div>`;
-
+  container.replaceChildren();
+  const loading = document.createElement('div'); loading.className = 'card'; loading.textContent = 'Chargement des tâches et plans...'; container.appendChild(loading);
   try {
     const [tasksData, plansData] = await Promise.all([fetchApi('/api/tasks'), fetchApi('/api/plans')]);
     const tasks = Array.isArray(tasksData) ? tasksData : Array.isArray(tasksData?.tasks) ? tasksData.tasks : [];
     const plans = Array.isArray(plansData) ? plansData : [];
-    const planDetails = await Promise.all(plans.map(async (p) => ({ ...p, nodes: await fetchApi(`/api/plans/${encodeURIComponent(p.id)}/nodes`) })));
-    const stepMark = { done: '✓', in_progress: '●', pending: '○', waiting: '⏸', failed: '×', abandoned: '↻', cancelled: '×' };
-
-    container.innerHTML = `
-      <h2>Tâches Personnelles & Plans</h2>
-      <div class="card" style="margin-top: 12px;">
-        <div class="card-title">Liste des Tâches</div>
-        <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px;">
-          ${tasks.length === 0 ? '<div style="color: var(--text-muted);">Aucune tâche.</div>' : tasks.map((t) => `
-            <div style="padding: 10px; background: var(--bg-dark); border-radius: 8px;">
-              ${t.title}
-            </div>
-          `).join('')}
-        </div>
-      </div>
-      <div class="card" style="margin-top: 12px;">
-        <div class="card-title">Plans d'exécution</div>
-        <div class="plan-list">${planDetails.length === 0 ? '<div style="color: var(--text-muted);">Aucun plan.</div>' : planDetails.map((p) => {
-          const current = p.nodes.find((n) => n.status === 'in_progress' || n.status === 'waiting');
-          return `<article class="plan-card"><header><strong>${p.objective}</strong><span class="chat-timeline-status" data-status="${p.status}">${p.status}</span></header>
-          <div class="card-subtext">Génération ${p.generation} · replan ${p.replanCount}/${p.maxReplans}${current ? ` · étape actuelle : ${current.title}` : ''}</div>
-          <ol>${p.nodes.map((n) => `<li class="plan-step ${n.status}"><span>${stepMark[n.status] || '○'}</span><div><strong>${n.title}</strong> · ${n.capability || 'racine'}<br><small>Dépendances : ${n.dependencies?.length ? n.dependencies.join(', ') : 'aucune'} · task : ${n.operationTaskId || '—'}</small>${n.result ? `<pre>${n.result}</pre>` : ''}${n.error ? `<div class="plan-error">${n.error}</div>` : ''}${n.operationTaskId ? `<br><button class="btn btn-secondary btn-sm" onclick="switchView('operations')">Voir la timeline réelle</button>` : ''}</div></li>`).join('')}</ol>
-          ${p.status !== 'COMPLETED' && p.status !== 'CANCELLED' && p.status !== 'FAILED' ? `<button class="btn btn-secondary btn-sm" onclick="cancelPlan('${p.id}')">Annuler le plan</button>` : ''}</article>`;
-        }).join('')}</div>
-      </div>
-    `;
+    container.replaceChildren();
+    const heading = document.createElement('h2'); heading.textContent = 'Tâches Personnelles & Plans'; container.appendChild(heading);
+    const taskCard = document.createElement('div'); taskCard.className = 'card';
+    const taskTitle = document.createElement('div'); taskTitle.className = 'card-title'; taskTitle.textContent = 'Liste des Tâches'; taskCard.appendChild(taskTitle);
+    for (const task of tasks) { const row = document.createElement('div'); row.className = 'task-row'; row.textContent = String(task.title); taskCard.appendChild(row); }
+    if (!tasks.length) { const empty = document.createElement('div'); empty.textContent = 'Aucune tâche.'; taskCard.appendChild(empty); }
+    const planCard = document.createElement('div'); planCard.className = 'card';
+    const planTitle = document.createElement('div'); planTitle.className = 'card-title'; planTitle.textContent = "Plans d'exécution";
+    const planList = document.createElement('div'); planList.className = 'plan-list'; planCard.append(planTitle, planList);
+    container.append(taskCard, planCard); await renderPlanDetails(planList, plans);
   } catch (err) {
-    container.innerHTML = `<div class="card" style="border-color: var(--accent-danger);"><div class="card-title" style="color: var(--accent-danger);">${err.message}</div></div>`;
+    container.replaceChildren(); const error = document.createElement('div'); error.className = 'card plan-error'; error.textContent = err.message; container.appendChild(error);
   }
 }
-
-async function cancelPlan(id) { await fetchApi(`/api/plans/${encodeURIComponent(id)}/cancel`, { method: 'POST' }); await renderTasksView(); }
 
 // 6. MÉMOIRE VIEW
 async function renderMemoryView() {

@@ -216,7 +216,7 @@ export class Agent {
     return saveCheckpoint(label, {
       workingMemory: this.memory.working.all(),
       // Agent checkpoints remain legacy-scoped and must never capture/rewind execution plans.
-      planNodes: this.planner.all().filter((node) => !node.planRunId) as import("../types.js").PlanNode[],
+      planNodes: this.planner.legacyNodes(),
       stepCount: this.stepCount,
     });
   }
@@ -224,8 +224,14 @@ export class Agent {
   restoreCheckpoint(checkpointId: string): boolean {
     const state = loadCheckpoint(checkpointId);
     if (!state) return false;
+    // Persisted planner state is restored first; validation has already completed.
+    // Working memory cannot become partially restored if the DB transaction fails.
+    try {
+      this.planner.restore(state.planNodes);
+    } catch {
+      return false;
+    }
     this.memory.working.restore(state.workingMemory);
-    this.planner.restore(state.planNodes);
     this.stepCount = state.stepCount;
     return true;
   }
