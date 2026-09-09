@@ -644,7 +644,7 @@ export const SETTINGS_CATALOG: SettingDefinition[] = [
     editable: true,
     availability: "AVAILABLE",
     requiresRestart: false,
-    validation: { min: 1, max: 10 },
+    validation: { min: 1, max: 8 },
   },
   {
     key: "automations.emailTriggers",

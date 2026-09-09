@@ -1,7 +1,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type { RiskLevel } from "./contract.js";
-import { ConnectionStore } from "../connections/store.js";
+import { ConnectionStore, hasConfigOverride } from "../connections/store.js";
 import { canonicalSkillCatalog } from "../skills/catalog.js";
 
 export type ServiceTransport = "local" | "task_http";
@@ -72,7 +72,7 @@ export function validateServiceDefinition(
   }
 
   // Server-side userCreated determination
-  const isFactory = factoryServiceIds ? factoryServiceIds.has(r.id.trim()) : (r.id.trim() === "software_factory" || r.id.trim() === "mock_software_factory" || r.id.trim() === "workspace_service" || r.id.trim() === "research_service");
+  const isFactory = factoryServiceIds ? factoryServiceIds.has(r.id.trim()) : false;
   const userCreated = isUserConnection || (Boolean(r.userCreated) && !isFactory);
 
   // Validate capabilities against known catalog for user connections
@@ -446,6 +446,7 @@ export class ServiceRegistry {
       if (!ov) {
         result.push(resolveServiceEndpoint(factoryDef));
       } else {
+        const hasDbOverride = hasConfigOverride(ov);
         const merged: ServiceDefinition = {
           ...factoryDef,
           name: ov.name || factoryDef.name,
@@ -466,7 +467,7 @@ export class ServiceRegistry {
           capabilities: ov.capabilitiesJson ? JSON.parse(ov.capabilitiesJson) : factoryDef.capabilities,
           parallelSafeCapabilities: ov.parallelSafeCapabilitiesJson ? JSON.parse(ov.parallelSafeCapabilitiesJson) : factoryDef.parallelSafeCapabilities,
           riskByCapability: ov.riskByCapabilityJson ? JSON.parse(ov.riskByCapabilityJson) : factoryDef.riskByCapability,
-          source: "DATABASE",
+          source: hasDbOverride ? "DATABASE" : factoryDef.source ?? "FACTORY",
         };
         result.push(resolveServiceEndpoint(merged));
       }

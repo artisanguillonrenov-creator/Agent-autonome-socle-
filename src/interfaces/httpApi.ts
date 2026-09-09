@@ -438,6 +438,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
                 if (isFactory) {
                   // Apply ONLY present overrides for factory service without defaulting undefined fields
                   const patchObj: any = {};
+                  if (o.name !== undefined) patchObj.name = o.name;
                   if (o.enabledOverride !== undefined) patchObj.enabled = o.enabledOverride;
                   if (o.endpointOverride !== undefined) patchObj.endpoint = o.endpointOverride;
                   if (o.transportOverride !== undefined) patchObj.transport = o.transportOverride;
@@ -1055,10 +1056,10 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
           return;
         }
 
-        service.enabled = body.enabled ?? !service.enabled;
-        agent.serviceOrchestrator.registry.register(service);
+        const newEnabled = body.enabled ?? !service.enabled;
+        agent.serviceOrchestrator.registry.patchService(id, { enabled: newEnabled });
         agent.skills.refreshServiceAvailability(agent.serviceOrchestrator.registry);
-        sendJson(res, 200, { ok: true, service });
+        sendJson(res, 200, { ok: true, service: agent.serviceOrchestrator.registry.getServiceById(id) });
         return;
       }
 

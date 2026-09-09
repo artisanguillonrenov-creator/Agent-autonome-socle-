@@ -26,6 +26,24 @@ export interface ServiceConnectionRecord {
   updatedAt: number;
 }
 
+export function hasConfigOverride(rec: ServiceConnectionRecord): boolean {
+  return (
+    rec.enabledOverride !== undefined ||
+    rec.transportOverride !== undefined ||
+    rec.endpointOverride !== undefined ||
+    rec.healthPath !== undefined ||
+    rec.taskPath !== undefined ||
+    rec.authTypeOverride !== undefined ||
+    rec.authEnvVar !== undefined ||
+    rec.priorityOverride !== undefined ||
+    rec.requestTimeoutMs !== undefined ||
+    rec.healthTimeoutMs !== undefined ||
+    rec.capabilitiesJson !== undefined ||
+    rec.parallelSafeCapabilitiesJson !== undefined ||
+    rec.riskByCapabilityJson !== undefined
+  );
+}
+
 export class ConnectionStore {
   private inMemoryRecords = new Map<string, ServiceConnectionRecord>();
 

@@ -723,6 +723,218 @@ test("RISK VALIDATION: POST, PATCH, and IMPORT reject invalid riskByCapability v
   }
 });
 
+test("SETTINGS BOUNDS: automations.backgroundMaxConcurrent rejects values out of range (1..8)", () => {
+  setupTestDb();
+  const store = new SettingsStore();
+
+  assert.throws(
+    () => store.setSetting("automations.backgroundMaxConcurrent", 0, "GLOBAL", "global"),
+    /SETTING_OUT_OF_RANGE: automations.backgroundMaxConcurrent min is 1/
+  );
+
+  assert.throws(
+    () => store.setSetting("automations.backgroundMaxConcurrent", 9, "GLOBAL", "global"),
+    /SETTING_OUT_OF_RANGE: automations.backgroundMaxConcurrent max is 8/
+  );
+
+  const okSetting = store.setSetting("automations.backgroundMaxConcurrent", 8, "GLOBAL", "global");
+  assert.equal(okSetting.effectiveValue, 8);
+});
+
+test("LEGACY TOGGLE ENV SAFETY: /api/services/:id/toggle uses patchService and does not freeze ENV endpoint", async () => {
+  setupTestDb();
+  const previousToken = config.api.token;
+  const previousEnvUrl = process.env.SOFTWARE_FACTORY_URL;
+  config.api.token = "toggle-test-token";
+  process.env.SOFTWARE_FACTORY_URL = "http://env-server.local:5000";
+
+  const { startHttpApi } = await import("../interfaces/httpApi.js");
+  const { Agent } = await import("../core/agent.js");
+  const { MockProvider } = await import("../llm/providers/mock.js");
+
+  const agent = new Agent({
+    llm: new MockProvider(),
+    embeddings: new LocalHashingEmbeddingProvider(),
+  });
+
+  const testPort = 4105;
+  const server = startHttpApi(agent, testPort);
+  const headers = { authorization: "Bearer toggle-test-token", "content-type": "application/json" };
+
+  try {
+    // 1. Legacy toggle software_factory -> enabled = false
+    const toggleRes = await fetch(`http://localhost:${testPort}/api/services/software_factory/toggle`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ enabled: false }),
+    });
+    assert.equal(toggleRes.status, 200);
+
+    const toggledSvc = agent.serviceOrchestrator.registry.getServiceById("software_factory");
+    assert.equal(toggledSvc?.enabled, false);
+    assert.equal(toggledSvc?.endpoint, "http://env-server.local:5000");
+
+    // 2. Verify endpointOverride in DB remains undefined!
+    const dbOverride = agent.serviceOrchestrator.registry.connectionStore.getOverride("software_factory");
+    assert.equal(dbOverride?.enabledOverride, false);
+    assert.equal(dbOverride?.endpointOverride, undefined); // NOT frozen in DB!
+
+    // 3. Remove ENV variable -> endpoint reverts to factory default
+    delete process.env.SOFTWARE_FACTORY_URL;
+    const revertedSvc = agent.serviceOrchestrator.registry.getServiceById("software_factory");
+    assert.ok(revertedSvc?.endpoint.startsWith("http://localhost:"));
+  } finally {
+    server.close();
+    config.api.token = previousToken;
+    if (previousEnvUrl) process.env.SOFTWARE_FACTORY_URL = previousEnvUrl;
+    else delete process.env.SOFTWARE_FACTORY_URL;
+  }
+});
+
+test("DIAGNOSTICS DO NOT ALTER SERVICE SOURCE: Testing connection records diagnostics without changing source from FACTORY or ENVIRONMENT", async () => {
+  setupTestDb();
+  const previousToken = config.api.token;
+  const previousEnvUrl = process.env.SOFTWARE_FACTORY_URL;
+  config.api.token = "diag-test-token";
+
+  const { startHttpApi } = await import("../interfaces/httpApi.js");
+  const { Agent } = await import("../core/agent.js");
+  const { MockProvider } = await import("../llm/providers/mock.js");
+
+  const agent = new Agent({
+    llm: new MockProvider(),
+    embeddings: new LocalHashingEmbeddingProvider(),
+  });
+
+  const testPort = 4106;
+  const server = startHttpApi(agent, testPort);
+  const headers = { authorization: "Bearer diag-test-token", "content-type": "application/json" };
+
+  try {
+    // 1. Factory service without override -> source FACTORY
+    const initialSvc = agent.serviceOrchestrator.registry.getServiceById("software_factory");
+    assert.equal(initialSvc?.source, "FACTORY");
+
+    // 2. Run connection test POST /api/connections/software_factory/test
+    await fetch(`http://localhost:${testPort}/api/connections/software_factory/test`, {
+      method: "POST",
+      headers,
+    });
+
+    // 3. Source remains FACTORY after test diagnostic is recorded!
+    const testedSvc = agent.serviceOrchestrator.registry.getServiceById("software_factory");
+    assert.equal(testedSvc?.source, "FACTORY");
+
+    // 4. Set ENV variable -> source becomes ENVIRONMENT
+    process.env.SOFTWARE_FACTORY_URL = "http://env-diag.local:5000";
+    const envSvc = agent.serviceOrchestrator.registry.getServiceById("software_factory");
+    assert.equal(envSvc?.source, "ENVIRONMENT");
+  } finally {
+    server.close();
+    config.api.token = previousToken;
+    if (previousEnvUrl) process.env.SOFTWARE_FACTORY_URL = previousEnvUrl;
+    else delete process.env.SOFTWARE_FACTORY_URL;
+  }
+});
+
+test("GENERIC FACTORY CLASSIFICATION: Custom factory service in config is automatically userCreated=false and DELETE forbidden", async () => {
+  setupTestDb();
+  const { writeFileSync, mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+
+  const tempDir = mkdtempSync(join(tmpdir(), "factory-test-"));
+  const customConfigPath = join(tempDir, "services.json");
+
+  const customServices = [
+    {
+      id: "new_factory_service",
+      name: "New 5th Factory Service",
+      enabled: true,
+      transport: "task_http",
+      endpoint: "http://localhost:5005",
+      capabilities: ["software_development"],
+      priority: 50,
+      auth: { type: "none" },
+    },
+  ];
+
+  writeFileSync(customConfigPath, JSON.stringify(customServices));
+
+  const registry = new ServiceRegistry(customConfigPath);
+  const svc = registry.getServiceById("new_factory_service");
+
+  assert.ok(svc);
+  assert.equal(svc.userCreated, false);
+  assert.equal(registry.isFactoryService("new_factory_service"), true);
+
+  assert.throws(
+    () => registry.deleteService("new_factory_service"),
+    (err: any) => err.status === 405
+  );
+});
+
+test("FACTORY NAME ROUNDTRIP: Factory service name override is preserved on export, cleared on reset, and restored on import", async () => {
+  setupTestDb();
+  const previousToken = config.api.token;
+  config.api.token = "name-test-token";
+
+  const { startHttpApi } = await import("../interfaces/httpApi.js");
+  const { Agent } = await import("../core/agent.js");
+  const { MockProvider } = await import("../llm/providers/mock.js");
+
+  const agent = new Agent({
+    llm: new MockProvider(),
+    embeddings: new LocalHashingEmbeddingProvider(),
+  });
+
+  const testPort = 4107;
+  const server = startHttpApi(agent, testPort);
+  const headers = { authorization: "Bearer name-test-token", "content-type": "application/json" };
+
+  try {
+    // 1. Patch software_factory name
+    const patchRes = await fetch(`http://localhost:${testPort}/api/connections/software_factory`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ name: "Software Factory Custom Name" }),
+    });
+    assert.equal(patchRes.status, 200);
+
+    const patchedSvc = agent.serviceOrchestrator.registry.getServiceById("software_factory");
+    assert.equal(patchedSvc?.name, "Software Factory Custom Name");
+
+    // 2. Export settings
+    const exportRes = await fetch(`http://localhost:${testPort}/api/settings/export`, { headers });
+    const exportData = await exportRes.json();
+    const sfOverride = exportData.serviceOverrides.find((o: any) => o.serviceId === "software_factory");
+    assert.equal(sfOverride.name, "Software Factory Custom Name");
+
+    // 3. Reset override
+    await fetch(`http://localhost:${testPort}/api/connections/software_factory/reset`, {
+      method: "POST",
+      headers,
+    });
+    const resetSvc = agent.serviceOrchestrator.registry.getServiceById("software_factory");
+    assert.notEqual(resetSvc?.name, "Software Factory Custom Name");
+
+    // 4. Import exported payload
+    const importRes = await fetch(`http://localhost:${testPort}/api/settings/import`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(exportData),
+    });
+    assert.equal(importRes.status, 200);
+
+    // 5. Verify name is restored!
+    const restoredSvc = agent.serviceOrchestrator.registry.getServiceById("software_factory");
+    assert.equal(restoredSvc?.name, "Software Factory Custom Name");
+  } finally {
+    server.close();
+    config.api.token = previousToken;
+  }
+});
+
 test("AUTH: Settings & Connections fail closed with 401 when API token is configured and missing/invalid", async () => {
   setupTestDb();
   const previousToken = config.api.token;
