@@ -565,6 +565,11 @@ function renderTimelineCard(view, operation, events) {
         link.textContent = 'Voir la Pull Request';
         row.appendChild(link);
       }
+      const artifactCount = Array.isArray(event.payload && event.payload.artifacts) ? event.payload.artifacts.length : 0;
+      if (artifactCount > 0) {
+        const produced = document.createElement('span'); produced.textContent = `${artifactCount} livrable(s) produit(s)`; row.appendChild(produced);
+        if (operation.workspaceId) { const access = document.createElement('button'); access.className = 'btn btn-secondary btn-sm'; access.textContent = 'Accéder au workspace'; access.addEventListener('click', () => switchView('tasks')); row.appendChild(access); }
+      }
     }
     view.steps.appendChild(row);
   });
@@ -574,12 +579,13 @@ function renderTimelineCard(view, operation, events) {
     renderTimelineCard(view, refreshed, Array.isArray(eventData.events) ? eventData.events : []);
   });
 
+  const safeEvents = events.map((event) => ({ ...event, payload: payloadIsRecord(event.payload) ? { ...event.payload, artifacts: Array.isArray(event.payload.artifacts) ? event.payload.artifacts.map(({ content_base64, ...descriptor }) => descriptor) : event.payload.artifacts } : event.payload }));
   view.raw.textContent = JSON.stringify({
     task_id: operation.taskId,
     trace_id: operation.traceId,
     service: operation.selectedService,
     status: operation.status,
-    events,
+    events: safeEvents,
   }, null, 2);
 }
 
@@ -875,7 +881,7 @@ async function renderPlanDetails(host, plans) {
       const fileList = document.createElement('ul');
       for (const file of files) { const item = document.createElement('li'); const label = document.createElement('span'); label.textContent = `${String(file.path)} (${Number(file.size)} octets) `; const download = document.createElement('button'); download.className = 'btn btn-secondary btn-sm'; download.textContent = 'Télécharger'; download.addEventListener('click', async () => { const response = await fetch(`${state.backendUrl}/api/workspaces/${encodeURIComponent(plan.workspaceId)}/files/content?path=${encodeURIComponent(file.path)}`, { headers: { Authorization: `Bearer ${state.token}` } }); const blob = await response.blob(); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = String(file.path).split('/').pop(); link.click(); URL.revokeObjectURL(link.href); }); item.append(label, download); fileList.appendChild(item); }
       const artifactList = document.createElement('ul');
-      for (const artifact of artifacts) { const item = document.createElement('li'); item.textContent = `${String(artifact.name)} · ${String(artifact.kind)} · ${String(artifact.mimeType || '')} · ${String(artifact.operationTaskId || 'manuel')}`; artifactList.appendChild(item); }
+      for (const artifact of artifacts) { const item = document.createElement('li'); const label = document.createElement('span'); label.textContent = `${String(artifact.name)} · ${String(artifact.kind)} · ${String(artifact.mimeType || '')} · ${String(artifact.operationTaskId || 'manuel')} `; item.appendChild(label); if (artifact.kind === 'LINK') { const url = validHttpUrl(artifact.externalUrl); if (url) { const open = document.createElement('button'); open.className = 'btn btn-secondary btn-sm'; open.textContent = 'Ouvrir'; open.addEventListener('click', () => window.open(url, '_blank', 'noopener,noreferrer')); item.appendChild(open); } } else { const download = document.createElement('button'); download.className = 'btn btn-secondary btn-sm'; download.textContent = 'Télécharger'; download.addEventListener('click', async () => { const response = await fetch(`${state.backendUrl}/api/artifacts/${encodeURIComponent(artifact.id)}?download=1`, { headers: { Authorization: `Bearer ${state.token}` } }); const blob = await response.blob(); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = String(artifact.name); link.click(); URL.revokeObjectURL(link.href); }); item.appendChild(download); } artifactList.appendChild(item); }
       const upload = document.createElement('input'); upload.type = 'file'; upload.addEventListener('change', async () => { const file = upload.files?.[0]; if (!file) return; const bytes = new Uint8Array(await file.arrayBuffer()); let binary = ''; for (const byte of bytes) binary += String.fromCharCode(byte); await fetchApi(`/api/workspaces/${encodeURIComponent(plan.workspaceId)}/files`, { method: 'POST', body: JSON.stringify({ path: file.name, contentBase64: btoa(binary), mimeType: file.type || 'application/octet-stream' }) }); await renderTasksView(); });
       workspace.append(workspaceTitle, fileList, artifactList, upload); card.appendChild(workspace);
     }

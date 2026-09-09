@@ -9,6 +9,7 @@ import { ArtifactStore } from "../workspaces/artifactStore.js";
 import { WorkspaceService } from "../services/workspaceService.js";
 import { ResearchService } from "../services/researchService.js";
 import { getDb } from "../persistence/db.js";
+import type { ArtifactInput, ArtifactKind } from "../workspaces/artifactStore.js";
 
 export interface OrchestrationResult {
   taskId: string;
@@ -227,10 +228,7 @@ export class ServiceOrchestrator {
     }
 
     // 7. Process received events
-    for (const event of adapterRes.events) {
-      if(event.type==="TASK_COMPLETED"&&event.payload.artifacts!==undefined){try{this.persistArtifacts(event,opts?.workspaceId);}catch(e){this.store.updateStatus(taskId,"FAILED",undefined,`INVALID_ARTIFACT_DESCRIPTOR: ${(e as Error).message}`);break;}}
-      this.store.processEvent(event);
-    }
+    this.processEvents(taskId, adapterRes.events);
 
     const updatedOp = this.store.getOperation(taskId)!;
     const meta = extractOperationMetadata(updatedOp.result);
@@ -264,7 +262,7 @@ export class ServiceOrchestrator {
       const timeoutMs = service.id === "software_factory" ? config.softwareFactory.timeoutMs : 5000;
       const response = await this.adapter.dispatchTask(typeof (this.adapter as any).registerLocal==="function"?service:service.endpoint, request, timeoutMs);
       if (!response.success) this.store.updateStatus(taskId, "FAILED", undefined, `TRANSPORT_UNKNOWN: ${response.message}`, true);
-      else for (const event of response.events){if(event.type==="TASK_COMPLETED"&&event.payload.artifacts!==undefined)this.persistArtifacts(event,operation.workspaceId);this.store.processEvent(event);}
+      else this.processEvents(taskId, response.events);
     }
     const updated = this.store.getOperation(taskId)!;
     return { taskId, traceId: updated.traceId, status: updated.status, selectedService: updated.selectedService,
@@ -279,7 +277,7 @@ export class ServiceOrchestrator {
     const timeoutMs=service.id==="software_factory"?config.softwareFactory.timeoutMs:5000;
     const response=await this.adapter.dispatchTask(typeof (this.adapter as any).registerLocal==="function"?service:service.endpoint,request,timeoutMs);
     if(!response.success)this.store.updateStatus(operation.taskId,"FAILED",undefined,`TRANSPORT_UNKNOWN: ${response.message}`,true);
-    else for(const event of response.events){if(event.type==="TASK_COMPLETED"&&event.payload.artifacts!==undefined)this.persistArtifacts(event,operation.workspaceId);this.store.processEvent(event);}
+    else this.processEvents(operation.taskId, response.events);
     return this.store.getOperation(operation.taskId)!;
   }
 
@@ -290,5 +288,7 @@ export class ServiceOrchestrator {
   getOperationStatus(taskId: string): ServiceOperation | null {
     return this.store.getOperation(taskId);
   }
-  private persistArtifacts(event:ServiceEvent,workspaceId?:string):void{if(!workspaceId)throw new Error("ARTIFACT_WORKSPACE_REQUIRED");if(!Array.isArray(event.payload.artifacts))throw new Error("INVALID_ARTIFACT_DESCRIPTOR");const plan=(getDb().prepare("SELECT id FROM plan_runs WHERE workspace_id=?").get(workspaceId) as any)?.id;for(const raw of event.payload.artifacts){if(!raw||typeof raw!=="object"||Array.isArray(raw))throw new Error("INVALID_ARTIFACT_DESCRIPTOR");const d=raw as any;if(typeof d.name!=="string"||typeof d.kind!=="string")throw new Error("INVALID_ARTIFACT_DESCRIPTOR");if(d.kind==="LINK"){if(typeof d.url!=="string")throw new Error("INVALID_ARTIFACT_DESCRIPTOR");this.artifacts.createLinkArtifact({workspaceId,planRunId:plan,operationTaskId:event.task_id,name:d.name,url:d.url});}else{if(!["FILE","TEXT","REPORT","DATA"].includes(d.kind)||typeof d.content_base64!=="string")throw new Error("INVALID_ARTIFACT_DESCRIPTOR");const content=Buffer.from(d.content_base64,"base64");this.artifacts.createFileArtifact({workspaceId,planRunId:plan,operationTaskId:event.task_id,kind:d.kind,name:d.name,mimeType:typeof d.mime_type==="string"?d.mime_type:undefined,relativePath:d.name,content});}}}
+  private processEvents(taskId:string, events:unknown):void {if(!Array.isArray(events)){this.store.updateStatus(taskId,"FAILED",undefined,"INVALID_SERVICE_EVENT");return;}for(const raw of events){const validation=this.store.validateEvent(raw,taskId);if(!validation.valid)continue;const event=validation.event;if(event.type==="TASK_COMPLETED"&&event.payload.artifacts!==undefined){try{this.persistArtifacts(event);}catch{this.store.updateStatus(taskId,"FAILED",undefined,"INVALID_ARTIFACT_DESCRIPTOR");return;}}this.store.processEvent(event);}}
+  private persistArtifacts(event:ServiceEvent):void {const operation=this.store.getOperation(event.task_id);const workspaceId=operation?.workspaceId;if(!workspaceId||!Array.isArray(event.payload.artifacts))throw new Error();const plan=(getDb().prepare("SELECT id FROM plan_runs WHERE workspace_id=?").get(workspaceId) as any)?.id;const inputs:ArtifactInput[]=event.payload.artifacts.map(raw=>{if(!raw||typeof raw!=="object"||Array.isArray(raw))throw new Error();const descriptor=raw as Record<string,unknown>;if(typeof descriptor.name!=="string"||!descriptor.name.trim()||typeof descriptor.kind!=="string"||!["FILE","TEXT","REPORT","DATA","LINK"].includes(descriptor.kind)||(descriptor.mime_type!==undefined&&typeof descriptor.mime_type!=="string"))throw new Error();const common={workspaceId,planRunId:plan,operationTaskId:event.task_id,kind:descriptor.kind as ArtifactKind,name:descriptor.name,mimeType:descriptor.mime_type as string|undefined};if(descriptor.kind==="LINK"){if(typeof descriptor.url!=="string")throw new Error();const url=new URL(descriptor.url);if(!["http:","https:"].includes(url.protocol))throw new Error();return{...common,url:url.href};}if(typeof descriptor.content_base64!=="string"||!this.isStrictBase64(descriptor.content_base64))throw new Error();return{...common,content:Buffer.from(descriptor.content_base64,"base64"),workingPath:event.service==="research_service"?descriptor.name:undefined};});if(inputs.length)this.artifacts.createBatch(inputs);}
+  private isStrictBase64(value:string):boolean {if(value.length%4!==0||!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value))return false;return Buffer.from(value,"base64").toString("base64")===value;}
 }

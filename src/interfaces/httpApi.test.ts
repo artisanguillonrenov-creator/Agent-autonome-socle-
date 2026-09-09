@@ -487,3 +487,22 @@ test("API plans: auth, list/detail/nodes, unknown et annulation sûre", async ()
     config.api.token="";response=await fetch(`${base}/api/plans`);assert.equal(response.status,503);
   } finally {config.api.token=previousToken;await new Promise<void>(resolve=>server.close(()=>resolve()));}
 });
+
+test("API workspaces couvre CRUD, artifacts, téléchargements et validation", async () => {
+  const previousToken=config.api.token;config.api.token="workspace-api-token";
+  const agent=new Agent({llm:new MockProvider(),embeddings:new LocalHashingEmbeddingProvider()});
+  const port=10000+Math.floor(Math.random()*10000),server=startHttpApi(agent,port),base=`http://localhost:${port}`;
+  const call=(path:string,init:RequestInit={})=>fetch(`${base}${path}`,{...init,headers:{"content-type":"application/json",authorization:`Bearer ${config.api.token}`,...init.headers}});
+  try {
+    assert.equal((await fetch(`${base}/api/workspaces`)).status,401);
+    const created=await call("/api/workspaces",{method:"POST",body:JSON.stringify({name:"API workspace"})});assert.equal(created.status,201);const workspace=await created.json() as {id:string};
+    assert.equal((await call("/api/workspaces")).status,200);assert.equal((await call(`/api/workspaces/${workspace.id}`)).status,200);assert.equal((await call("/api/workspaces/unknown")).status,404);
+    const upload=await call(`/api/workspaces/${workspace.id}/files`,{method:"POST",body:JSON.stringify({path:"hello.txt",contentBase64:"aGVsbG8=",mimeType:"text/plain"})});assert.equal(upload.status,201);const uploaded=await upload.json() as {artifact:{id:string}};
+    assert.equal((await call(`/api/workspaces/${workspace.id}/files`)).status,200);const content=await call(`/api/workspaces/${workspace.id}/files/content?path=hello.txt`);assert.equal(await content.text(),"hello");
+    assert.equal((await call(`/api/workspaces/${workspace.id}/artifacts`)).status,200);assert.equal((await call(`/api/artifacts/${uploaded.artifact.id}`)).status,200);assert.equal(await (await call(`/api/artifacts/${uploaded.artifact.id}?download=1`)).text(),"hello");assert.equal((await call("/api/artifacts/unknown")).status,404);
+    for(const path of ["../escape","/tmp/escape"])assert.equal((await call(`/api/workspaces/${workspace.id}/files`,{method:"POST",body:JSON.stringify({path,contentBase64:"eA=="})})).status,400);
+    assert.equal((await call(`/api/workspaces/${workspace.id}/files`,{method:"POST",body:JSON.stringify({path:"bad",contentBase64:"not base64"})})).status,400);
+    assert.equal((await call(`/api/workspaces/${workspace.id}/files?path=hello.txt`,{method:"DELETE"})).status,200);
+    config.api.token="";assert.equal((await fetch(`${base}/api/workspaces`)).status,503);
+  } finally {config.api.token=previousToken;await new Promise<void>(resolve=>server.close(()=>resolve()));}
+});

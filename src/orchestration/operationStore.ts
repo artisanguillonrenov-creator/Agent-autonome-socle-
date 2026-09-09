@@ -67,6 +67,29 @@ function validatePendingTaskRequest(
 }
 
 export class OperationStore {
+  validateEvent(event: unknown, expectedTaskId?: string): { valid: true; event: ServiceEvent } | { valid: false; duplicate: boolean; reason: string } {
+    if (!isRecord(event)) return { valid: false, duplicate: false, reason: "EVENT_NOT_OBJECT" };
+    const types = new Set(["TASK_ACCEPTED", "TASK_REJECTED", "TASK_PROGRESS", "NEEDS_INPUT", "NEEDS_PERMISSION", "TASK_COMPLETED", "TASK_FAILED"]);
+    if (typeof event.schema_version !== "string" || !event.schema_version.trim() ||
+      typeof event.event_id !== "string" || !event.event_id.trim() ||
+      typeof event.task_id !== "string" || !event.task_id.trim() ||
+      (expectedTaskId !== undefined && event.task_id !== expectedTaskId) ||
+      typeof event.trace_id !== "string" || !event.trace_id.trim() ||
+      typeof event.service !== "string" || !event.service.trim() ||
+      !Number.isSafeInteger(event.sequence) || (event.sequence as number) <= 0 ||
+      typeof event.type !== "string" || !types.has(event.type) ||
+      !Number.isFinite(event.timestamp) || (event.timestamp as number) < 0 ||
+      !isRecord(event.payload)) return { valid: false, duplicate: false, reason: "INVALID_SERVICE_EVENT" };
+    const candidate = event as unknown as ServiceEvent;
+    if (getDb().prepare("SELECT 1 FROM processed_service_events WHERE event_id=?").get(candidate.event_id)) return { valid: false, duplicate: true, reason: "DUPLICATE_EVENT" };
+    const operation = this.getOperation(candidate.task_id);
+    if (!operation || operation.traceId !== candidate.trace_id) return { valid: false, duplicate: false, reason: "EVENT_OPERATION_MISMATCH" };
+    const serviceMatches = operation.selectedService === "none" || operation.selectedService === candidate.service || (operation.selectedService.includes("factory") && candidate.service.includes("factory"));
+    if (!serviceMatches) return { valid: false, duplicate: false, reason: "EVENT_SERVICE_MISMATCH" };
+    const last = getDb().prepare("SELECT MAX(sequence) max_sequence FROM processed_service_events WHERE task_id=?").get(candidate.task_id) as {max_sequence:number|null};
+    if (candidate.sequence <= (last?.max_sequence ?? 0)) return { valid: false, duplicate: false, reason: "EVENT_SEQUENCE_INVALID" };
+    return { valid: true, event: candidate };
+  }
   createOperation(op: Omit<ServiceOperation, "createdAt" | "updatedAt" | "riskLevel" | "approvalState" | "executionMode"> &
     Partial<Pick<ServiceOperation, "riskLevel" | "approvalState" | "executionMode">>): ServiceOperation {
     const db = getDb();
@@ -430,6 +453,9 @@ export class OperationStore {
 
   processEvent(event: ServiceEvent): { duplicate: boolean; applied: boolean } {
     const db = getDb();
+
+    const validation = this.validateEvent(event, event?.task_id);
+    if (!validation.valid) return { duplicate: validation.duplicate, applied: false };
 
     // 1. Deduplication by event_id
     const existingEvt = db.prepare("SELECT event_id FROM processed_service_events WHERE event_id = ?").get(event.event_id);
