@@ -979,26 +979,27 @@ async function renderMemoryView() {
 // 7. SKILLS VIEW
 async function renderSkillsView() {
   const container = document.getElementById('view-skills');
-  container.innerHTML = `<div class="card"><div class="card-title">Chargement des skills...</div></div>`;
-
+  container.replaceChildren();
+  const heading = document.createElement('h2'); heading.textContent = 'Skills & Workflows'; container.appendChild(heading);
   try {
-    const skillsData = await fetchApi('/api/skills');
-    const skills = Array.isArray(skillsData) ? skillsData : Array.isArray(skillsData?.skills) ? skillsData.skills : [];
-
-    container.innerHTML = `
-      <h2>Compétences Internes (Skills)</h2>
-      <div class="card-grid" style="margin-top: 12px;">
-        ${skills.length === 0 ? '<div class="card"><div class="card-subtext">Aucun skill trouvé.</div></div>' : skills.map((s) => `
-          <div class="card">
-            <span class="card-title" style="color: var(--accent-primary);">${s.name}</span>
-            <div>${s.description}</div>
-          </div>
-        `).join('')}
-      </div>
-    `;
-  } catch (err) {
-    container.innerHTML = `<div class="card" style="border-color: var(--accent-danger);"><div class="card-title" style="color: var(--accent-danger);">${err.message}</div></div>`;
-  }
+    const [skillsData, workflowsData] = await Promise.all([fetchApi('/api/skills'), fetchApi('/api/workflows')]);
+    const skills = Array.isArray(skillsData) ? skillsData : [];
+    const workflows = Array.isArray(workflowsData) ? workflowsData : [];
+    const summary = document.createElement('div'); summary.className = 'card-grid';
+    const counts = [
+      ['Disponibles', skills.filter(s => s.availability === 'AVAILABLE' && s.enabled).length],
+      ['Désactivés', skills.filter(s => !s.enabled || s.availability === 'DISABLED').length],
+      ['Internes', skills.filter(s => s.kind === 'INTERNAL' || s.kind === 'SYSTEM').length],
+      ['Futurs', skills.filter(s => s.kind === 'FUTURE').length],
+      ['Workflows actifs', workflows.filter(w => w.status === 'ACTIVE').length],
+    ];
+    counts.forEach(([label, value]) => { const card=document.createElement('div');card.className='card';const title=document.createElement('div');title.className='card-title';title.textContent=label;const number=document.createElement('div');number.className='card-value';number.textContent=String(value);card.append(title,number);summary.appendChild(card); });
+    container.appendChild(summary);
+    const categories=['Contrôle','Recherche','Fichiers','Communication','Technique','Workflows','Interne','Futur'];
+    categories.forEach(category => {const items=skills.filter(s=>s.category===category);if(!items.length)return;const title=document.createElement('h3');title.textContent=category;container.appendChild(title);const grid=document.createElement('div');grid.className='card-grid';items.forEach(s=>{const card=document.createElement('div');card.className='card';const name=document.createElement('div');name.className='card-title';name.textContent=s.displayName||s.name;const description=document.createElement('div');description.textContent=s.description;const state=document.createElement('div');state.className='card-subtext';state.textContent=`${s.kind} · ${s.availability} · risque ${s.risk}${s.enabled?'':' · désactivé'}`;card.append(name,description,state);grid.appendChild(card);});container.appendChild(grid);});
+    const workflowTitle=document.createElement('h3');workflowTitle.textContent='Workflows réutilisables';container.appendChild(workflowTitle);
+    workflows.forEach(w=>{const card=document.createElement('div');card.className='card';const name=document.createElement('div');name.className='card-title';name.textContent=`${w.name} · v${w.version}`;const detail=document.createElement('div');detail.textContent=w.description;const state=document.createElement('div');state.className='card-subtext';state.textContent=`${w.source} · ${w.status} · ${w.successCount} succès${w.createdFromPlanRunId?` · plan ${w.createdFromPlanRunId}`:''}`;card.append(name,detail,state);if(['DRAFT','ACTIVE','DISABLED'].includes(w.status)){const button=document.createElement('button');button.className='btn btn-primary btn-sm';button.textContent=w.status==='ACTIVE'?'Désactiver':'Approuver';button.addEventListener('click',async()=>{await fetchApi(`/api/workflows/${encodeURIComponent(w.id)}/${w.status==='ACTIVE'?'disable':'approve'}`,{method:'POST'});await renderSkillsView();});card.appendChild(button);}container.appendChild(card);});
+  } catch (err) { const card=document.createElement('div');card.className='card';const message=document.createElement('div');message.className='card-title';message.textContent=err.message;card.appendChild(message);container.appendChild(card); }
 }
 
 // 8. MODÈLES IA VIEW (BULLETPROOF & SAFE ARRAY CONTRACTS)

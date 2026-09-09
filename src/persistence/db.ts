@@ -128,7 +128,38 @@ export function getDb(): Database.Database {
       plan_run_id TEXT, plan_node_id TEXT, operation_task_id TEXT, specialist_id TEXT,
       event_type TEXT NOT NULL, level TEXT NOT NULL, message TEXT NOT NULL, metadata_json TEXT
     );
+    CREATE TABLE IF NOT EXISTS skill_preferences (
+      skill_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)), updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS workflows (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, description TEXT NOT NULL, status TEXT NOT NULL,
+      source TEXT NOT NULL, version INTEGER NOT NULL, input_schema_json TEXT NOT NULL,
+      objective_template TEXT NOT NULL, steps_json TEXT NOT NULL, created_from_plan_run_id TEXT,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, last_success_at INTEGER, success_count INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS workflow_executions (
+      invocation_id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, workflow_version INTEGER NOT NULL,
+      result_type TEXT NOT NULL CHECK(result_type IN ('PLAN_RUN','SCHEDULE')), result_id TEXT NOT NULL,
+      input_json TEXT NOT NULL, created_at INTEGER NOT NULL, success_recorded_at INTEGER
+    );
   `);
+
+  // Additive replacement of the short-lived V1 workflow execution schema. The
+  // relation remains authoritative while allowing schedule results as well as plans.
+  const workflowExecutionColumns = new Set(
+    (db.pragma("table_info(workflow_executions)") as Array<{ name:string }>).map(column=>column.name),
+  );
+  if(workflowExecutionColumns.has("plan_run_id")) db.transaction(()=>{
+    db.exec("ALTER TABLE workflow_executions RENAME TO workflow_executions_legacy");
+    db.exec(`CREATE TABLE workflow_executions (
+      invocation_id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, workflow_version INTEGER NOT NULL,
+      result_type TEXT NOT NULL CHECK(result_type IN ('PLAN_RUN','SCHEDULE')), result_id TEXT NOT NULL,
+      input_json TEXT NOT NULL, created_at INTEGER NOT NULL, success_recorded_at INTEGER
+    )`);
+    db.exec(`INSERT INTO workflow_executions(invocation_id,workflow_id,workflow_version,result_type,result_id,input_json,created_at,success_recorded_at)
+      SELECT invocation_id,workflow_id,workflow_version,'PLAN_RUN',plan_run_id,'{}',created_at,success_recorded_at FROM workflow_executions_legacy`);
+    db.exec("DROP TABLE workflow_executions_legacy");
+  })();
 
   const planNodeColumns = new Set(
     (db.pragma("table_info(plan_nodes)") as Array<{ name: string }>).map((column) => column.name),

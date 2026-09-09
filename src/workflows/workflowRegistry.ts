@@ -1,0 +1,57 @@
+import { randomUUID } from "node:crypto";
+import { getDb } from "../persistence/db.js";
+import type { Planner, PlanStepSpec, PlanRun } from "../planning/planner.js";
+import type { ServiceRegistry } from "../orchestration/serviceRegistry.js";
+import { config } from "../config.js";
+
+export type WorkflowStatus = "DRAFT" | "ACTIVE" | "DISABLED" | "ARCHIVED";
+export type WorkflowSource = "BUILTIN" | "LEARNED" | "USER";
+export interface Workflow {
+  id:string; name:string; description:string; status:WorkflowStatus; source:WorkflowSource; version:number;
+  inputSchema:Record<string,unknown>; objectiveTemplate:string; steps:PlanStepSpec[];
+  createdFromPlanRunId?:string; createdAt:number; updatedAt:number; lastSuccessAt?:number; successCount:number;
+}
+const row=(r:any):Workflow=>({id:r.id,name:r.name,description:r.description,status:r.status,source:r.source,version:r.version,inputSchema:JSON.parse(r.input_schema_json),objectiveTemplate:r.objective_template,steps:JSON.parse(r.steps_json),createdFromPlanRunId:r.created_from_plan_run_id??undefined,createdAt:r.created_at,updatedAt:r.updated_at,lastSuccessAt:r.last_success_at??undefined,successCount:r.success_count});
+const forbiddenKey=/^(?:task_?id|trace_?id|operation_?(?:id|task_?id)|plan_?(?:run_?id|node_?id)|workspace_?(?:id|path)|artifact_?(?:id|content)|authorization|token|api_?key|secret|password|bearer|\.env)$/i;
+const executionId=/\b(?:task|trace|operation)-[A-Za-z0-9._:-]+/gi;
+function safe(value:unknown):unknown {
+  if(Array.isArray(value))return value.map(safe);
+  if(value&&typeof value==="object")return Object.fromEntries(Object.entries(value as Record<string,unknown>).filter(([key])=>!forbiddenKey.test(key)).map(([key,item])=>[key,safe(item)]));
+  if(typeof value!=="string")return value;
+  const root=config.workspace.root.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+  if(new RegExp(root,"i").test(value)||/authorization|bearer\s+|api[_-]?key|token|secret|password|\.env/i.test(value))return "[redacted]";
+  return value.replace(executionId,"[redacted]").replace(/(^|\s)(?:\/[A-Za-z0-9._/-]+|[A-Za-z]:\\[^\s]+)/g,"$1[redacted]");
+}
+function substitute(value:unknown,inputs:Record<string,unknown>,known:Set<string>):unknown {
+  if(Array.isArray(value))return value.map(v=>substitute(v,inputs,known));
+  if(value&&typeof value==="object")return Object.fromEntries(Object.entries(value as Record<string,unknown>).map(([k,v])=>[k,substitute(v,inputs,known)]));
+  if(typeof value!=="string")return value;
+  const exact=value.match(/^{{\s*([A-Za-z_][A-Za-z0-9_]*)\s*}}$/);
+  if(exact){if(!known.has(exact[1]))throw new Error(`UNKNOWN_WORKFLOW_VARIABLE: ${exact[1]}`);return inputs[exact[1]]??"";}
+  return value.replace(/{{\s*([A-Za-z_][A-Za-z0-9_]*)\s*}}/g,(_,key)=>{if(!known.has(key))throw new Error(`UNKNOWN_WORKFLOW_VARIABLE: ${key}`);const v=inputs[key];if(v!==undefined&&v!==null&&!["string","number","boolean"].includes(typeof v))throw new Error("WORKFLOW_INPUT_INVALID");return v===undefined?"":String(v);});
+}
+function validateInputs(schema:Record<string,unknown>,inputs:Record<string,unknown>):void {
+  const properties=(schema.properties&&typeof schema.properties==="object"&&!Array.isArray(schema.properties)?schema.properties:{}) as Record<string,{type?:string}>;
+  if(schema.additionalProperties===false)for(const key of Object.keys(inputs))if(!properties[key])throw new Error("WORKFLOW_INPUT_INVALID");
+  for(const key of (Array.isArray(schema.required)?schema.required:[]))if(typeof key!=="string"||inputs[key]===undefined)throw new Error("WORKFLOW_INPUT_INVALID");
+  for(const [key,value] of Object.entries(inputs)){const type=properties[key]?.type;if(!type)continue;const valid=type==="array"?Array.isArray(value):type==="object"?!!value&&typeof value==="object"&&!Array.isArray(value):type==="integer"?Number.isInteger(value):["string","number","boolean"].includes(type)?typeof value===type:false;if(!valid)throw new Error("WORKFLOW_INPUT_INVALID");}
+}
+function canonical(value:unknown):unknown {if(Array.isArray(value))return value.map(canonical);if(value&&typeof value==="object")return Object.fromEntries(Object.keys(value as object).sort().map(key=>[key,canonical((value as Record<string,unknown>)[key])]));return value;}
+const workflowCapabilities=(workflow:Workflow)=>workflow.name==="monitor_web"?["deep_research"]:workflow.steps.map(step=>step.capability);
+export class WorkflowRegistry {
+  constructor(){this.ensureBuiltins();this.reconcileSuccesses();}
+  private insert(w:Omit<Workflow,"createdAt"|"updatedAt"|"successCount">){const now=Date.now();getDb().prepare(`INSERT OR IGNORE INTO workflows(id,name,description,status,source,version,input_schema_json,objective_template,steps_json,created_from_plan_run_id,created_at,updated_at,success_count)VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0)`).run(w.id,w.name,w.description,w.status,w.source,w.version,JSON.stringify(w.inputSchema),w.objectiveTemplate,JSON.stringify(w.steps),w.createdFromPlanRunId??null,now,now);}
+  private ensureBuiltins(){
+    this.insert({id:"compare_sources",name:"compare_sources",description:"Compare des sources par recherche approfondie.",status:"ACTIVE",source:"BUILTIN",version:1,inputSchema:{type:"object",properties:{topic:{type:"string"},queries:{type:"array"}},required:["topic"],additionalProperties:false},objectiveTemplate:"Comparer les sources sur {{topic}}",steps:[{local_id:"research",title:"Rechercher et comparer les sources",capability:"deep_research",objective:"Comparer les sources sur {{topic}}",context:{queries:"{{queries}}"},constraints:[],priority:"medium",depends_on:[]}]});
+    this.insert({id:"monitor_web",name:"monitor_web",description:"Surveille le Web au moyen du WATCH existant.",status:"ACTIVE",source:"BUILTIN",version:1,inputSchema:{type:"object",properties:{title:{type:"string"},objective:{type:"string"},repeatIntervalMs:{type:"integer"},firstRunAt:{type:"integer"},queries:{type:"array"}},required:["title","objective","repeatIntervalMs","firstRunAt"],additionalProperties:false},objectiveTemplate:"{{objective}}",steps:[]});
+  }
+  reconcileSuccesses():number {const db=getDb();return db.transaction(()=>{const pending=db.prepare(`SELECT e.invocation_id,e.workflow_id FROM workflow_executions e JOIN plan_runs p ON p.id=e.result_id WHERE e.result_type='PLAN_RUN' AND p.status='COMPLETED' AND e.success_recorded_at IS NULL`).all() as Array<{invocation_id:string;workflow_id:string}>;for(const e of pending){const now=Date.now();if(db.prepare("UPDATE workflow_executions SET success_recorded_at=? WHERE invocation_id=? AND success_recorded_at IS NULL").run(now,e.invocation_id).changes===1)db.prepare("UPDATE workflows SET success_count=success_count+1,last_success_at=?,updated_at=? WHERE id=?").run(now,now,e.workflow_id);}return pending.length;})();}
+  list(){this.reconcileSuccesses();return (getDb().prepare("SELECT * FROM workflows ORDER BY name").all() as any[]).map(row);}
+  get(idOrName:string){this.reconcileSuccesses();const r=getDb().prepare("SELECT * FROM workflows WHERE id=? OR name=?").get(idOrName,idOrName);return r?row(r):null;}
+  setStatus(id:string,status:WorkflowStatus,services?:ServiceRegistry){const current=this.get(id);if(!current)return false;const allowed:Record<WorkflowStatus,WorkflowStatus[]>={DRAFT:["ACTIVE"],ACTIVE:["DISABLED","ARCHIVED"],DISABLED:["ACTIVE","ARCHIVED"],ARCHIVED:[]};if(!allowed[current.status].includes(status))throw new Error("WORKFLOW_STATUS_TRANSITION_INVALID");if(status==="ACTIVE"){if(!services)throw new Error("WORKFLOW_CAPABILITY_UNAVAILABLE");for(const capability of workflowCapabilities(current))if(!services.findServiceForCapability(capability))throw new Error("WORKFLOW_CAPABILITY_UNAVAILABLE");}return getDb().prepare("UPDATE workflows SET status=?,updated_at=? WHERE id=?").run(status,Date.now(),id).changes===1;}
+  compile(workflow:Workflow,inputs:Record<string,unknown>):{objective:string;steps:PlanStepSpec[]}{validateInputs(workflow.inputSchema,inputs);const known=new Set(Object.keys((workflow.inputSchema.properties as object)??{}));return {objective:substitute(workflow.objectiveTemplate,inputs,known) as string,steps:substitute(workflow.steps,inputs,known) as PlanStepSpec[]};}
+  private executeOnce<T>(workflow:Workflow,inputs:Record<string,unknown>,invocationId:string,resultType:"PLAN_RUN"|"SCHEDULE",lookup:(id:string)=>T|null,create:()=>T,resultId:(result:T)=>string):T {if(!invocationId)throw new Error("WORKFLOW_INVOCATION_ID_REQUIRED");const inputJson=JSON.stringify(canonical(inputs)),db=getDb();return db.transaction(()=>{const existing=db.prepare("SELECT workflow_id,workflow_version,result_type,result_id,input_json FROM workflow_executions WHERE invocation_id=?").get(invocationId) as {workflow_id:string;workflow_version:number;result_type:string;result_id:string;input_json:string}|undefined;if(existing){if(existing.workflow_id!==workflow.id||existing.workflow_version!==workflow.version||existing.result_type!==resultType||existing.input_json!==inputJson)throw new Error("WORKFLOW_INVOCATION_CONFLICT");const result=lookup(existing.result_id);if(!result)throw new Error("WORKFLOW_EXECUTION_CORRUPT");return result;}const result=create();db.prepare("INSERT INTO workflow_executions(invocation_id,workflow_id,workflow_version,result_type,result_id,input_json,created_at) VALUES(?,?,?,?,?,?,?)").run(invocationId,workflow.id,workflow.version,resultType,resultId(result),inputJson,Date.now());return result;})();}
+  execute(idOrName:string,inputs:Record<string,unknown>,planner:Planner,services:ServiceRegistry,invocationId:string):PlanRun {const workflow=this.get(idOrName);if(!workflow||workflow.status!=="ACTIVE")throw new Error("WORKFLOW_NOT_ACTIVE");const compiled=this.compile(workflow,inputs);return this.executeOnce(workflow,inputs,invocationId,"PLAN_RUN",id=>planner.getRun(id),()=>planner.createExecutionPlan(compiled.objective,compiled.steps,services),run=>run.id);}
+  executeSchedule<T extends {id:string}>(idOrName:string,inputs:Record<string,unknown>,services:ServiceRegistry,invocationId:string,lookup:(id:string)=>T|null,create:()=>T):T {const workflow=this.get(idOrName);if(!workflow||workflow.status!=="ACTIVE")throw new Error("WORKFLOW_NOT_ACTIVE");this.compile(workflow,inputs);for(const capability of workflowCapabilities(workflow))if(!services.findServiceForCapability(capability))throw new Error("WORKFLOW_CAPABILITY_UNAVAILABLE");return this.executeOnce(workflow,inputs,invocationId,"SCHEDULE",lookup,create,result=>result.id);}
+  learnFromPlan(planRunId:string,planner:Planner):Workflow {const run=planner.getRun(planRunId),nodes=planner.nodes(planRunId);if(!run||run.status!=="COMPLETED"||nodes.some(n=>n.status==="in_progress"||n.status==="waiting"||n.status==="pending"))throw new Error("PLAN_NOT_LEARNABLE");const index=new Map(nodes.map((n,i)=>[n.id,`step_${i+1}`]));const steps=nodes.map((n,i)=>({local_id:`step_${i+1}`,title:String(safe(n.title)),capability:n.capability!,objective:String(safe(n.objective)),context:safe(n.context) as Record<string,unknown>,constraints:safe(n.constraints) as string[],priority:n.priority!,depends_on:n.dependencies.map(d=>index.get(d)).filter((x):x is string=>!!x)}));const id=randomUUID();this.insert({id,name:`learned_${id.slice(0,8)}`,description:"Workflow appris depuis une mission réussie.",status:"DRAFT",source:"LEARNED",version:1,inputSchema:{type:"object",properties:{},additionalProperties:false},objectiveTemplate:"Mission réutilisable",steps,createdFromPlanRunId:planRunId});return this.get(id)!;}
+}
