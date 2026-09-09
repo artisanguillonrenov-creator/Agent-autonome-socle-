@@ -8,12 +8,12 @@ import { ServiceRegistry } from "../orchestration/serviceRegistry.js";
 import { ServiceOrchestrator } from "../orchestration/serviceOrchestrator.js";
 import { BackgroundRunner } from "../autonomy/backgroundRunner.js";
 import type { ServiceAdapter } from "../orchestration/serviceAdapter.js";
-import type { ServiceEvent, TaskRequest } from "../orchestration/contract.js";
+import { CONTRACT_SCHEMA_VERSION, type ServiceEvent, type TaskRequest } from "../orchestration/contract.js";
 import type { ReplanningEngine, ReplanningFacts } from "./replanningEngine.js";
 
 const step=(id:string,deps:string[]=[],capability="cap"):PlanStepSpec=>({local_id:id,title:id,capability,objective:`do ${id}`,context:{},constraints:[],priority:"medium",depends_on:deps});
 let sequence=0;
-function event(request:TaskRequest,type:ServiceEvent["type"],payload:Record<string,unknown>):ServiceEvent{return{schema_version:"1",event_id:`event-${++sequence}`,task_id:request.task_id,trace_id:request.trace_id,service:"svc",sequence:1,type,timestamp:Date.now(),payload};}
+function event(request:TaskRequest,type:ServiceEvent["type"],payload:Record<string,unknown>):ServiceEvent{return{schema_version:CONTRACT_SCHEMA_VERSION,event_id:`event-${++sequence}`,task_id:request.task_id,trace_id:request.trace_id,service:"svc",sequence:1,type,timestamp:Date.now(),payload};}
 function setup(options:{risk?:"LOW"|"HIGH";dispatch?:(request:TaskRequest)=>ServiceEvent}={}){
   closeDb();config.db.path=":memory:";const registry=new ServiceRegistry("/missing");registry.register({id:"svc",name:"svc",enabled:true,endpoint:"local",capabilities:["cap"],priority:1,riskByCapability:{cap:options.risk??"LOW"}});let calls=0;
   const adapter={dispatchTask:async(_endpoint:string,request:TaskRequest)=>{calls++;return{success:true as const,events:[options.dispatch?.(request)??event(request,"TASK_COMPLETED",{value:request.objective})]};}} as ServiceAdapter;

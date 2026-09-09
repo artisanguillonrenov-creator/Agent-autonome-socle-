@@ -1,5 +1,5 @@
 import { getDb } from "../persistence/db.js";
-import type { ApprovalState, ExecutionMode, OperationStatus, RiskLevel, ServiceEvent, TaskRequest } from "./contract.js";
+import { CONTRACT_SCHEMA_VERSION, type ApprovalState, type ExecutionMode, type OperationStatus, type RiskLevel, type ServiceEvent, type TaskRequest } from "./contract.js";
 
 export interface ServiceOperation {
   taskId: string;
@@ -40,6 +40,22 @@ const ALLOWED_TRANSITIONS: Record<OperationStatus, OperationStatus[]> = {
   CANCELLED: [],
 };
 
+const TERMINAL_STATUSES = new Set<OperationStatus>(["COMPLETED", "REJECTED", "CANCELLED", "FAILED"]);
+
+function statusForEvent(type: ServiceEvent["type"]): OperationStatus {
+  if (type === "TASK_ACCEPTED" || type === "TASK_PROGRESS") return "RUNNING";
+  if (type === "TASK_REJECTED") return "REJECTED";
+  if (type === "NEEDS_INPUT") return "WAITING_INPUT";
+  if (type === "NEEDS_PERMISSION") return "WAITING_PERMISSION";
+  if (type === "TASK_COMPLETED") return "COMPLETED";
+  return "FAILED";
+}
+
+export function canTransitionOperation(current: OperationStatus, next: OperationStatus): boolean {
+  if (current === next) return !TERMINAL_STATUSES.has(current);
+  return (ALLOWED_TRANSITIONS[current] ?? []).includes(next);
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -69,8 +85,9 @@ function validatePendingTaskRequest(
 export class OperationStore {
   validateEvent(event: unknown, expectedTaskId?: string): { valid: true; event: ServiceEvent } | { valid: false; duplicate: boolean; reason: string } {
     if (!isRecord(event)) return { valid: false, duplicate: false, reason: "EVENT_NOT_OBJECT" };
+    if (typeof event.event_id === "string" && event.event_id.trim() && getDb().prepare("SELECT 1 FROM processed_service_events WHERE event_id=?").get(event.event_id)) return { valid: false, duplicate: true, reason: "DUPLICATE_EVENT" };
     const types = new Set(["TASK_ACCEPTED", "TASK_REJECTED", "TASK_PROGRESS", "NEEDS_INPUT", "NEEDS_PERMISSION", "TASK_COMPLETED", "TASK_FAILED"]);
-    if (typeof event.schema_version !== "string" || !event.schema_version.trim() ||
+    if (event.schema_version !== CONTRACT_SCHEMA_VERSION ||
       typeof event.event_id !== "string" || !event.event_id.trim() ||
       typeof event.task_id !== "string" || !event.task_id.trim() ||
       (expectedTaskId !== undefined && event.task_id !== expectedTaskId) ||
@@ -81,13 +98,13 @@ export class OperationStore {
       !Number.isFinite(event.timestamp) || (event.timestamp as number) < 0 ||
       !isRecord(event.payload)) return { valid: false, duplicate: false, reason: "INVALID_SERVICE_EVENT" };
     const candidate = event as unknown as ServiceEvent;
-    if (getDb().prepare("SELECT 1 FROM processed_service_events WHERE event_id=?").get(candidate.event_id)) return { valid: false, duplicate: true, reason: "DUPLICATE_EVENT" };
     const operation = this.getOperation(candidate.task_id);
     if (!operation || operation.traceId !== candidate.trace_id) return { valid: false, duplicate: false, reason: "EVENT_OPERATION_MISMATCH" };
     const serviceMatches = operation.selectedService === "none" || operation.selectedService === candidate.service || (operation.selectedService.includes("factory") && candidate.service.includes("factory"));
     if (!serviceMatches) return { valid: false, duplicate: false, reason: "EVENT_SERVICE_MISMATCH" };
     const last = getDb().prepare("SELECT MAX(sequence) max_sequence FROM processed_service_events WHERE task_id=?").get(candidate.task_id) as {max_sequence:number|null};
     if (candidate.sequence <= (last?.max_sequence ?? 0)) return { valid: false, duplicate: false, reason: "EVENT_SEQUENCE_INVALID" };
+    if (!canTransitionOperation(operation.status, statusForEvent(candidate.type))) return { valid: false, duplicate: false, reason: "EVENT_STATE_TRANSITION_INVALID" };
     return { valid: true, event: candidate };
   }
   createOperation(op: Omit<ServiceOperation, "createdAt" | "updatedAt" | "riskLevel" | "approvalState" | "executionMode"> &
@@ -184,9 +201,11 @@ export class OperationStore {
     if (currentOp.status === status) {
       // Direct result update on same status allowed
     } else {
-      const allowed = ALLOWED_TRANSITIONS[currentOp.status] || [];
-      if (!allowed.includes(status)) return false;
+      if (!canTransitionOperation(currentOp.status, status)) return false;
       if (currentOp.status === "FAILED" && !currentOp.retryable) return false;
+    }
+    if (currentOp.status === status && !canTransitionOperation(currentOp.status, status)) {
+      return false;
     }
 
     const db = getDb();
