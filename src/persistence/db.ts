@@ -111,6 +111,18 @@ export function getDb(): Database.Database {
       operation_task_id TEXT, dedupe_key TEXT UNIQUE, created_at INTEGER NOT NULL,
       read_at INTEGER
     );
+
+    CREATE TABLE IF NOT EXISTS workspaces (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_type TEXT NOT NULL,
+      owner_id TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_owner ON workspaces(owner_type, owner_id);
+    CREATE TABLE IF NOT EXISTS artifacts (
+      id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, plan_run_id TEXT,
+      operation_task_id TEXT, kind TEXT NOT NULL, name TEXT NOT NULL, mime_type TEXT,
+      relative_path TEXT, external_url TEXT, size_bytes INTEGER, sha256 TEXT,
+      metadata_json TEXT, created_at INTEGER NOT NULL
+    );
   `);
 
   const planNodeColumns = new Set(
@@ -175,12 +187,16 @@ export function getDb(): Database.Database {
     cancel_requested_at: "INTEGER",
     schedule_task_id: "TEXT",
     watch_processed_at: "INTEGER",
+    workspace_id: "TEXT",
   };
   for (const [column, definition] of Object.entries(missingOperationColumns)) {
     if (!operationColumns.has(column)) {
       db.exec(`ALTER TABLE service_operations ADD COLUMN ${column} ${definition}`);
     }
   }
+
+  const planRunColumns = new Set((db.pragma("table_info(plan_runs)") as Array<{name:string}>).map(c=>c.name));
+  if (!planRunColumns.has("workspace_id")) db.exec("ALTER TABLE plan_runs ADD COLUMN workspace_id TEXT");
 
   const taskColumns = new Set(
     (db.pragma("table_info(tasks)") as Array<{ name: string }>).map((column) => column.name),

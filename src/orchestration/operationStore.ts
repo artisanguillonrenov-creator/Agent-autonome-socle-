@@ -1,5 +1,5 @@
 import { getDb } from "../persistence/db.js";
-import type { ApprovalState, ExecutionMode, OperationStatus, RiskLevel, ServiceEvent, TaskRequest } from "./contract.js";
+import { CONTRACT_SCHEMA_VERSION, type ApprovalState, type ExecutionMode, type OperationStatus, type RiskLevel, type ServiceEvent, type TaskRequest } from "./contract.js";
 
 export interface ServiceOperation {
   taskId: string;
@@ -23,6 +23,7 @@ export interface ServiceOperation {
   finishedAt?: number;
   cancelRequestedAt?: number;
   scheduleTaskId?: string;
+  workspaceId?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -38,6 +39,22 @@ const ALLOWED_TRANSITIONS: Record<OperationStatus, OperationStatus[]> = {
   FAILED: ["RUNNING", "DISPATCHING"], // Terminal unless retryable
   CANCELLED: [],
 };
+
+const TERMINAL_STATUSES = new Set<OperationStatus>(["COMPLETED", "REJECTED", "CANCELLED", "FAILED"]);
+
+function statusForEvent(type: ServiceEvent["type"]): OperationStatus {
+  if (type === "TASK_ACCEPTED" || type === "TASK_PROGRESS") return "RUNNING";
+  if (type === "TASK_REJECTED") return "REJECTED";
+  if (type === "NEEDS_INPUT") return "WAITING_INPUT";
+  if (type === "NEEDS_PERMISSION") return "WAITING_PERMISSION";
+  if (type === "TASK_COMPLETED") return "COMPLETED";
+  return "FAILED";
+}
+
+export function canTransitionOperation(current: OperationStatus, next: OperationStatus): boolean {
+  if (current === next) return !TERMINAL_STATUSES.has(current);
+  return (ALLOWED_TRANSITIONS[current] ?? []).includes(next);
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -66,6 +83,30 @@ function validatePendingTaskRequest(
 }
 
 export class OperationStore {
+  validateEvent(event: unknown, expectedTaskId?: string): { valid: true; event: ServiceEvent } | { valid: false; duplicate: boolean; reason: string } {
+    if (!isRecord(event)) return { valid: false, duplicate: false, reason: "EVENT_NOT_OBJECT" };
+    if (typeof event.event_id === "string" && event.event_id.trim() && getDb().prepare("SELECT 1 FROM processed_service_events WHERE event_id=?").get(event.event_id)) return { valid: false, duplicate: true, reason: "DUPLICATE_EVENT" };
+    const types = new Set(["TASK_ACCEPTED", "TASK_REJECTED", "TASK_PROGRESS", "NEEDS_INPUT", "NEEDS_PERMISSION", "TASK_COMPLETED", "TASK_FAILED"]);
+    if (event.schema_version !== CONTRACT_SCHEMA_VERSION ||
+      typeof event.event_id !== "string" || !event.event_id.trim() ||
+      typeof event.task_id !== "string" || !event.task_id.trim() ||
+      (expectedTaskId !== undefined && event.task_id !== expectedTaskId) ||
+      typeof event.trace_id !== "string" || !event.trace_id.trim() ||
+      typeof event.service !== "string" || !event.service.trim() ||
+      !Number.isSafeInteger(event.sequence) || (event.sequence as number) <= 0 ||
+      typeof event.type !== "string" || !types.has(event.type) ||
+      !Number.isFinite(event.timestamp) || (event.timestamp as number) < 0 ||
+      !isRecord(event.payload)) return { valid: false, duplicate: false, reason: "INVALID_SERVICE_EVENT" };
+    const candidate = event as unknown as ServiceEvent;
+    const operation = this.getOperation(candidate.task_id);
+    if (!operation || operation.traceId !== candidate.trace_id) return { valid: false, duplicate: false, reason: "EVENT_OPERATION_MISMATCH" };
+    const serviceMatches = operation.selectedService === "none" || operation.selectedService === candidate.service || (operation.selectedService.includes("factory") && candidate.service.includes("factory"));
+    if (!serviceMatches) return { valid: false, duplicate: false, reason: "EVENT_SERVICE_MISMATCH" };
+    const last = getDb().prepare("SELECT MAX(sequence) max_sequence FROM processed_service_events WHERE task_id=?").get(candidate.task_id) as {max_sequence:number|null};
+    if (candidate.sequence <= (last?.max_sequence ?? 0)) return { valid: false, duplicate: false, reason: "EVENT_SEQUENCE_INVALID" };
+    if (!canTransitionOperation(operation.status, statusForEvent(candidate.type))) return { valid: false, duplicate: false, reason: "EVENT_STATE_TRANSITION_INVALID" };
+    return { valid: true, event: candidate };
+  }
   createOperation(op: Omit<ServiceOperation, "createdAt" | "updatedAt" | "riskLevel" | "approvalState" | "executionMode"> &
     Partial<Pick<ServiceOperation, "riskLevel" | "approvalState" | "executionMode">>): ServiceOperation {
     const db = getDb();
@@ -84,8 +125,8 @@ export class OperationStore {
       INSERT INTO service_operations (
         task_id, trace_id, idempotency_key, objective, capability, selected_service, status, result, error,
         risk_level, approval_state, approval_reason, approval_requested_at, pending_request_json,
-        execution_mode, dispatch_request_json, queued_at, schedule_task_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        execution_mode, dispatch_request_json, queued_at, schedule_task_id, workspace_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       fullOp.taskId,
       fullOp.traceId,
@@ -105,6 +146,7 @@ export class OperationStore {
       null,
       fullOp.queuedAt ?? null,
       fullOp.scheduleTaskId ?? null,
+      fullOp.workspaceId ?? null,
       fullOp.createdAt,
       fullOp.updatedAt,
     );
@@ -159,9 +201,11 @@ export class OperationStore {
     if (currentOp.status === status) {
       // Direct result update on same status allowed
     } else {
-      const allowed = ALLOWED_TRANSITIONS[currentOp.status] || [];
-      if (!allowed.includes(status)) return false;
+      if (!canTransitionOperation(currentOp.status, status)) return false;
       if (currentOp.status === "FAILED" && !currentOp.retryable) return false;
+    }
+    if (currentOp.status === status && !canTransitionOperation(currentOp.status, status)) {
+      return false;
     }
 
     const db = getDb();
@@ -240,6 +284,7 @@ export class OperationStore {
           approval_decided_at: number | null;
           execution_mode: ExecutionMode; queued_at: number | null; started_at: number | null; finished_at: number | null;
           cancel_requested_at: number | null; schedule_task_id: string | null;
+          workspace_id: string | null;
         }
       | undefined;
 
@@ -267,6 +312,7 @@ export class OperationStore {
       executionMode: row.execution_mode ?? "foreground", queuedAt: row.queued_at ?? undefined,
       startedAt: row.started_at ?? undefined, finishedAt: row.finished_at ?? undefined,
       cancelRequestedAt: row.cancel_requested_at ?? undefined, scheduleTaskId: row.schedule_task_id ?? undefined,
+      workspaceId: row.workspace_id ?? undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -291,6 +337,7 @@ export class OperationStore {
           approval_requested_at: number | null; approval_decided_at: number | null;
           execution_mode: ExecutionMode; queued_at: number | null; started_at: number | null; finished_at: number | null;
           cancel_requested_at: number | null; schedule_task_id: string | null;
+          workspace_id: string | null;
         }
       | undefined;
 
@@ -316,6 +363,7 @@ export class OperationStore {
       executionMode: row.execution_mode ?? "foreground", queuedAt: row.queued_at ?? undefined,
       startedAt: row.started_at ?? undefined, finishedAt: row.finished_at ?? undefined,
       cancelRequestedAt: row.cancel_requested_at ?? undefined, scheduleTaskId: row.schedule_task_id ?? undefined,
+      workspaceId: row.workspace_id ?? undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -339,6 +387,7 @@ export class OperationStore {
       approval_requested_at: number | null; approval_decided_at: number | null;
       execution_mode: ExecutionMode; queued_at: number | null; started_at: number | null; finished_at: number | null;
       cancel_requested_at: number | null; schedule_task_id: string | null;
+      workspace_id: string | null;
     }>;
 
     return rows.map((row) => {
@@ -361,6 +410,7 @@ export class OperationStore {
         executionMode: row.execution_mode ?? "foreground", queuedAt: row.queued_at ?? undefined,
         startedAt: row.started_at ?? undefined, finishedAt: row.finished_at ?? undefined,
         cancelRequestedAt: row.cancel_requested_at ?? undefined, scheduleTaskId: row.schedule_task_id ?? undefined,
+        workspaceId: row.workspace_id ?? undefined,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
       };
@@ -422,6 +472,9 @@ export class OperationStore {
 
   processEvent(event: ServiceEvent): { duplicate: boolean; applied: boolean } {
     const db = getDb();
+
+    const validation = this.validateEvent(event, event?.task_id);
+    if (!validation.valid) return { duplicate: validation.duplicate, applied: false };
 
     // 1. Deduplication by event_id
     const existingEvt = db.prepare("SELECT event_id FROM processed_service_events WHERE event_id = ?").get(event.event_id);

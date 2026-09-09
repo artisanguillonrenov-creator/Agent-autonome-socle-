@@ -10,10 +10,14 @@ import { saveLLMConfig } from "../persistence/llmConfigStore.js";
 import { SoftwareFactoryService } from "../services/softwareFactoryService.js";
 import type { TaskRequest } from "../orchestration/contract.js";
 import { NotificationStore } from "../autonomy/notificationStore.js";
+import { WorkspaceStore } from "../workspaces/workspaceStore.js";
+import { ArtifactStore } from "../workspaces/artifactStore.js";
 
 const taskStore = new TaskStore();
 const notificationStore = new NotificationStore();
 const softwareFactoryService = new SoftwareFactoryService();
+const workspaceStore = new WorkspaceStore();
+const artifactStore = new ArtifactStore(workspaceStore);
 let lastServerError: string | null = null;
 
 async function readBody(req: IncomingMessage): Promise<string> {
@@ -386,7 +390,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
 
       // 5. Services Endpoints
       if (req.method === "GET" && pathname === "/api/services") {
-        sendJson(res, 200, agent.serviceOrchestrator.registry.listServices());
+        sendJson(res, 200, agent.serviceOrchestrator.registry.listServices().map(s=>({...s,auth:undefined,authType:s.auth.type,authConfigured:s.auth.type==="none"||Boolean(process.env[s.auth.envVar])||(s.id==="software_factory"&&Boolean(process.env.API_TOKEN))})));
         return;
       }
 
@@ -416,7 +420,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
           return;
         }
 
-        const healthRes = await agent.serviceOrchestrator.adapter.checkHealth(service.endpoint);
+        const healthRes = await agent.serviceOrchestrator.adapter.checkHealth(service);
         sendJson(res, 200, {
           id: service.id,
           reachable: healthRes.reachable,
@@ -452,6 +456,13 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
       }
 
       // 7. Planner / Plans Endpoints
+      if(req.method==="GET"&&pathname==="/api/workspaces"){sendJson(res,200,workspaceStore.list());return;}
+      if(req.method==="POST"&&pathname==="/api/workspaces"){let b:any;try{b=JSON.parse((await readBody(req))||"{}");const ownerId=typeof b.ownerId==="string"&&b.ownerId.trim()?b.ownerId:`adhoc-${crypto.randomUUID()}`;const w=workspaceStore.create({name:typeof b.name==="string"?b.name:"Workspace",ownerType:"ADHOC",ownerId});sendJson(res,201,w);}catch(e){sendJson(res,400,{error:(e as Error).message});}return;}
+      const workspaceArtifacts=pathname.match(/^\/api\/workspaces\/([^/]+)\/artifacts$/);if(req.method==="GET"&&workspaceArtifacts){const id=decodeURIComponent(workspaceArtifacts[1]);if(!workspaceStore.get(id)){sendJson(res,404,{error:"WORKSPACE_NOT_FOUND"});return;}sendJson(res,200,artifactStore.listByWorkspace(id));return;}
+      const workspaceContent=pathname.match(/^\/api\/workspaces\/([^/]+)\/files\/content$/);if(req.method==="GET"&&workspaceContent){const id=decodeURIComponent(workspaceContent[1]),path=parsedUrl.searchParams.get("path");if(!workspaceStore.get(id)){sendJson(res,404,{error:"WORKSPACE_NOT_FOUND"});return;}if(!path){sendJson(res,400,{error:"PATH_REQUIRED"});return;}try{const data=workspaceStore.readFile(id,path);res.writeHead(200,{"content-type":"application/octet-stream","content-disposition":`attachment; filename="${path.split("/").pop()!.replace(/[^a-zA-Z0-9._-]/g,"_")}"`});res.end(data);}catch(e){sendJson(res,400,{error:(e as Error).message});}return;}
+      const workspaceFiles=pathname.match(/^\/api\/workspaces\/([^/]+)\/files$/);if(workspaceFiles){const id=decodeURIComponent(workspaceFiles[1]);if(!workspaceStore.get(id)){sendJson(res,404,{error:"WORKSPACE_NOT_FOUND"});return;}try{if(req.method==="GET"){sendJson(res,200,workspaceStore.listFiles(id));return;}if(req.method==="POST"){const b=JSON.parse((await readBody(req))||"{}");if(typeof b.path!=="string"||(!Object.hasOwn(b,"contentBase64")&&!Object.hasOwn(b,"text"))||b.contentBase64!==undefined&&(typeof b.contentBase64!=="string"||b.contentBase64.length%4!==0||!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(b.contentBase64)||Buffer.from(b.contentBase64,"base64").toString("base64")!==b.contentBase64))throw new Error("INVALID_UPLOAD");const data=b.contentBase64!==undefined?Buffer.from(b.contentBase64,"base64"):String(b.text);const file=workspaceStore.writeFile(id,b.path,data);const artifact=artifactStore.createFileArtifact({workspaceId:id,name:file.path,mimeType:typeof b.mimeType==="string"?b.mimeType:undefined,content:Buffer.isBuffer(data)?data:Buffer.from(data)});sendJson(res,201,{file,artifact});return;}if(req.method==="DELETE"){const path=parsedUrl.searchParams.get("path");if(!path)throw new Error("PATH_REQUIRED");workspaceStore.deleteFile(id,path);sendJson(res,200,{ok:true});return;}}catch(e){sendJson(res,400,{error:(e as Error).message});return;}}
+      const workspaceDetail=pathname.match(/^\/api\/workspaces\/([^/]+)$/);if(req.method==="GET"&&workspaceDetail){const w=workspaceStore.get(decodeURIComponent(workspaceDetail[1]));sendJson(res,w?200:404,w??{error:"WORKSPACE_NOT_FOUND"});return;}
+      const artifactDetail=pathname.match(/^\/api\/artifacts\/([^/]+)$/);if(req.method==="GET"&&artifactDetail){const a=artifactStore.get(decodeURIComponent(artifactDetail[1]));if(!a){sendJson(res,404,{error:"ARTIFACT_NOT_FOUND"});return;}if(parsedUrl.searchParams.get("download")==="1"&&a.relativePath){if(a.contentStatus!=="AVAILABLE"){sendJson(res,409,{error:a.contentStatus});return;}const data=workspaceStore.readFile(a.workspaceId,a.relativePath);res.writeHead(200,{"content-type":a.mimeType||"application/octet-stream","content-disposition":`attachment; filename="${a.name.replace(/[^a-zA-Z0-9._-]/g,"_")}"`});res.end(data);return;}sendJson(res,200,a);return;}
       if (req.method === "GET" && (pathname === "/plan" || pathname === "/api/plan")) {
         sendJson(res, 200, agent.planner.all());
         return;
