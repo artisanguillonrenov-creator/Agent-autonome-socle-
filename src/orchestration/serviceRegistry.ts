@@ -57,12 +57,14 @@ export function validateServiceDefinition(raw: unknown, strict = false): Service
     throw new Error("invalid required fields");
   }
 
-  // Validate capabilities against known catalog
-  const knownCapabilities = new Set(canonicalSkillCatalog.map((s) => s.serviceCapability).filter(Boolean));
-  ["software_development", "code_generation", "file_management", "deep_research"].forEach((c) => knownCapabilities.add(c));
-  for (const cap of r.capabilities) {
-    if (!knownCapabilities.has(cap)) {
-      throw new Error(`CONNECTION_CAPABILITY_UNKNOWN: ${cap}`);
+  // Validate capabilities against known catalog for user-created service connections (Requirement 19)
+  if (r.userCreated) {
+    const knownCapabilities = new Set(canonicalSkillCatalog.map((s) => s.serviceCapability).filter(Boolean));
+    ["software_development", "code_generation", "file_management", "deep_research"].forEach((c) => knownCapabilities.add(c));
+    for (const cap of r.capabilities) {
+      if (!knownCapabilities.has(cap)) {
+        throw new Error(`CONNECTION_CAPABILITY_UNKNOWN: ${cap}`);
+      }
     }
   }
 

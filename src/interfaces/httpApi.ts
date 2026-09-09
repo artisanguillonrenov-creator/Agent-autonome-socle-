@@ -16,7 +16,7 @@ import { ArtifactStore } from "../workspaces/artifactStore.js";
 import { ObservabilityStore } from "../observability/observabilityStore.js";
 import { ActivityStore } from "../observability/activityStore.js";
 import { SETTINGS_CATALOG, SETTINGS_SECTIONS } from "../settings/catalog.js";
-import { SettingsStore, SettingScopeType } from "../settings/store.ts";
+import { SettingsStore, SettingScopeType } from "../settings/store.js";
 import { getDb } from "../persistence/db.js";
 
 const taskStore = new TaskStore();

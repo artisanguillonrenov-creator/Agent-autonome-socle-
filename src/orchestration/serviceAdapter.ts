@@ -26,8 +26,9 @@ export class ServiceAdapter {
 
   private definition(value: ServiceDefinition | string): ServiceDefinition {
     if (typeof value === "string") {
+      const isSoftwareFactory = ["software_factory", "in-process", "direct"].includes(value);
       return {
-        id: value,
+        id: isSoftwareFactory ? "software_factory" : value,
         name: value,
         enabled: true,
         transport: ["local", "direct", "in-process", "workspace_service", "research_service"].includes(value) ? "local" : "task_http",
@@ -37,7 +38,7 @@ export class ServiceAdapter {
         capabilities: ["software_development"],
         priority: 0,
         riskByCapability: { software_development: "MEDIUM" },
-        auth: { type: value === "software_factory" ? "bearer_env" : "none", envVar: "SOFTWARE_FACTORY_TOKEN" },
+        auth: { type: isSoftwareFactory ? "bearer_env" : "none", envVar: "SOFTWARE_FACTORY_TOKEN" },
       };
     }
     return value;

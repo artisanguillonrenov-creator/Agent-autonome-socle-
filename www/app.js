@@ -552,7 +552,8 @@ function appendApprovalControls(host, operation, onDecision) {
 }
 
 function applyThemeRuntime(themeName) {
-  const root = document.documentElement;
+  const root = typeof document !== 'undefined' ? (document.documentElement || document.body) : null;
+  if (!root || !root.classList) return;
   root.classList.remove('theme-light', 'theme-dark');
   if (themeName === 'LIGHT') {
     root.classList.add('theme-light');
