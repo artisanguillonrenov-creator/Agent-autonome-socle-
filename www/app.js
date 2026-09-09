@@ -709,7 +709,7 @@ function renderChatView() {
   const input = document.createElement('textarea'); input.id = 'chat-input'; input.className = 'input-field chat-input'; input.rows = 1; input.placeholder = 'Posez une question ou demandez une action…'; input.setAttribute('aria-label', 'Message à Jarvis');
   const sendButton = document.createElement('button'); sendButton.type = 'submit'; sendButton.id = 'chat-send'; sendButton.className = 'btn btn-primary chat-send'; sendButton.textContent = 'Envoyer';
   form.append(input, sendButton); layout.append(messages, form); container.appendChild(layout);
-  appendChatMessage('agent', "Bonjour, je suis Jarvis Command Center. Comment puis-je vous aider aujourd'hui ?");
+  appendChatMessage('agent', "Bonjour, je suis Jarvis Command Center. Comment puis-je vous aider aujourd'hui ?", { regeneratable: false });
 
   let submitting = false;
   const resizeInput = () => { input.style.height = 'auto'; input.style.height = `${Math.min(input.scrollHeight, 160)}px`; };
@@ -746,7 +746,7 @@ function renderChatView() {
   });
 }
 
-function appendChatMessage(role, text) {
+function appendChatMessage(role, text, options = {}) {
   const box = document.getElementById('chat-messages');
   if (!box) return null;
   const shouldScroll = isNearChatBottom(box);
@@ -766,7 +766,7 @@ function appendChatMessage(role, text) {
         const input = document.getElementById('chat-input'); input.value = content.textContent || ''; input.dispatchEvent(new Event('input')); input.focus();
       }));
     } else {
-      article.dataset.final = 'true';
+      if (options.regeneratable !== false) article.dataset.final = 'true';
       if ('speechSynthesis' in window && typeof window.SpeechSynthesisUtterance === 'function') {
         const read = createMessageAction('Lire', 'Lire cette réponse à voix haute', () => {
           if (read.dataset.reading === 'true') { window.speechSynthesis.cancel(); read.dataset.reading = 'false'; read.textContent = 'Lire'; return; }
@@ -783,7 +783,11 @@ function appendChatMessage(role, text) {
         try { const result = await fetchApi('/api/chat/regenerate', { method: 'POST', body: '{}' }); content.textContent = result.response; }
         catch { content.textContent = oldText; regenerate.textContent = 'Erreur — réessayer'; setTimeout(() => { regenerate.textContent = 'Régénérer'; }, 2200); }
         finally { regenerate.disabled = false; if (regenerate.textContent === 'Régénération…') regenerate.textContent = 'Régénérer'; }
-      }); regenerate.dataset.action = 'regenerate'; actions.appendChild(regenerate);
+      });
+      if (options.regeneratable !== false) {
+        regenerate.dataset.action = 'regenerate';
+        actions.appendChild(regenerate);
+      }
     }
     article.appendChild(actions);
   }

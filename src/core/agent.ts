@@ -222,7 +222,7 @@ export class Agent {
         break;
       }
     }
-    if (lastAssistantIndex < 0) throw new Error("NO_RESPONSE_TO_REGENERATE");
+    if (lastAssistantIndex < 0) throw new Error("NO_REGENERATABLE_RESPONSE");
 
     const previousResponse = history[lastAssistantIndex].content ?? "";
     const messages: ChatMessage[] = [

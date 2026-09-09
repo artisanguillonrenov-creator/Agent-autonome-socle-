@@ -11,6 +11,19 @@ import { NotificationStore } from "../autonomy/notificationStore.js";
 import fs from "node:fs";
 import vm from "node:vm";
 
+async function startTestHttpApi(agent: Agent) {
+  const server = startHttpApi(agent, 0);
+  if (!server.listening) {
+    await new Promise<void>((resolve, reject) => {
+      server.once("listening", resolve);
+      server.once("error", reject);
+    });
+  }
+  const address = server.address();
+  assert.ok(address && typeof address !== "string", "le serveur doit écouter sur un port TCP système");
+  return { server, baseUrl: `http://127.0.0.1:${address.port}` };
+}
+
 test("Android / Capacitor post-DOMContentLoaded bootstrap timing test", async () => {
   let addEventListenerCalledCount = 0;
   let activeViewSwitched = false;
@@ -104,6 +117,8 @@ test("Chat UX V1 conserve des actions sûres et des interactions clavier explici
   assert.match(source, /e\.key === 'Enter' && !e\.shiftKey/, "Entrée envoie, contrairement à Maj+Entrée");
   assert.match(source, /if \(submitting\) return/, "la double soumission est bloquée");
   assert.match(source, /chat-timeline-toggle/, "la timeline existante reste dépliable");
+  assert.match(source, /\{ regeneratable: false \}/, "le message d'accueil n'est pas une réponse finale");
+  assert.match(source, /options\.regeneratable !== false/, "une vraie réponse Jarvis reste régénérable");
 
   let copied = "";
   const copyPlainText = async (text: string, navigatorRef: { clipboard?: { writeText(value: string): Promise<void> } }) => {
@@ -191,9 +206,7 @@ test("Jarvis Command Center API Endpoints Test", async () => {
     embeddings: new LocalHashingEmbeddingProvider(),
   });
 
-  const port = 3000 + Math.floor(Math.random() * 5000);
-  const server = startHttpApi(agent, port);
-  const baseUrl = `http://localhost:${port}`;
+  const { server, baseUrl } = await startTestHttpApi(agent);
 
   const eventSuffix = `${Date.now()}-${Math.random()}`;
   const eventTaskId = `task-http-events-${eventSuffix}`;
@@ -364,6 +377,14 @@ test("Jarvis Command Center API Endpoints Test", async () => {
     assert.equal(selectResult.ok, true);
     assert.equal(selectResult.activeProvider, "mock");
 
+    const noResponseToRegenerate = await fetch(`${baseUrl}/api/chat/regenerate`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${config.api.token}`, "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(noResponseToRegenerate.status, 409);
+    assert.deepEqual(await noResponseToRegenerate.json(), { error: "NO_REGENERATABLE_RESPONSE" });
+
     // Verify chat uses the updated agent model state
     const chatRes = await checkEndpoint(`${baseUrl}/api/chat`, {
       method: "POST",
@@ -464,9 +485,7 @@ test("HTTP API applique l'authentification fail-closed tout en laissant les ress
     llm: new MockProvider(),
     embeddings: new LocalHashingEmbeddingProvider(),
   });
-  const port = 8001 + Math.floor(Math.random() * 1000);
-  const server = startHttpApi(agent, port);
-  const baseUrl = `http://localhost:${port}`;
+  const { server, baseUrl } = await startTestHttpApi(agent);
 
   try {
     const configuredToken = "configured-secret-token";
@@ -524,7 +543,7 @@ test("API plans: auth, list/detail/nodes, unknown et annulation sûre", async ()
   const previousToken=config.api.token;config.api.token="plans-token";
   const agent=new Agent({llm:new MockProvider(),embeddings:new LocalHashingEmbeddingProvider()});
   const run=agent.planner.createExecutionPlan("Mission API",[{local_id:"one",title:"One",capability:"software_development",objective:"Do one",context:{},constraints:[],priority:"medium",depends_on:[]}],agent.serviceOrchestrator.registry);
-  const port=9000+Math.floor(Math.random()*500);const server=startHttpApi(agent,port);const base=`http://localhost:${port}`;
+  const {server,baseUrl:base}=await startTestHttpApi(agent);
   const auth={authorization:"Bearer plans-token"};
   try {
     let response=await fetch(`${base}/api/plans`,{headers:auth});assert.equal(response.status,200);assert.ok((await response.json() as Array<{id:string}>).some(plan=>plan.id===run.id));
@@ -540,7 +559,7 @@ test("API plans: auth, list/detail/nodes, unknown et annulation sûre", async ()
 test("API workspaces couvre CRUD, artifacts, téléchargements et validation", async () => {
   const previousToken=config.api.token;config.api.token="workspace-api-token";
   const agent=new Agent({llm:new MockProvider(),embeddings:new LocalHashingEmbeddingProvider()});
-  const port=10000+Math.floor(Math.random()*10000),server=startHttpApi(agent,port),base=`http://localhost:${port}`;
+  const {server,baseUrl:base}=await startTestHttpApi(agent);
   const call=(path:string,init:RequestInit={})=>fetch(`${base}${path}`,{...init,headers:{"content-type":"application/json",authorization:`Bearer ${config.api.token}`,...init.headers}});
   try {
     assert.equal((await fetch(`${base}/api/workspaces`)).status,401);
