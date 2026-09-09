@@ -3,6 +3,8 @@
     "id": "software_factory",
     "name": "Software Factory Service V1",
     "enabled": true,
+    "transport": "task_http",
+    "auth": { "type": "bearer_env", "envVar": "SOFTWARE_FACTORY_TOKEN" },
     "endpoint": "http://localhost:4000",
     "capabilities": ["software_development", "code_generation"],
     "priority": 10,
@@ -12,9 +14,13 @@
     "id": "mock_software_factory",
     "name": "Mock Software Factory Service",
     "enabled": true,
+    "transport": "task_http",
+    "auth": { "type": "none" },
     "endpoint": "http://localhost:4000",
     "capabilities": ["software_development", "code_generation"],
     "priority": 5,
     "riskByCapability": { "software_development": "MEDIUM", "code_generation": "LOW" }
-  }
+  },
+  {"id":"workspace_service","name":"Workspace Service V1","enabled":true,"transport":"local","endpoint":"workspace_service","auth":{"type":"none"},"capabilities":["file_management"],"priority":20,"riskByCapability":{"file_management":"MEDIUM"}},
+  {"id":"research_service","name":"Research Service V1","enabled":true,"transport":"local","endpoint":"research_service","auth":{"type":"none"},"capabilities":["deep_research"],"priority":20,"riskByCapability":{"deep_research":"LOW"}}
 ]

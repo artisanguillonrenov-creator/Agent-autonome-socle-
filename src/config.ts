@@ -42,6 +42,11 @@ export const config = {
   db: {
     path: process.env.AGENT_DB_PATH || "./data/agent.db",
   },
+  workspace: {
+    root: process.env.WORKSPACE_ROOT || "./data/workspaces",
+    maxFileBytes: int(process.env.WORKSPACE_MAX_FILE_BYTES, 10 * 1024 * 1024),
+    maxTotalBytes: int(process.env.WORKSPACE_MAX_TOTAL_BYTES, 50 * 1024 * 1024),
+  },
   interface: {
     /** Liste séparée par des virgules : "cli", "http", ou les deux à la fois. */
     modes: (process.env.AGENT_INTERFACE || "cli")

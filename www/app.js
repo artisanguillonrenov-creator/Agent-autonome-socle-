@@ -866,6 +866,19 @@ async function renderPlanDetails(host, plans) {
     header.append(objective, status); card.appendChild(header);
     appendPlanField(card, 'Génération', String(plan.generation));
     appendPlanField(card, 'Replan', `${plan.replanCount}/${plan.maxReplans}`);
+    if (plan.workspaceId) {
+      appendPlanField(card, 'Workspace', String(plan.workspaceId));
+      const workspace = document.createElement('section');
+      const workspaceTitle = document.createElement('strong'); workspaceTitle.textContent = 'Fichiers & livrables';
+      const files = await fetchApi(`/api/workspaces/${encodeURIComponent(plan.workspaceId)}/files`);
+      const artifacts = await fetchApi(`/api/workspaces/${encodeURIComponent(plan.workspaceId)}/artifacts`);
+      const fileList = document.createElement('ul');
+      for (const file of files) { const item = document.createElement('li'); const label = document.createElement('span'); label.textContent = `${String(file.path)} (${Number(file.size)} octets) `; const download = document.createElement('button'); download.className = 'btn btn-secondary btn-sm'; download.textContent = 'Télécharger'; download.addEventListener('click', async () => { const response = await fetch(`${state.backendUrl}/api/workspaces/${encodeURIComponent(plan.workspaceId)}/files/content?path=${encodeURIComponent(file.path)}`, { headers: { Authorization: `Bearer ${state.token}` } }); const blob = await response.blob(); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = String(file.path).split('/').pop(); link.click(); URL.revokeObjectURL(link.href); }); item.append(label, download); fileList.appendChild(item); }
+      const artifactList = document.createElement('ul');
+      for (const artifact of artifacts) { const item = document.createElement('li'); item.textContent = `${String(artifact.name)} · ${String(artifact.kind)} · ${String(artifact.mimeType || '')} · ${String(artifact.operationTaskId || 'manuel')}`; artifactList.appendChild(item); }
+      const upload = document.createElement('input'); upload.type = 'file'; upload.addEventListener('change', async () => { const file = upload.files?.[0]; if (!file) return; const bytes = new Uint8Array(await file.arrayBuffer()); let binary = ''; for (const byte of bytes) binary += String.fromCharCode(byte); await fetchApi(`/api/workspaces/${encodeURIComponent(plan.workspaceId)}/files`, { method: 'POST', body: JSON.stringify({ path: file.name, contentBase64: btoa(binary), mimeType: file.type || 'application/octet-stream' }) }); await renderTasksView(); });
+      workspace.append(workspaceTitle, fileList, artifactList, upload); card.appendChild(workspace);
+    }
     if (current) appendPlanField(card, 'Étape actuelle', String(current.title));
     const list = document.createElement('ol');
     for (const node of nodes) {

@@ -23,6 +23,7 @@ export interface ServiceOperation {
   finishedAt?: number;
   cancelRequestedAt?: number;
   scheduleTaskId?: string;
+  workspaceId?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -84,8 +85,8 @@ export class OperationStore {
       INSERT INTO service_operations (
         task_id, trace_id, idempotency_key, objective, capability, selected_service, status, result, error,
         risk_level, approval_state, approval_reason, approval_requested_at, pending_request_json,
-        execution_mode, dispatch_request_json, queued_at, schedule_task_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        execution_mode, dispatch_request_json, queued_at, schedule_task_id, workspace_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       fullOp.taskId,
       fullOp.traceId,
@@ -105,6 +106,7 @@ export class OperationStore {
       null,
       fullOp.queuedAt ?? null,
       fullOp.scheduleTaskId ?? null,
+      fullOp.workspaceId ?? null,
       fullOp.createdAt,
       fullOp.updatedAt,
     );
@@ -240,6 +242,7 @@ export class OperationStore {
           approval_decided_at: number | null;
           execution_mode: ExecutionMode; queued_at: number | null; started_at: number | null; finished_at: number | null;
           cancel_requested_at: number | null; schedule_task_id: string | null;
+          workspace_id: string | null;
         }
       | undefined;
 
@@ -267,6 +270,7 @@ export class OperationStore {
       executionMode: row.execution_mode ?? "foreground", queuedAt: row.queued_at ?? undefined,
       startedAt: row.started_at ?? undefined, finishedAt: row.finished_at ?? undefined,
       cancelRequestedAt: row.cancel_requested_at ?? undefined, scheduleTaskId: row.schedule_task_id ?? undefined,
+      workspaceId: row.workspace_id ?? undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -291,6 +295,7 @@ export class OperationStore {
           approval_requested_at: number | null; approval_decided_at: number | null;
           execution_mode: ExecutionMode; queued_at: number | null; started_at: number | null; finished_at: number | null;
           cancel_requested_at: number | null; schedule_task_id: string | null;
+          workspace_id: string | null;
         }
       | undefined;
 
@@ -316,6 +321,7 @@ export class OperationStore {
       executionMode: row.execution_mode ?? "foreground", queuedAt: row.queued_at ?? undefined,
       startedAt: row.started_at ?? undefined, finishedAt: row.finished_at ?? undefined,
       cancelRequestedAt: row.cancel_requested_at ?? undefined, scheduleTaskId: row.schedule_task_id ?? undefined,
+      workspaceId: row.workspace_id ?? undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -339,6 +345,7 @@ export class OperationStore {
       approval_requested_at: number | null; approval_decided_at: number | null;
       execution_mode: ExecutionMode; queued_at: number | null; started_at: number | null; finished_at: number | null;
       cancel_requested_at: number | null; schedule_task_id: string | null;
+      workspace_id: string | null;
     }>;
 
     return rows.map((row) => {
@@ -361,6 +368,7 @@ export class OperationStore {
         executionMode: row.execution_mode ?? "foreground", queuedAt: row.queued_at ?? undefined,
         startedAt: row.started_at ?? undefined, finishedAt: row.finished_at ?? undefined,
         cancelRequestedAt: row.cancel_requested_at ?? undefined, scheduleTaskId: row.schedule_task_id ?? undefined,
+        workspaceId: row.workspace_id ?? undefined,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
       };

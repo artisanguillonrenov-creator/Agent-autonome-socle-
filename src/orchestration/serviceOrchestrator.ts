@@ -4,6 +4,11 @@ import { ServiceAdapter } from "./serviceAdapter.js";
 import { OperationStore, type ServiceOperation } from "./operationStore.js";
 import { CONTRACT_SCHEMA_VERSION, type TaskRequest, type ServiceEvent, type DispatchCapabilityDecision } from "./contract.js";
 import { config } from "../config.js";
+import { WorkspaceStore } from "../workspaces/workspaceStore.js";
+import { ArtifactStore } from "../workspaces/artifactStore.js";
+import { WorkspaceService } from "../services/workspaceService.js";
+import { ResearchService } from "../services/researchService.js";
+import { getDb } from "../persistence/db.js";
 
 export interface OrchestrationResult {
   taskId: string;
@@ -59,16 +64,22 @@ export class ServiceOrchestrator {
   readonly registry: ServiceRegistry;
   readonly adapter: ServiceAdapter;
   readonly store: OperationStore;
+  readonly workspaces = new WorkspaceStore();
+  readonly artifacts = new ArtifactStore(this.workspaces);
 
   constructor(opts?: { registry?: ServiceRegistry; adapter?: ServiceAdapter; store?: OperationStore }) {
     this.registry = opts?.registry ?? new ServiceRegistry();
     this.adapter = opts?.adapter ?? new ServiceAdapter();
     this.store = opts?.store ?? new OperationStore();
+    if(typeof (this.adapter as any).registerLocal==="function"){
+      this.adapter.registerLocal("workspace_service",new WorkspaceService(this.workspaces));
+      this.adapter.registerLocal("research_service",new ResearchService());
+    }
   }
 
   async dispatchCapability(
     decision: DispatchCapabilityDecision,
-    opts?: { traceId?: string; idempotencyKey?: string; executionMode?: "foreground" | "background"; scheduleTaskId?: string },
+    opts?: { traceId?: string; idempotencyKey?: string; executionMode?: "foreground" | "background"; scheduleTaskId?: string; workspaceId?: string },
   ): Promise<OrchestrationResult> {
     const traceId = opts?.traceId || `trace-${randomUUID()}`;
     const idempotencyKey = opts?.idempotencyKey || `idemp-${randomUUID()}`;
@@ -152,6 +163,7 @@ export class ServiceOrchestrator {
         executionMode: opts?.executionMode ?? "foreground",
         queuedAt: opts?.executionMode === "background" && riskLevel !== "HIGH" && riskLevel !== "CRITICAL" ? Date.now() : undefined,
         scheduleTaskId: opts?.scheduleTaskId,
+        workspaceId: opts?.workspaceId,
       });
     } else {
       if (!this.store.updateStatus(taskId, "DISPATCHING", undefined, "Nouvelle tentative après échec réseau.")) {
@@ -170,7 +182,7 @@ export class ServiceOrchestrator {
       idempotency_key: idempotencyKey,
       capability: decision.capability,
       objective: decision.objective,
-      context: decision.context || {},
+      context: opts?.workspaceId ? {...(decision.context||{}),workspace:{id:opts.workspaceId}} : decision.context || {},
       constraints: decision.constraints || [],
       priority: decision.priority || "medium",
       permissions: [],
@@ -200,7 +212,7 @@ export class ServiceOrchestrator {
         : 5000;
 
     // 6. Dispatch via ServiceAdapter
-    const adapterRes = await this.adapter.dispatchTask(service.endpoint, request, timeoutMs);
+    const adapterRes = await this.adapter.dispatchTask(typeof (this.adapter as any).registerLocal==="function"?service:service.endpoint, request, timeoutMs);
 
     if (!adapterRes.success) {
       // Transport/Network Error: mark as FAILED (retryable = true) with transport info
@@ -216,6 +228,7 @@ export class ServiceOrchestrator {
 
     // 7. Process received events
     for (const event of adapterRes.events) {
+      if(event.type==="TASK_COMPLETED"&&event.payload.artifacts!==undefined){try{this.persistArtifacts(event,opts?.workspaceId);}catch(e){this.store.updateStatus(taskId,"FAILED",undefined,`INVALID_ARTIFACT_DESCRIPTOR: ${(e as Error).message}`);break;}}
       this.store.processEvent(event);
     }
 
@@ -249,9 +262,9 @@ export class ServiceOrchestrator {
       this.store.updateStatus(taskId, "FAILED", undefined, "Service approuvé introuvable.");
     } else {
       const timeoutMs = service.id === "software_factory" ? config.softwareFactory.timeoutMs : 5000;
-      const response = await this.adapter.dispatchTask(service.endpoint, request, timeoutMs);
+      const response = await this.adapter.dispatchTask(typeof (this.adapter as any).registerLocal==="function"?service:service.endpoint, request, timeoutMs);
       if (!response.success) this.store.updateStatus(taskId, "FAILED", undefined, `TRANSPORT_UNKNOWN: ${response.message}`, true);
-      else for (const event of response.events) this.store.processEvent(event);
+      else for (const event of response.events){if(event.type==="TASK_COMPLETED"&&event.payload.artifacts!==undefined)this.persistArtifacts(event,operation.workspaceId);this.store.processEvent(event);}
     }
     const updated = this.store.getOperation(taskId)!;
     return { taskId, traceId: updated.traceId, status: updated.status, selectedService: updated.selectedService,
@@ -264,9 +277,9 @@ export class ServiceOrchestrator {
     const service=this.registry.getServiceById(operation.selectedService);
     if(!service){this.store.updateStatus(operation.taskId,"FAILED",undefined,"Service introuvable.");return this.store.getOperation(operation.taskId)!;}
     const timeoutMs=service.id==="software_factory"?config.softwareFactory.timeoutMs:5000;
-    const response=await this.adapter.dispatchTask(service.endpoint,request,timeoutMs);
+    const response=await this.adapter.dispatchTask(typeof (this.adapter as any).registerLocal==="function"?service:service.endpoint,request,timeoutMs);
     if(!response.success)this.store.updateStatus(operation.taskId,"FAILED",undefined,`TRANSPORT_UNKNOWN: ${response.message}`,true);
-    else for(const event of response.events)this.store.processEvent(event);
+    else for(const event of response.events){if(event.type==="TASK_COMPLETED"&&event.payload.artifacts!==undefined)this.persistArtifacts(event,operation.workspaceId);this.store.processEvent(event);}
     return this.store.getOperation(operation.taskId)!;
   }
 
@@ -277,4 +290,5 @@ export class ServiceOrchestrator {
   getOperationStatus(taskId: string): ServiceOperation | null {
     return this.store.getOperation(taskId);
   }
+  private persistArtifacts(event:ServiceEvent,workspaceId?:string):void{if(!workspaceId)throw new Error("ARTIFACT_WORKSPACE_REQUIRED");if(!Array.isArray(event.payload.artifacts))throw new Error("INVALID_ARTIFACT_DESCRIPTOR");const plan=(getDb().prepare("SELECT id FROM plan_runs WHERE workspace_id=?").get(workspaceId) as any)?.id;for(const raw of event.payload.artifacts){if(!raw||typeof raw!=="object"||Array.isArray(raw))throw new Error("INVALID_ARTIFACT_DESCRIPTOR");const d=raw as any;if(typeof d.name!=="string"||typeof d.kind!=="string")throw new Error("INVALID_ARTIFACT_DESCRIPTOR");if(d.kind==="LINK"){if(typeof d.url!=="string")throw new Error("INVALID_ARTIFACT_DESCRIPTOR");this.artifacts.createLinkArtifact({workspaceId,planRunId:plan,operationTaskId:event.task_id,name:d.name,url:d.url});}else{if(!["FILE","TEXT","REPORT","DATA"].includes(d.kind)||typeof d.content_base64!=="string")throw new Error("INVALID_ARTIFACT_DESCRIPTOR");const content=Buffer.from(d.content_base64,"base64");this.artifacts.createFileArtifact({workspaceId,planRunId:plan,operationTaskId:event.task_id,kind:d.kind,name:d.name,mimeType:typeof d.mime_type==="string"?d.mime_type:undefined,relativePath:d.name,content});}}}
 }
