@@ -142,6 +142,20 @@ export function getDb(): Database.Database {
       result_type TEXT NOT NULL CHECK(result_type IN ('PLAN_RUN','SCHEDULE')), result_id TEXT NOT NULL,
       input_json TEXT NOT NULL, created_at INTEGER NOT NULL, success_recorded_at INTEGER
     );
+    CREATE TABLE IF NOT EXISTS app_settings (
+      scope_type TEXT NOT NULL, scope_id TEXT NOT NULL DEFAULT '', setting_key TEXT NOT NULL,
+      value_json TEXT NOT NULL, updated_at INTEGER NOT NULL,
+      PRIMARY KEY(scope_type, scope_id, setting_key)
+    );
+    CREATE TABLE IF NOT EXISTS service_connections (
+      service_id TEXT PRIMARY KEY, name TEXT, user_created INTEGER NOT NULL DEFAULT 0,
+      enabled_override INTEGER, transport_override TEXT, endpoint_override TEXT,
+      health_path TEXT, task_path TEXT, auth_type_override TEXT, auth_env_var TEXT,
+      priority_override INTEGER, request_timeout_ms INTEGER, health_timeout_ms INTEGER,
+      capabilities_json TEXT, parallel_safe_capabilities_json TEXT, risk_by_capability_json TEXT,
+      last_test_at INTEGER, last_success_at INTEGER, last_latency_ms INTEGER, last_error TEXT,
+      updated_at INTEGER NOT NULL
+    );
   `);
 
   // Additive replacement of the short-lived V1 workflow execution schema. The

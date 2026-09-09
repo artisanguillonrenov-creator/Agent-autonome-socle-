@@ -1,0 +1,9 @@
+import {getDb} from "../persistence/db.js";
+import {SettingsCatalog,type SettingsDefinition,type SettingsSource} from "./settingsCatalog.js";
+export type SettingsScope="GLOBAL"|"SERVICE"|"PROJECT"|"TASK";
+export interface EffectiveSetting extends SettingsDefinition {value:unknown;effectiveValue:unknown;source:SettingsSource}
+export class SettingsStore{
+ list(scope:SettingsScope="GLOBAL",scopeId=""):EffectiveSetting[]{return SettingsCatalog.map(d=>this.get(d,scope,scopeId));}
+ get(definition:SettingsDefinition,scope:SettingsScope="GLOBAL",scopeId=""):EffectiveSetting{const row=getDb().prepare("SELECT value_json FROM app_settings WHERE scope_type=? AND scope_id=? AND setting_key=?").get(scope,scopeId,definition.key) as {value_json:string}|undefined;const value=row?JSON.parse(row.value_json):definition.defaultValue;return{...definition,value,effectiveValue:value,source:row?"DATABASE":"DEFAULT"};}
+ set(key:string,value:unknown,scope:SettingsScope="GLOBAL",scopeId=""):EffectiveSetting{if(scope==="PROJECT"||scope==="TASK")throw new Error("SETTINGS_SCOPE_NOT_AVAILABLE");const d=SettingsCatalog.find(x=>x.key===key);if(!d)throw new Error("SETTING_UNKNOWN");if(!d.editable||d.availability!=="AVAILABLE")throw new Error("SETTING_NOT_AVAILABLE");if(d.type==="boolean"&&typeof value!=="boolean")throw new Error("SETTING_VALUE_INVALID");if(d.type==="number"&&(typeof value!=="number"||(d.validation?.min!==undefined&&value<d.validation.min)||(d.validation?.max!==undefined&&value>d.validation.max)))throw new Error("SETTING_VALUE_INVALID");if(d.validation?.enum&&!d.validation.enum.includes(value))throw new Error("SETTING_VALUE_INVALID");getDb().prepare("INSERT INTO app_settings(scope_type,scope_id,setting_key,value_json,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(scope_type,scope_id,setting_key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at").run(scope,scopeId,key,JSON.stringify(value),Date.now());return this.get(d,scope,scopeId);}
+}

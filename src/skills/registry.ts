@@ -2,6 +2,7 @@ import type { EmbeddingProvider } from "../llm/embeddings.js";
 import { cosineSimilarity } from "../llm/embeddings.js";
 import type { SkillContext, SkillDefinition } from "../types.js";
 import { SkillPreferenceStore } from "./preferences.js";
+import type { ServiceRegistry } from "../orchestration/serviceRegistry.js";
 
 const kinds=new Set(["SKILL","WORKFLOW","INTERNAL","FUTURE","SYSTEM","LEGACY"]), availability=new Set(["AVAILABLE","UNAVAILABLE","DISABLED"]), exposures=new Set(["ALWAYS","DYNAMIC","NEVER"]), risks=new Set(["LOW","MEDIUM","HIGH","CRITICAL"]), targets=new Set(["LOCAL_HANDLER","SERVICE_CAPABILITY","WORKFLOW","INTERNAL"]);
 function normalized(skill:SkillDefinition):SkillDefinition {
@@ -51,6 +52,8 @@ export class SkillRegistry {
   setEnabled(id:string,enabled:boolean):void{const s=this.list().find(x=>x.id===id);if(!s)throw new Error("SKILL_NOT_FOUND");if(s.kind==="FUTURE"||s.kind==="INTERNAL"||s.kind==="SYSTEM")throw new Error("SKILL_NOT_MANAGEABLE");this.preferences.setEnabled(id,enabled);}
   selectable():SkillDefinition[]{return this.list().filter(s=>s.availability==="AVAILABLE"&&s.exposure==="DYNAMIC"&&s.kind!=="INTERNAL"&&s.kind!=="FUTURE"&&this.isEnabled(s)&&!!s.handler);}
   alwaysExposed():SkillDefinition[]{return this.list().filter(s=>s.availability==="AVAILABLE"&&s.exposure==="ALWAYS"&&this.isEnabled(s)&&!!s.handler);}
+  /** Recompute service exposure without discarding handlers, metadata or preferences. */
+  refreshServiceAvailability(services:ServiceRegistry):void{for(const skill of this.skills.values()){if(!skill.serviceCapability)continue;const available=Boolean(services.findServiceForCapability(skill.serviceCapability));skill.availability=available?"AVAILABLE":"UNAVAILABLE";skill.unavailableReason=available?undefined:`Service unavailable: ${skill.serviceCapability}`;}}
 
   async findRelevant(query: string, topK = 3, source=this.selectable()): Promise<SkillDefinition[]> {
     if (source.length === 0) return [];

@@ -1376,55 +1376,38 @@ async function renderSystemView() {
   }
 }
 
-// 11. PARAMÈTRES VIEW
-function renderSettingsView() {
-  const container = document.getElementById('view-settings');
-
-  container.innerHTML = `
-    <h2>Paramètres du Command Center</h2>
-
-    <div class="card" style="margin-top: 12px;">
-      <div class="card-title">Connexion Backend (Réseau / Render)</div>
-      <div class="form-group" style="margin-top: 8px;">
-        <label class="form-label">URL du Serveur Jarvis (ex: https://votre-app.onrender.com)</label>
-        <input type="text" id="setting-backend-url" class="input-field" value="${state.backendUrl}" placeholder="Laissez vide pour le même serveur HTTP" />
-      </div>
-      <div class="form-group" style="margin-top: 8px;">
-        <label class="form-label">Token d'Authentification API (Optionnel)</label>
-        <input type="password" id="setting-token" class="input-field" value="${state.token}" placeholder="Token d'accès si configuré" />
-      </div>
-      <div style="margin-top: 12px;">
-        <button class="btn btn-primary" onclick="saveConnectionSettings()">Sauvegarder Connexion</button>
-      </div>
-    </div>
-
-    <div class="card" style="margin-top: 12px;">
-      <div class="card-title">Gestion des Mises à jour OTA</div>
-      <div style="font-size: 0.9rem; color: var(--text-muted); line-height: 1.6; margin-top: 8px;">
-        Version native APK : <strong>v${NATIVE_VERSION}</strong><br/>
-        Version OTA active : <strong style="color: var(--accent-primary);">v${state.ota.activeVersion}</strong>
-      </div>
-      <div style="display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap;">
-        <button class="btn btn-primary btn-sm" onclick="checkOtaUpdates(true)">🔍 Rechercher une mise à jour OTA</button>
-        ${state.ota.previousVersion ? `<button class="btn btn-secondary btn-sm" onclick="rollbackOtaUpdate()">↩️ Rollback version précédente</button>` : ''}
-      </div>
-    </div>
-  `;
+// 11. JARVIS SETTINGS CENTER V1
+let settingsLevel = 'SIMPLE';
+let settingsSection = 'GENERAL';
+const settingsSections = {GENERAL:'Général',INTELLIGENCE:'Intelligence',AUTONOMY_SECURITY:'Autonomie & Sécurité',CONNECTIONS_SERVICES:'Connexions & Services',PROJECTS_MEMORY:'Projets & Mémoire',SKILLS_WORKFLOWS:'Skills & Workflows',AUTOMATIONS:'Automatisations',ACTIVITY:'Activité',SYSTEM:'Système'};
+const settingInput = (item) => { const disabled=!item.editable||item.availability!=='AVAILABLE'; if(item.type==='boolean')return `<input type="checkbox" data-setting="${item.key}" ${item.effectiveValue?'checked':''} ${disabled?'disabled':''}>`;if(item.validation?.enum)return `<select class="input-field" data-setting="${item.key}" ${disabled?'disabled':''}>${item.validation.enum.map(v=>`<option ${v===item.effectiveValue?'selected':''}>${v}</option>`).join('')}</select>`;return `<input class="input-field" data-setting="${item.key}" value="${item.effectiveValue??''}" ${disabled?'disabled':''}>`; };
+async function renderSettingsView() {
+ const container=document.getElementById('view-settings');container.innerHTML='<div class="card">Chargement du centre de paramètres…</div>';
+ try { const [catalog,connections,models,system]=await Promise.all([fetchApi('/api/settings'),fetchApi('/api/connections'),fetchApi('/api/models'),fetchApi('/api/system')]);state.settings={catalog,connections,models,system};
+ const rank={SIMPLE:0,ADVANCED:1,EXPERT:2},query=''; const visible=(catalog.items||[]).filter(x=>rank[x.level]<=rank[settingsLevel]&&x.section===settingsSection);
+ container.innerHTML=`<header class="settings-head"><div><p class="eyebrow">CENTRE DE CONTRÔLE</p><h2>PARAMÈTRES JARVIS</h2><p class="card-subtext">Valeurs effectives, sources et disponibilités — sans faux réglages.</p></div><div class="mode-switch">${['SIMPLE','ADVANCED','EXPERT'].map(x=>`<button class="btn ${x===settingsLevel?'btn-primary':'btn-secondary'} btn-sm" onclick="setSettingsLevel('${x}')">${x==='ADVANCED'?'Avancé':x[0]+x.slice(1).toLowerCase()}</button>`).join('')}</div></header>
+ <nav class="settings-tabs">${Object.entries(settingsSections).map(([id,label])=>`<button class="${id===settingsSection?'active':''}" onclick="setSettingsSection('${id}')">${label}</button>`).join('')}</nav>
+ ${settingsLevel==='EXPERT'?'<input id="settings-search" class="input-field settings-search" placeholder="Rechercher un paramètre…" oninput="filterSettings(this.value)">':''}
+ <div id="settings-content">${renderSettingsSection(visible,connections,models,system,catalog)}</div>`;
+ }catch(err){container.innerHTML=`<div class="card"><strong>Centre indisponible</strong><p>${err.message}</p></div>`;}
 }
-
-function saveConnectionSettings() {
-  const url = document.getElementById('setting-backend-url').value.trim();
-  const token = document.getElementById('setting-token').value.trim();
-
-  state.backendUrl = url;
-  state.token = token;
-
-  localStorage.setItem('jarvis_backend_url', url);
-  localStorage.setItem('jarvis_token', token);
-
-  alert('Paramètres de connexion réseau sauvegardés !');
-  renderAccueilView();
+function renderSettingsSection(items,connections,models,system,catalog){
+ if(settingsSection==='CONNECTIONS_SERVICES')return `<div class="section-title"><div><h3>SERVICES JARVIS</h3><p class="card-subtext">Le ServiceRegistry runtime reste l’autorité.</p></div><button class="btn btn-primary btn-sm" onclick="testAllConnections()">Tester toutes les connexions</button></div><div class="service-settings-grid">${(connections.services||[]).map(serviceCard).join('')}</div>${futureCards(items)}`;
+ if(settingsSection==='INTELLIGENCE')return `<div class="card effective-banner"><strong>${models.activeProvider||catalog.intelligence.activeProvider}</strong><span>${models.activeModel||catalog.intelligence.activeModel}</span><small>Configuration modèle autoritaire existante</small><button class="btn btn-secondary btn-sm" onclick="switchView('models')">Gérer les modèles</button></div>${settingCards(items)}`;
+ if(settingsSection==='AUTONOMY_SECURITY')return `<div class="card safety-card"><h3>AUTO MERGE PR</h3><strong>INTERDIT PAR LE SYSTÈME</strong><p>LOW · exécution automatique<br>MEDIUM · exécution + audit<br>HIGH · approbation utilisateur<br>CRITICAL · confirmation renforcée</p></div>${settingCards(items)}`;
+ if(settingsSection==='SYSTEM')return `<div class="card-grid"><div class="card"><span class="card-subtext">Backend</span><strong>${system.backend}</strong></div><div class="card"><span class="card-subtext">Base de données</span><strong>${system.dbStatus}</strong></div><div class="card"><span class="card-subtext">Version</span><strong>${system.version}</strong></div><div class="card"><span class="card-subtext">Services</span><strong>${system.servicesCount}</strong></div></div>${settingCards(items)}`;
+ return settingCards(items)||`<div class="card empty-state"><h3>${settingsSections[settingsSection]}</h3><p>Les données réelles de ce moteur restent accessibles depuis sa vue dédiée. Aucun réglage non raccordé n’est activé.</p></div>`;
 }
+function settingCards(items){return `<div class="settings-list">${items.map(i=>`<article class="card setting-row" data-search="${(i.label+' '+i.description+' '+i.key).toLowerCase()}"><div><div class="setting-label">${i.label} ${i.availability==='FUTURE'?'<span class="badge badge-warning">FUTUR</span>':''}</div><p>${i.description}</p><small>${i.key} · Source : ${i.source}${i.plannedChantier?` · Chantier ${i.plannedChantier}`:''}</small>${i.unavailableReason?`<small class="future-reason">${i.unavailableReason}</small>`:''}</div><div class="setting-control"><span class="effective">Valeur effective</span>${settingInput(i)}${i.editable?`<button class="btn btn-primary btn-sm" onclick="saveSetting('${i.key}')">Enregistrer</button>`:''}</div></article>`).join('')}</div>`;}
+function futureCards(items){return items.length?`<details class="card future-types"><summary>Types de connexion futurs</summary>${settingCards(items)}</details>`:'';}
+function serviceCard(s){return `<article class="card service-profile"><div class="service-profile-head"><div><h3>${s.name}</h3><code>${s.id}</code></div><span class="badge ${s.status==='CONNECTED'||s.status==='LOCAL'?'badge-success':s.status==='DISABLED'?'badge-warning':'badge-danger'}">${s.status}</span></div><dl><dt>Transport</dt><dd>${s.transport}</dd><dt>Endpoint effectif</dt><dd>${s.endpoint} <small>${s.endpointSource}</small></dd><dt>Capabilities</dt><dd>${s.capabilities.join(', ')}</dd><dt>Priorité</dt><dd>${s.priority}</dd><dt>Authentification</dt><dd>${s.secretConfigured?'Configurée':'Non configurée'}</dd><dt>Dernier test</dt><dd>${s.lastTestAt?new Date(s.lastTestAt).toLocaleString():'Jamais'}${s.lastLatencyMs!=null?` · ${s.lastLatencyMs} ms`:''}</dd></dl>${s.lastError?`<p class="service-error">${s.lastError}</p>`:''}<div class="service-actions"><button class="btn btn-secondary btn-sm" onclick="configureService('${s.id}')">Configurer</button><button class="btn btn-primary btn-sm" onclick="testConnection('${s.id}')">Tester</button><button class="btn btn-secondary btn-sm" onclick="toggleService('${s.id}',${!s.enabled})">${s.enabled?'Désactiver':'Activer'}</button><button class="btn btn-secondary btn-sm" onclick="resetService('${s.id}')">Réinitialiser</button></div></article>`;}
+function setSettingsLevel(v){settingsLevel=v;renderSettingsView();}function setSettingsSection(v){settingsSection=v;renderSettingsView();}
+function filterSettings(q){document.querySelectorAll('.setting-row').forEach(x=>x.hidden=!x.dataset.search.includes(q.toLowerCase()));}
+async function saveSetting(key){const input=document.querySelector(`[data-setting="${key}"]`),value=input.type==='checkbox'?input.checked:input.value;await fetchApi('/api/settings',{method:'POST',body:JSON.stringify({key,value})});if(key==='settings.theme')document.documentElement.dataset.theme=value.toLowerCase();renderSettingsView();}
+async function testConnection(id){await fetchApi(`/api/connections/${id}/test`,{method:'POST'});renderSettingsView();}async function testAllConnections(){await fetchApi('/api/connections/test-all',{method:'POST'});renderSettingsView();}
+async function toggleService(id,enabled){const s=state.settings.connections.services.find(x=>x.id===id);await fetchApi(`/api/connections/${id}`,{method:'PUT',body:JSON.stringify({enabled})});renderSettingsView();}
+async function configureService(id){const s=state.settings.connections.services.find(x=>x.id===id),endpoint=prompt('Base endpoint (les secrets restent exclusivement dans ENV)',s.endpoint);if(endpoint===null)return;await fetchApi(`/api/connections/${id}`,{method:'PUT',body:JSON.stringify({endpoint})});renderSettingsView();}
+async function resetService(id){await fetchApi(`/api/connections/${id}/reset`,{method:'DELETE'});renderSettingsView();}
 
 // --- INITIALIZATION ---
 let jarvisInitialized = false;

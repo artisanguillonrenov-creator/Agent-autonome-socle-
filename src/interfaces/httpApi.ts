@@ -14,6 +14,8 @@ import { WorkspaceStore } from "../workspaces/workspaceStore.js";
 import { ArtifactStore } from "../workspaces/artifactStore.js";
 import { ObservabilityStore } from "../observability/observabilityStore.js";
 import { ActivityStore } from "../observability/activityStore.js";
+import { SettingsStore } from "../settings/settingsStore.js";
+import { validateServiceDefinition } from "../orchestration/serviceRegistry.js";
 
 const taskStore = new TaskStore();
 const notificationStore = new NotificationStore();
@@ -21,6 +23,7 @@ const softwareFactoryService = new SoftwareFactoryService();
 const workspaceStore = new WorkspaceStore();
 const artifactStore = new ArtifactStore(workspaceStore);
 const observabilityStore=new ObservabilityStore();const activityStore=new ActivityStore();
+const settingsStore=new SettingsStore();
 let lastServerError: string | null = null;
 
 async function readBody(req: IncomingMessage): Promise<string> {
@@ -871,36 +874,23 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         return;
       }
 
-      // 14. Settings Endpoints
+      const connectionId=pathname.match(/^\/api\/connections\/([^/]+)(?:\/(test|reset))?$/);
+      const connectionView=(service:any)=>{const diagnostic=agent.serviceOrchestrator.registry.connections.get(service.id);const authEnv=service.auth.type==="bearer_env"?service.auth.envVar:null;return{...service,auth:{type:service.auth.type,envVar:authEnv},secretConfigured:authEnv?Boolean(process.env[authEnv]||(service.id==="software_factory"&&process.env.API_TOKEN)):true,status:!service.enabled?"DISABLED":service.transport==="local"?"LOCAL":diagnostic?.lastError?"ERROR":diagnostic?.lastSuccessAt?"CONNECTED":"UNCONFIGURED",endpointSource:service.source??"FACTORY",lastTestAt:diagnostic?.lastTestAt,lastSuccessAt:diagnostic?.lastSuccessAt,lastLatencyMs:diagnostic?.lastLatencyMs,lastError:diagnostic?.lastError??null,selectedCapabilities:service.capabilities.map((capability:string)=>({capability,selectedService:agent.serviceOrchestrator.registry.findServiceForCapability(capability)?.id??null,alternatives:agent.serviceOrchestrator.registry.listServices().filter(s=>s.enabled&&s.capabilities.includes(capability)&&s.id!==agent.serviceOrchestrator.registry.findServiceForCapability(capability)?.id).map(s=>s.id)}))};};
+      if(req.method==="GET"&&pathname==="/api/connections"){sendJson(res,200,{services:agent.serviceOrchestrator.registry.listServices().map(connectionView),supportedTransports:["local","task_http"],futureTransports:["REST_GENERIC","MCP","OAUTH_CONNECTOR","DATABASE","BROWSER","COMPUTER","AGENT_TO_AGENT","WEBHOOK"]});return;}
+      if(req.method==="POST"&&pathname==="/api/connections/test-all"){const results=[];for(const service of agent.serviceOrchestrator.registry.listServices()){const health=await agent.serviceOrchestrator.adapter.checkHealth(service);agent.serviceOrchestrator.registry.connections.recordDiagnostic(service.id,{success:health.reachable,latencyMs:health.latencyMs,error:health.reachable?undefined:health.errorCode??String(health.status)});results.push({serviceId:service.id,...health});}sendJson(res,200,{results});return;}
+      if(connectionId&&req.method==="GET"&&!connectionId[2]){const service=agent.serviceOrchestrator.registry.getServiceById(decodeURIComponent(connectionId[1]));sendJson(res,service?200:404,service?connectionView(service):{error:"CONNECTION_NOT_FOUND"});return;}
+      if(connectionId&&req.method==="POST"&&connectionId[2]==="test"){const id=decodeURIComponent(connectionId[1]),service=agent.serviceOrchestrator.registry.getServiceById(id);if(!service){sendJson(res,404,{error:"CONNECTION_NOT_FOUND"});return;}const health=await agent.serviceOrchestrator.adapter.checkHealth(service);agent.serviceOrchestrator.registry.connections.recordDiagnostic(id,{success:health.reachable,latencyMs:health.latencyMs,error:health.reachable?undefined:health.errorCode??String(health.status)});sendJson(res,200,{serviceId:id,...health});return;}
+      if(connectionId&&req.method==="DELETE"&&connectionId[2]==="reset"){agent.serviceOrchestrator.registry.connections.reset(decodeURIComponent(connectionId[1]));agent.serviceOrchestrator.registry.refresh();agent.skills.refreshServiceAvailability(agent.serviceOrchestrator.registry);sendJson(res,200,{ok:true});return;}
+      if(connectionId&&req.method==="PUT"&&!connectionId[2]){const id=decodeURIComponent(connectionId[1]),blocking=new Set(["QUEUED","DISPATCHING","RUNNING","WAITING_INPUT","WAITING_PERMISSION"]),taskIds=agent.serviceOrchestrator.store.listOperations().filter(o=>o.selectedService===id&&blocking.has(o.status)).map(o=>o.taskId);if(taskIds.length){sendJson(res,409,{error:"SERVICE_CONNECTION_IN_USE",taskIds});return;}const body=JSON.parse((await readBody(req))||"{}"),existing=agent.serviceOrchestrator.registry.getServiceById(id),known=new Set(agent.serviceOrchestrator.registry.knownCapabilities()),caps=body.capabilities??existing?.capabilities??[];if(caps.some((c:string)=>!known.has(c))){sendJson(res,400,{error:"CONNECTION_CAPABILITY_UNKNOWN"});return;}try{const definition=validateServiceDefinition({...existing,...body,id,name:body.name??existing?.name,enabled:body.enabled??existing?.enabled??true,transport:body.transport??existing?.transport,endpoint:body.endpoint??existing?.endpoint,auth:body.auth??existing?.auth,capabilities:caps,priority:body.priority??existing?.priority},true);if(!existing&&definition.transport!=="task_http")throw new Error("CONNECTION_TRANSPORT_NOT_AVAILABLE");agent.serviceOrchestrator.registry.connections.save({serviceId:id,userCreated:!existing,name:definition.name,enabled:definition.enabled,transport:definition.transport,endpoint:definition.endpoint,healthPath:definition.healthPath,taskPath:definition.taskPath,auth:definition.auth,priority:definition.priority,requestTimeoutMs:definition.requestTimeoutMs,healthTimeoutMs:definition.healthTimeoutMs,capabilities:definition.capabilities,parallelSafeCapabilities:definition.parallelSafeCapabilities,riskByCapability:definition.riskByCapability});agent.serviceOrchestrator.registry.refresh();agent.skills.refreshServiceAvailability(agent.serviceOrchestrator.registry);sendJson(res,200,connectionView(agent.serviceOrchestrator.registry.getServiceById(id)));}catch(e){sendJson(res,400,{error:(e as Error).message});}return;}
+
+      // Settings Center V1: catalog values always include their effective value and source.
       if (req.method === "GET" && pathname === "/api/settings") {
-        sendJson(res, 200, {
-          tokenBudget: config.context.tokenBudget,
-          maxIterations: config.agent.maxIterations,
-          reflectionEveryNSteps: config.reflection.everyNSteps,
-          llmProvider: config.llm.provider,
-          llmModel: config.llm.model,
-        });
+        sendJson(res,200,{items:settingsStore.list((parsedUrl.searchParams.get("scopeType")??"GLOBAL") as any,parsedUrl.searchParams.get("scopeId")??""),intelligence:{activeProvider:config.llm.provider,activeModel:config.llm.model},autoMerge:{effectiveValue:"FORBIDDEN",source:"SYSTEM",editable:false}});
         return;
       }
 
       if (req.method === "POST" && pathname === "/api/settings") {
-        const body = JSON.parse((await readBody(req)) || "{}") as {
-          tokenBudget?: number;
-          maxIterations?: number;
-          reflectionEveryNSteps?: number;
-        };
-        if (body.tokenBudget && body.tokenBudget > 0) config.context.tokenBudget = body.tokenBudget;
-        if (body.maxIterations && body.maxIterations > 0) config.agent.maxIterations = body.maxIterations;
-        if (body.reflectionEveryNSteps && body.reflectionEveryNSteps > 0) config.reflection.everyNSteps = body.reflectionEveryNSteps;
-
-        sendJson(res, 200, {
-          ok: true,
-          settings: {
-            tokenBudget: config.context.tokenBudget,
-            maxIterations: config.agent.maxIterations,
-            reflectionEveryNSteps: config.reflection.everyNSteps,
-          },
-        });
+        const body=JSON.parse((await readBody(req))||"{}");if(!body.key){if(Number.isFinite(body.tokenBudget)&&body.tokenBudget>0)config.context.tokenBudget=body.tokenBudget;if(Number.isFinite(body.maxIterations)&&body.maxIterations>0)config.agent.maxIterations=body.maxIterations;if(Number.isFinite(body.reflectionEveryNSteps)&&body.reflectionEveryNSteps>0)config.reflection.everyNSteps=body.reflectionEveryNSteps;sendJson(res,200,{ok:true,settings:{tokenBudget:config.context.tokenBudget,maxIterations:config.agent.maxIterations,reflectionEveryNSteps:config.reflection.everyNSteps}});return;}try{sendJson(res,200,{ok:true,setting:settingsStore.set(body.key,body.value,body.scopeType??"GLOBAL",body.scopeId??"")});}catch(e){const code=(e as Error).message;sendJson(res,code==="SETTINGS_SCOPE_NOT_AVAILABLE"?409:400,{error:code});}
         return;
       }
 
