@@ -128,6 +128,15 @@ export function getDb(): Database.Database {
       plan_run_id TEXT, plan_node_id TEXT, operation_task_id TEXT, specialist_id TEXT,
       event_type TEXT NOT NULL, level TEXT NOT NULL, message TEXT NOT NULL, metadata_json TEXT
     );
+    CREATE TABLE IF NOT EXISTS skill_preferences (
+      skill_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)), updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS workflows (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, description TEXT NOT NULL, status TEXT NOT NULL,
+      source TEXT NOT NULL, version INTEGER NOT NULL, input_schema_json TEXT NOT NULL,
+      objective_template TEXT NOT NULL, steps_json TEXT NOT NULL, created_from_plan_run_id TEXT,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, last_success_at INTEGER, success_count INTEGER NOT NULL DEFAULT 0
+    );
   `);
 
   const planNodeColumns = new Set(

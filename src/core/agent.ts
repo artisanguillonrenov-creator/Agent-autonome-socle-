@@ -12,6 +12,11 @@ import { ReplanningEngine } from "../planning/replanningEngine.js";
 import { builtinSkills } from "../skills/builtin/index.js";
 import { config } from "../config.js";
 import type { AgentStepResult, ChatMessage, SkillDefinition } from "../types.js";
+import { SkillSelector } from "../skills/selector.js";
+import { createRuntimeSkills } from "../skills/runtime.js";
+import { WorkflowRegistry } from "../workflows/workflowRegistry.js";
+import { executeMissionMetadata } from "../skills/catalog.js";
+import { ActivityStore } from "../observability/activityStore.js";
 
 export interface AgentOptions {
   llm: LLMProvider;
@@ -32,6 +37,8 @@ export class Agent {
   readonly reflection: ReflectionEngine;
   readonly serviceOrchestrator: ServiceOrchestrator;
   readonly planRunner: PlanRunner;
+  readonly workflows: WorkflowRegistry;
+  readonly skillSelector: SkillSelector;
   private llm: LLMProvider;
   private readonly contextBudget: ContextBudgetManager;
   private readonly maxIterations: number;
@@ -52,10 +59,14 @@ export class Agent {
     this.serviceOrchestrator = opts.orchestrator ?? new ServiceOrchestrator();
     this.planRunner = new PlanRunner(this.serviceOrchestrator, this.planner,
       new ReplanningEngine(opts.llm, this.serviceOrchestrator.registry));
-
-    for (const skill of builtinSkills) {
-      this.skills.register(skill);
+    this.workflows=new WorkflowRegistry();
+    const historical=new Map(builtinSkills.map(s=>[s.name,s]));
+    for(const skill of createRuntimeSkills(this.serviceOrchestrator,this.planner,this.planRunner,this.workflows)){
+      const old=historical.get(skill.name);this.skills.register(old?{...skill,handler:skill.handler??old.handler,parameters:old.parameters??skill.parameters,argsHint:old.argsHint}:skill);historical.delete(skill.name);
     }
+    const mission=historical.get("execute_mission")!;this.skills.register({...executeMissionMetadata,...mission,id:"execute_mission",kind:"SYSTEM",availability:"AVAILABLE",exposure:"ALWAYS"});historical.delete("execute_mission");
+    for(const skill of historical.values())this.skills.register(skill);
+    this.skillSelector=new SkillSelector(this.skills);
   }
 
   async step(userInput: string): Promise<AgentStepResult> {
@@ -70,14 +81,8 @@ export class Agent {
 
       const retrieved = await this.memory.retrieve(userInput);
 
-      // Category 1: Mandatory system tools sent to LLM on EVERY turn
-      const mandatorySkillNames = ["dispatch_capability", "execute_mission"];
-      const mandatorySkills = mandatorySkillNames
-        .map((name) => this.skills.get(name))
-        .filter((s): s is SkillDefinition => Boolean(s));
-
-      // Category 2: Dynamic relevant skills found via embedding similarity
-      const relevantSkills = await this.skills.findRelevant(userInput);
+      const mandatorySkills = this.skills.alwaysExposed();
+      const relevantSkills = await this.skillSelector.select(userInput);
 
       // Combine mandatory & relevant skills uniquely
       const skillMap = new Map<string, SkillDefinition>();
@@ -85,6 +90,7 @@ export class Agent {
         skillMap.set(skill.name, skill);
       }
       const availableSkills = Array.from(skillMap.values());
+      new ActivityStore().append({eventType:"SKILLS_SELECTED",message:"Skills selected",metadata:{selectedSkillIds:availableSkills.map(s=>s.id),count:availableSkills.length}});
 
       const reflections = retrieved.relevantMemories.filter((m) => m.kind === "reflection");
       const episodic = retrieved.relevantMemories.filter((m) => m.kind === "episodic");
@@ -152,11 +158,17 @@ export class Agent {
           lastActionOrStep = `Appel outil natif: ${skillName}`;
           console.log(`[Agent] Exécution de l'outil natif '${skillName}' (id: ${toolCall.id}) avec input:`, parsedInput);
 
-          const result = await this.skills.execute(skillName, parsedInput, {
-            rememberFact: (entity, attribute, value) => this.memory.facts.set(entity, attribute, value),
+          const compatibilityInternal=skillName==="dispatch_capability"?this.skills.get(skillName):undefined;
+          const context = {
+            rememberFact: (entity:string, attribute:string, value:string) => this.memory.facts.set(entity, attribute, value),
             serviceOrchestrator: this.serviceOrchestrator,
             planner: this.planner,
-          });
+            skillRegistry:this.skills,
+          };
+          // Compatibility for persisted historical tool calls only; it is never advertised to an LLM.
+          const result = compatibilityInternal?.handler
+            ? await compatibilityInternal.handler(parsedInput,context)
+            : await this.skills.execute(skillName, parsedInput, context);
 
           const formattedToolOutput = `[Résultat de l'outil '${skillName}']: ${result}`;
 
@@ -205,8 +217,8 @@ export class Agent {
       `Date et heure actuelles : ${dateStr} (${isoDate}).`,
       "ACCÈS INTERNET : Tu possèdes un accès Internet fonctionnel grâce à l'outil 'web_search'.",
       "RÈGLE IMPÉRATIVE : Lorsque la demande de l'utilisateur nécessite des informations récentes, actuelles ou externes (ex: météo, actualités, événements, films au cinéma 'ce mois-ci' ou 'cette année'), tu DOIS obligatoirement appeler l'outil 'web_search'. Ne dis JAMAIS que tu n'as pas accès à Internet.",
-      "DÉLÉGATION EXTERNE : Lorsque la demande concerne la création/développement d'un logiciel ou d'une application, utilise l'outil 'dispatch_capability' avec la capacité 'software_development'.",
-      "PLANIFICATION : utilise 'dispatch_capability' pour une action simple et 'execute_mission' pour un objectif réellement multi-étapes. Fournis alors un graphe structuré complet ; ne simule pas son exécution.",
+      "DÉLÉGATION : utilise les skills métier de haut niveau disponibles (software_development, deep_research, file_management). dispatch_capability est interne et ne doit jamais être appelé.",
+      `PLANIFICATION : utilise 'execute_mission' uniquement pour un objectif réellement multi-étapes. Capabilities actuellement planifiables : ${this.serviceOrchestrator.registry.listServices().filter(s=>s.enabled).flatMap(s=>s.capabilities).filter((x,i,a)=>a.indexOf(x)===i).join(", ") || "aucune"}.`,
       "ENRICHISSEMENT VISUEL : Structure TOUTES tes réponses complexes (listes, classements, comparaisons, synthèses) sous forme de tableaux Markdown, listes à puces thématiques et liens cliquables.",
       "RÈGLE DE FORMAT : Utilise les outils natifs mis à ta disposition. Ne rédiges JAMAIS de structures techniques JSON ou balises XML dans le texte adressé à l'utilisateur.",
     ].join("\n");

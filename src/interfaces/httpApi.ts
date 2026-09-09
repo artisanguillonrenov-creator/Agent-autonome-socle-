@@ -524,14 +524,19 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
           res,
           200,
           agent.skills.list().map((s) => ({
+            id: s.id,
             name: s.name,
+            displayName:s.displayName,
             description: s.description,
-            argsHint: s.argsHint,
-            available: true,
+            category:s.category,kind:s.kind,availability:s.availability,enabled:agent.skills.isEnabled(s),exposure:s.exposure,risk:s.risk,executionTarget:s.executionTarget,serviceCapability:s.serviceCapability,unavailableReason:s.unavailableReason,
           })),
         );
         return;
       }
+      if(req.method==="GET"&&pathname==="/api/workflows"){sendJson(res,200,agent.workflows.list());return;}
+      const workflowGet=pathname.match(/^\/api\/workflows\/([^/]+)$/);if(req.method==="GET"&&workflowGet){const workflow=agent.workflows.get(decodeURIComponent(workflowGet[1]));sendJson(res,workflow?200:404,workflow??{error:"workflow non trouvé"});return;}
+      const workflowAction=pathname.match(/^\/api\/workflows\/([^/]+)\/(approve|disable|archive)$/);if(req.method==="POST"&&workflowAction){const status=workflowAction[2]==="approve"?"ACTIVE":workflowAction[2]==="disable"?"DISABLED":"ARCHIVED";const ok=agent.workflows.setStatus(decodeURIComponent(workflowAction[1]),status);sendJson(res,ok?200:404,ok?{ok:true,status}:{error:"workflow non trouvé"});return;}
+      const learnWorkflow=pathname.match(/^\/api\/plans\/([^/]+)\/learn-workflow$/);if(req.method==="POST"&&learnWorkflow){try{sendJson(res,201,agent.workflows.learnFromPlan(decodeURIComponent(learnWorkflow[1]),agent.planner));}catch(e){sendJson(res,409,{error:(e as Error).message});}return;}
 
       // 10. OTA Endpoints
       if (req.method === "GET" && pathname === "/api/ota/manifest") {

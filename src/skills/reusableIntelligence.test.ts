@@ -1,0 +1,10 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { canonicalSkillCatalog, CANONICAL_SKILL_IDS } from "./catalog.js";
+import { SkillRegistry } from "./registry.js";
+import { SkillSelector } from "./selector.js";
+import { LocalHashingEmbeddingProvider } from "../llm/embeddings.js";
+
+test("catalogue canonique contient exactement 40 identifiants sans collision",()=>{assert.equal(canonicalSkillCatalog.length,40);assert.equal(new Set(CANONICAL_SKILL_IDS).size,40);assert.equal(new Set(canonicalSkillCatalog.map(x=>x.name)).size,40);assert.equal(new Set(canonicalSkillCatalog.flatMap(x=>x.aliases??[])).size,canonicalSkillCatalog.flatMap(x=>x.aliases??[]).length);});
+test("selector exclut internal/future et respecte une limite déterministe",async()=>{const registry=new SkillRegistry(new LocalHashingEmbeddingProvider());for(const raw of canonicalSkillCatalog)registry.register({...raw,handler:async()=>"ok"});const selector=new SkillSelector(registry,3);const first=await selector.select("cherche les dernières nouvelles et prix");assert.ok(first.some(x=>x.name==="web_search"));assert.ok(first.some(x=>x.name==="deep_research"));assert.ok(first.length<=3);assert.ok(first.every(x=>x.kind!=="INTERNAL"&&x.kind!=="FUTURE"));assert.deepEqual((await selector.select("texte neutre")).map(x=>x.name),(await selector.select("texte neutre")).map(x=>x.name));});
+test("boosts code, rappel et surveillance restent métier",async()=>{const registry=new SkillRegistry(new LocalHashingEmbeddingProvider());for(const raw of canonicalSkillCatalog)registry.register({...raw,handler:async()=>"ok"});const selector=new SkillSelector(registry,8);assert.ok((await selector.select("modifie www/app.js sur GitHub")).some(x=>x.name==="software_development"));assert.ok((await selector.select("programme un rappel")).some(x=>x.name==="schedule_task"));assert.ok((await selector.select("surveille ce changement")).some(x=>x.name==="monitor_condition"));assert.ok(!(await selector.select("ouvre mon calendrier")).some(x=>x.name==="calendar"));});
