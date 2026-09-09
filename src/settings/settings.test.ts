@@ -908,7 +908,7 @@ test("FACTORY NAME ROUNDTRIP: Factory service name override is preserved on expo
     const exportRes = await fetch(`http://localhost:${testPort}/api/settings/export`, { headers });
     const exportData = await exportRes.json();
     const sfOverride = exportData.serviceOverrides.find((o: any) => o.serviceId === "software_factory");
-    assert.equal(sfOverride.name, "Software Factory Custom Name");
+    assert.equal(sfOverride.nameOverride, "Software Factory Custom Name");
 
     // 3. Reset override
     await fetch(`http://localhost:${testPort}/api/connections/software_factory/reset`, {
@@ -916,7 +916,7 @@ test("FACTORY NAME ROUNDTRIP: Factory service name override is preserved on expo
       headers,
     });
     const resetSvc = agent.serviceOrchestrator.registry.getServiceById("software_factory");
-    assert.notEqual(resetSvc?.name, "Software Factory Custom Name");
+    assert.equal(resetSvc?.name, "Software Factory Service V1");
 
     // 4. Import exported payload
     const importRes = await fetch(`http://localhost:${testPort}/api/settings/import`, {
@@ -929,6 +929,283 @@ test("FACTORY NAME ROUNDTRIP: Factory service name override is preserved on expo
     // 5. Verify name is restored!
     const restoredSvc = agent.serviceOrchestrator.registry.getServiceById("software_factory");
     assert.equal(restoredSvc?.name, "Software Factory Custom Name");
+  } finally {
+    server.close();
+    config.api.token = previousToken;
+  }
+});
+
+test("DUPLICATE POST REJECTED: POST /api/connections rejects existing factory or user service IDs with 409", async () => {
+  setupTestDb();
+  const previousToken = config.api.token;
+  config.api.token = "duplicate-post-token";
+
+  const { startHttpApi } = await import("../interfaces/httpApi.js");
+  const { Agent } = await import("../core/agent.js");
+  const { MockProvider } = await import("../llm/providers/mock.js");
+
+  const agent = new Agent({
+    llm: new MockProvider(),
+    embeddings: new LocalHashingEmbeddingProvider(),
+  });
+
+  const testPort = 4108;
+  const server = startHttpApi(agent, testPort);
+  const headers = { authorization: "Bearer duplicate-post-token", "content-type": "application/json" };
+
+  try {
+    // 1. Duplicate POST with existing factory service ID "software_factory" -> 409 CONNECTION_ALREADY_EXISTS
+    const factoryPostRes = await fetch(`http://localhost:${testPort}/api/connections`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        id: "software_factory",
+        name: "Software Factory Duplicate",
+        endpoint: "http://localhost:9999",
+      }),
+    });
+    assert.equal(factoryPostRes.status, 409);
+    const factoryErr = await factoryPostRes.json();
+    assert.equal(factoryErr.error, "CONNECTION_ALREADY_EXISTS");
+
+    // 2. Create user service
+    const createRes = await fetch(`http://localhost:${testPort}/api/connections`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        id: "my_user_service_post_test",
+        name: "My User Service",
+        endpoint: "http://localhost:4000",
+        capabilities: ["software_development"],
+      }),
+    });
+    assert.equal(createRes.status, 201);
+
+    // 3. Repeat POST with same user service ID -> 409
+    const repeatPostRes = await fetch(`http://localhost:${testPort}/api/connections`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        id: "my_user_service_post_test",
+        name: "My User Service Modified",
+        endpoint: "http://localhost:5000",
+      }),
+    });
+    assert.equal(repeatPostRes.status, 409);
+    const repeatErr = await repeatPostRes.json();
+    assert.equal(repeatErr.error, "CONNECTION_ALREADY_EXISTS");
+
+    // 4. Verify original user service definition is intact
+    const svc = agent.serviceOrchestrator.registry.getServiceById("my_user_service_post_test");
+    assert.equal(svc?.endpoint, "http://localhost:4000");
+  } finally {
+    server.close();
+    config.api.token = previousToken;
+  }
+});
+
+test("USER SERVICE TRANSPORT RESTRICTION: User connections must use task_http transport only", async () => {
+  setupTestDb();
+  const previousToken = config.api.token;
+  config.api.token = "transport-test-token";
+
+  const { startHttpApi } = await import("../interfaces/httpApi.js");
+  const { Agent } = await import("../core/agent.js");
+  const { MockProvider } = await import("../llm/providers/mock.js");
+
+  const agent = new Agent({
+    llm: new MockProvider(),
+    embeddings: new LocalHashingEmbeddingProvider(),
+  });
+
+  const testPort = 4109;
+  const server = startHttpApi(agent, testPort);
+  const headers = { authorization: "Bearer transport-test-token", "content-type": "application/json" };
+
+  try {
+    // 1. POST user service with local transport -> 400
+    const postLocalRes = await fetch(`http://localhost:${testPort}/api/connections`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        id: "user_svc_local_post",
+        name: "User Service Local Post",
+        transport: "local",
+        capabilities: ["software_development"],
+      }),
+    });
+    assert.equal(postLocalRes.status, 400);
+
+    // 2. Create valid user service (task_http)
+    const postHttpRes = await fetch(`http://localhost:${testPort}/api/connections`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        id: "user_svc_valid_http",
+        name: "User Service Valid HTTP",
+        transport: "task_http",
+        endpoint: "http://localhost:4000",
+        capabilities: ["software_development"],
+      }),
+    });
+    assert.equal(postHttpRes.status, 201);
+
+    // 3. PATCH user service to local transport -> 400
+    const patchLocalRes = await fetch(`http://localhost:${testPort}/api/connections/user_svc_valid_http`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ transport: "local" }),
+    });
+    assert.equal(patchLocalRes.status, 400);
+
+    // 4. IMPORT user service with local transport -> 400 SETTINGS_IMPORT_INVALID
+    const importLocalRes = await fetch(`http://localhost:${testPort}/api/settings/import`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        schemaVersion: 1,
+        serviceOverrides: [
+          {
+            serviceId: "user_svc_imported_local",
+            name: "User Svc Imported Local",
+            userCreated: true,
+            transportOverride: "local",
+          },
+        ],
+      }),
+    });
+    assert.equal(importLocalRes.status, 400);
+    const importErr = await importLocalRes.json();
+    assert.equal(importErr.error, "SETTINGS_IMPORT_INVALID");
+
+    // 5. Verify factory service with local transport remains valid
+    const sfSvc = agent.serviceOrchestrator.registry.getServiceById("software_factory");
+    assert.ok(sfSvc);
+  } finally {
+    server.close();
+    config.api.token = previousToken;
+  }
+});
+
+test("NAME OVERRIDE DISTINCT FROM DIAGNOSTICS: Diagnostic health check does not create a name override nor change source", async () => {
+  setupTestDb();
+  const previousToken = config.api.token;
+  config.api.token = "name-diag-test-token";
+
+  const { startHttpApi } = await import("../interfaces/httpApi.js");
+  const { Agent } = await import("../core/agent.js");
+  const { MockProvider } = await import("../llm/providers/mock.js");
+
+  const agent = new Agent({
+    llm: new MockProvider(),
+    embeddings: new LocalHashingEmbeddingProvider(),
+  });
+
+  const testPort = 4110;
+  const server = startHttpApi(agent, testPort);
+  const headers = { authorization: "Bearer name-diag-test-token", "content-type": "application/json" };
+
+  try {
+    // 1. Initial factory service name & source
+    const initialSvc = agent.serviceOrchestrator.registry.getServiceById("software_factory");
+    assert.equal(initialSvc?.name, "Software Factory Service V1");
+    assert.equal(initialSvc?.source, "FACTORY");
+
+    // 2. Perform connection health check test
+    await fetch(`http://localhost:${testPort}/api/connections/software_factory/test`, {
+      method: "POST",
+      headers,
+    });
+
+    // 3. Export settings and connection overrides
+    const exportRes = await fetch(`http://localhost:${testPort}/api/settings/export`, { headers });
+    const exportData = await exportRes.json();
+    const sfOverride = exportData.serviceOverrides.find((o: any) => o.serviceId === "software_factory");
+
+    assert.equal(sfOverride?.nameOverride, undefined); // No name override created!
+
+    // 4. Reset factory override
+    await fetch(`http://localhost:${testPort}/api/connections/software_factory/reset`, {
+      method: "POST",
+      headers,
+    });
+
+    // 5. Import exported payload
+    const importRes = await fetch(`http://localhost:${testPort}/api/settings/import`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(exportData),
+    });
+    assert.equal(importRes.status, 200);
+
+    // 6. Verify name remains "Software Factory Service V1" and source remains FACTORY
+    const reimportedSvc = agent.serviceOrchestrator.registry.getServiceById("software_factory");
+    assert.equal(reimportedSvc?.name, "Software Factory Service V1");
+    assert.equal(reimportedSvc?.source, "FACTORY");
+  } finally {
+    server.close();
+    config.api.token = previousToken;
+  }
+});
+
+test("NAME OVERRIDE EXPLICIT RENAME: Renaming factory service sets nameOverride and source = DATABASE", async () => {
+  setupTestDb();
+  const previousToken = config.api.token;
+  config.api.token = "rename-test-token";
+
+  const { startHttpApi } = await import("../interfaces/httpApi.js");
+  const { Agent } = await import("../core/agent.js");
+  const { MockProvider } = await import("../llm/providers/mock.js");
+
+  const agent = new Agent({
+    llm: new MockProvider(),
+    embeddings: new LocalHashingEmbeddingProvider(),
+  });
+
+  const testPort = 4111;
+  const server = startHttpApi(agent, testPort);
+  const headers = { authorization: "Bearer rename-test-token", "content-type": "application/json" };
+
+  try {
+    // 1. Rename software_factory to "Ma Factory"
+    const patchRes = await fetch(`http://localhost:${testPort}/api/connections/software_factory`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ name: "Ma Factory" }),
+    });
+    assert.equal(patchRes.status, 200);
+
+    const renamedSvc = agent.serviceOrchestrator.registry.getServiceById("software_factory");
+    assert.equal(renamedSvc?.name, "Ma Factory");
+    assert.equal(renamedSvc?.source, "DATABASE");
+
+    // 2. Export settings
+    const exportRes = await fetch(`http://localhost:${testPort}/api/settings/export`, { headers });
+    const exportData = await exportRes.json();
+    const sfOverride = exportData.serviceOverrides.find((o: any) => o.serviceId === "software_factory");
+    assert.equal(sfOverride?.nameOverride, "Ma Factory");
+
+    // 3. Reset factory override
+    await fetch(`http://localhost:${testPort}/api/connections/software_factory/reset`, {
+      method: "POST",
+      headers,
+    });
+    const resetSvc = agent.serviceOrchestrator.registry.getServiceById("software_factory");
+    assert.equal(resetSvc?.name, "Software Factory Service V1");
+    assert.equal(resetSvc?.source, "FACTORY");
+
+    // 4. Import exported payload
+    const importRes = await fetch(`http://localhost:${testPort}/api/settings/import`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(exportData),
+    });
+    assert.equal(importRes.status, 200);
+
+    // 5. Verify name "Ma Factory" and source DATABASE are restored
+    const reimportedSvc = agent.serviceOrchestrator.registry.getServiceById("software_factory");
+    assert.equal(reimportedSvc?.name, "Ma Factory");
+    assert.equal(reimportedSvc?.source, "DATABASE");
   } finally {
     server.close();
     config.api.token = previousToken;

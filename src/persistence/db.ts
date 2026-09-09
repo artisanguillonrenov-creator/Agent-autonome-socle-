@@ -165,6 +165,7 @@ export function getDb(): Database.Database {
     CREATE TABLE IF NOT EXISTS service_connections (
       service_id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
+      name_override TEXT,
       user_created INTEGER NOT NULL DEFAULT 0,
       enabled_override INTEGER,
       transport_override TEXT,
@@ -228,6 +229,13 @@ export function getDb(): Database.Database {
   };
   for (const [column, definition] of Object.entries(missingCheckpointColumns)) {
     if (!checkpointColumns.has(column)) db.exec(`ALTER TABLE checkpoints ADD COLUMN ${column} ${definition}`);
+  }
+
+  const connectionColumns = new Set(
+    (db.pragma("table_info(service_connections)") as Array<{ name: string }>).map((column) => column.name),
+  );
+  if (!connectionColumns.has("name_override")) {
+    db.exec("ALTER TABLE service_connections ADD COLUMN name_override TEXT");
   }
 
   const processedEventColumns = new Set(

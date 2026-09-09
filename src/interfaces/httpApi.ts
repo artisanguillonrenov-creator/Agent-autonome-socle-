@@ -360,6 +360,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
           serviceOverrides: serviceOverrides.map((o) => ({
             serviceId: o.serviceId,
             name: o.name,
+            nameOverride: o.nameOverride,
             userCreated: o.userCreated,
             enabledOverride: o.enabledOverride,
             transportOverride: o.transportOverride,
@@ -434,11 +435,13 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
 
                 const serviceId = o.serviceId.trim();
                 const isFactory = agent.serviceOrchestrator.registry.isFactoryService(serviceId);
+                const factoryService = isFactory ? agent.serviceOrchestrator.registry.getServiceById(serviceId) : null;
 
                 if (isFactory) {
                   // Apply ONLY present overrides for factory service without defaulting undefined fields
                   const patchObj: any = {};
-                  if (o.name !== undefined) patchObj.name = o.name;
+                  const importedName = o.nameOverride !== undefined ? o.nameOverride : (o.name && factoryService && o.name !== factoryService.name && o.name !== factoryService.id ? o.name : undefined);
+                  if (importedName !== undefined) patchObj.name = importedName;
                   if (o.enabledOverride !== undefined) patchObj.enabled = o.enabledOverride;
                   if (o.endpointOverride !== undefined) patchObj.endpoint = o.endpointOverride;
                   if (o.transportOverride !== undefined) patchObj.transport = o.transportOverride;
@@ -456,6 +459,9 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
 
                   agent.serviceOrchestrator.registry.patchService(serviceId, patchObj);
                 } else {
+                  if (o.transportOverride && o.transportOverride !== "task_http") {
+                    throw new Error("USER_SERVICE_TRANSPORT_MUST_BE_TASK_HTTP");
+                  }
                   // User-created service import requires full valid definition
                   agent.serviceOrchestrator.registry.register({
                     id: serviceId,
@@ -743,6 +749,17 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
           return;
         }
 
+        const id = typeof body.id === "string" ? body.id.trim() : body.serviceId?.trim();
+        if (!id) {
+          sendJson(res, 400, { error: "id est requis" });
+          return;
+        }
+
+        if (agent.serviceOrchestrator.registry.getServiceById(id)) {
+          sendJson(res, 409, { error: "CONNECTION_ALREADY_EXISTS" });
+          return;
+        }
+
         if (body.transport && body.transport !== "task_http") {
           sendJson(res, 400, { error: "INVALID_TRANSPORT: user services must use task_http" });
           return;
@@ -750,8 +767,8 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
 
         try {
           const newDef = {
-            id: typeof body.id === "string" ? body.id.trim() : body.serviceId?.trim(),
-            name: typeof body.name === "string" ? body.name.trim() : body.id,
+            id,
+            name: typeof body.name === "string" ? body.name.trim() : id,
             userCreated: true,
             enabled: body.enabled ?? true,
             transport: "task_http" as const,

@@ -271,8 +271,13 @@ export class ServiceRegistry {
       }
     }
 
-    if (patch.transport !== undefined && !["local", "task_http"].includes(patch.transport)) {
-      throw new Error("invalid transport");
+    if (patch.transport !== undefined) {
+      if (!["local", "task_http"].includes(patch.transport)) {
+        throw new Error("invalid transport");
+      }
+      if (!isFactory && patch.transport !== "task_http") {
+        throw new Error("INVALID_TRANSPORT: user services must use task_http");
+      }
     }
 
     if (patch.healthPath !== undefined) {
@@ -366,7 +371,10 @@ export class ServiceRegistry {
     }
 
     const patchRecord: any = {};
-    if (patch.name !== undefined) patchRecord.name = patch.name;
+    if (patch.name !== undefined) {
+      if (isFactory) patchRecord.nameOverride = patch.name;
+      else patchRecord.name = patch.name;
+    }
     if (patch.enabled !== undefined) patchRecord.enabledOverride = patch.enabled;
     if (patch.transport !== undefined) patchRecord.transportOverride = patch.transport;
     if (patch.endpoint !== undefined) patchRecord.endpointOverride = patch.endpoint;
@@ -449,7 +457,7 @@ export class ServiceRegistry {
         const hasDbOverride = hasConfigOverride(ov);
         const merged: ServiceDefinition = {
           ...factoryDef,
-          name: ov.name || factoryDef.name,
+          name: ov.nameOverride || factoryDef.name,
           enabled: ov.enabledOverride !== undefined ? ov.enabledOverride : factoryDef.enabled,
           transport: ov.transportOverride || factoryDef.transport,
           endpoint: ov.endpointOverride || factoryDef.endpoint,

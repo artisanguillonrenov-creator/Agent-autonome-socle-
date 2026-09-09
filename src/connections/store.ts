@@ -5,6 +5,7 @@ import type { ServiceAuth, ServiceTransport } from "../orchestration/serviceRegi
 export interface ServiceConnectionRecord {
   serviceId: string;
   name: string;
+  nameOverride?: string;
   userCreated: boolean;
   enabledOverride?: boolean;
   transportOverride?: ServiceTransport;
@@ -28,6 +29,7 @@ export interface ServiceConnectionRecord {
 
 export function hasConfigOverride(rec: ServiceConnectionRecord): boolean {
   return (
+    rec.nameOverride !== undefined ||
     rec.enabledOverride !== undefined ||
     rec.transportOverride !== undefined ||
     rec.endpointOverride !== undefined ||
@@ -73,6 +75,7 @@ export class ConnectionStore {
     const merged: ServiceConnectionRecord = {
       serviceId: record.serviceId,
       name: record.name ?? existing?.name ?? record.serviceId,
+      nameOverride: record.nameOverride !== undefined ? record.nameOverride : existing?.nameOverride,
       userCreated: record.userCreated !== undefined ? Boolean(record.userCreated) : existing?.userCreated ?? false,
       enabledOverride: record.enabledOverride !== undefined ? Boolean(record.enabledOverride) : existing?.enabledOverride,
       transportOverride: record.transportOverride ?? existing?.transportOverride,
@@ -102,13 +105,14 @@ export class ConnectionStore {
     const db = getDb();
     db.prepare(`
       INSERT INTO service_connections (
-        service_id, name, user_created, enabled_override, transport_override, endpoint_override,
+        service_id, name, name_override, user_created, enabled_override, transport_override, endpoint_override,
         health_path, task_path, auth_type_override, auth_env_var, priority_override,
         request_timeout_ms, health_timeout_ms, capabilities_json, parallel_safe_capabilities_json,
         risk_by_capability_json, last_test_at, last_success_at, last_latency_ms, last_error, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(service_id) DO UPDATE SET
         name = excluded.name,
+        name_override = excluded.name_override,
         user_created = excluded.user_created,
         enabled_override = excluded.enabled_override,
         transport_override = excluded.transport_override,
@@ -131,6 +135,7 @@ export class ConnectionStore {
     `).run(
       merged.serviceId,
       merged.name,
+      merged.nameOverride ?? null,
       merged.userCreated ? 1 : 0,
       merged.enabledOverride !== undefined ? (merged.enabledOverride ? 1 : 0) : null,
       merged.transportOverride ?? null,
@@ -160,6 +165,7 @@ export class ConnectionStore {
     const merged: ServiceConnectionRecord = {
       serviceId,
       name: patch.name !== undefined ? patch.name : existing?.name ?? serviceId,
+      nameOverride: patch.nameOverride !== undefined ? patch.nameOverride : existing?.nameOverride,
       userCreated: existing?.userCreated ?? false,
       enabledOverride: patch.enabledOverride !== undefined ? patch.enabledOverride : existing?.enabledOverride,
       transportOverride: patch.transportOverride !== undefined ? patch.transportOverride : existing?.transportOverride,
@@ -189,13 +195,14 @@ export class ConnectionStore {
     const db = getDb();
     db.prepare(`
       INSERT INTO service_connections (
-        service_id, name, user_created, enabled_override, transport_override, endpoint_override,
+        service_id, name, name_override, user_created, enabled_override, transport_override, endpoint_override,
         health_path, task_path, auth_type_override, auth_env_var, priority_override,
         request_timeout_ms, health_timeout_ms, capabilities_json, parallel_safe_capabilities_json,
         risk_by_capability_json, last_test_at, last_success_at, last_latency_ms, last_error, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(service_id) DO UPDATE SET
         name = excluded.name,
+        name_override = excluded.name_override,
         user_created = excluded.user_created,
         enabled_override = excluded.enabled_override,
         transport_override = excluded.transport_override,
@@ -214,6 +221,7 @@ export class ConnectionStore {
     `).run(
       merged.serviceId,
       merged.name,
+      merged.nameOverride ?? null,
       merged.userCreated ? 1 : 0,
       merged.enabledOverride !== undefined ? (merged.enabledOverride ? 1 : 0) : null,
       merged.transportOverride ?? null,
@@ -292,6 +300,7 @@ export class ConnectionStore {
     return {
       serviceId: row.service_id,
       name: row.name,
+      nameOverride: row.name_override || undefined,
       userCreated: Boolean(row.user_created),
       enabledOverride: row.enabled_override !== null ? Boolean(row.enabled_override) : undefined,
       transportOverride: row.transport_override || undefined,
