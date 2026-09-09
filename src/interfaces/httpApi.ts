@@ -140,6 +140,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
     }
 
     try {
+      if(req.method==="GET"&&pathname==="/api/specialists"){sendJson(res,200,agent.planRunner.specialists.list().map(({id,name,enabled,allowedCapabilities,maxConcurrency})=>({id,name,enabled,allowedCapabilities,maxConcurrency})));return;}
       const operationMetrics=pathname.match(/^\/api\/operations\/([^/]+)\/metrics$/);if(req.method==="GET"&&operationMetrics){const value=observabilityStore.operation(decodeURIComponent(operationMetrics[1]));sendJson(res,value?200:404,value??{error:"not_found"});return;}
       const planMetrics=pathname.match(/^\/api\/plans\/([^/]+)\/metrics$/);if(req.method==="GET"&&planMetrics){const value=observabilityStore.plan(decodeURIComponent(planMetrics[1]));sendJson(res,value?200:404,value??{error:"not_found"});return;}
       if(req.method==="GET"&&pathname==="/api/activity"){sendJson(res,200,{items:activityStore.list({planRunId:parsedUrl.searchParams.get("planRunId")??undefined,operationTaskId:parsedUrl.searchParams.get("operationTaskId")??undefined,specialistId:parsedUrl.searchParams.get("specialistId")??undefined,eventType:parsedUrl.searchParams.get("eventType")??undefined,level:parsedUrl.searchParams.get("level")??undefined,limit:Number(parsedUrl.searchParams.get("limit"))||100,offset:Number(parsedUrl.searchParams.get("offset"))||0})});return;}

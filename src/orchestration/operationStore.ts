@@ -168,7 +168,7 @@ export class OperationStore {
   claimNextBackground(parallelOnly?:boolean): { operation: ServiceOperation; request: TaskRequest | null } | null {
     const db = getDb();
     return db.transaction(() => {
-      const lane=parallelOnly===undefined?"":` AND parallel_allowed=${parallelOnly?1:0}`;const row = db.prepare(`SELECT task_id,dispatch_request_json FROM service_operations WHERE execution_mode='background' AND status='QUEUED'${lane} ORDER BY queued_at,created_at,task_id LIMIT 1`).get() as any;
+      const lane=parallelOnly===undefined?"":` AND parallel_allowed=${parallelOnly?1:0}`;const row = db.prepare(`SELECT task_id,dispatch_request_json FROM service_operations WHERE execution_mode='background' AND status='QUEUED'${lane} ORDER BY queued_at,created_at,rowid LIMIT 1`).get() as any;
       if (!row) return null;
       const op = this.getOperation(row.task_id); if (!op) return null;
       let parsed: unknown; try { parsed = JSON.parse(row.dispatch_request_json); } catch { parsed = null; }
@@ -216,12 +216,13 @@ export class OperationStore {
     const db = getDb();
     const now = Date.now();
 
+    const isRetry=currentOp.status==="FAILED"&&status==="DISPATCHING";
     db.prepare(`
       UPDATE service_operations
-      SET status = ?, result = COALESCE(?, result), error = COALESCE(?, error),
+      SET status = ?, result = COALESCE(?, result), error = COALESCE(?, error), retry_count=retry_count+?,
           finished_at = CASE WHEN ? IN ('COMPLETED','FAILED','REJECTED','CANCELLED') THEN ? ELSE finished_at END, updated_at = ?
       WHERE task_id = ?
-    `).run(status, result ?? null, error ?? null, status, now, now, taskId);
+    `).run(status, result ?? null, error ?? null, isRetry?1:0, status, now, now, taskId);
 
     return true;
   }
