@@ -17,6 +17,7 @@ import { createRuntimeSkills } from "../skills/runtime.js";
 import { WorkflowRegistry } from "../workflows/workflowRegistry.js";
 import { executeMissionMetadata } from "../skills/catalog.js";
 import { ActivityStore } from "../observability/activityStore.js";
+import { GitHubRepositoryReader } from "../services/githubRepositoryReader.js";
 
 export interface AgentOptions {
   llm: LLMProvider;
@@ -25,6 +26,7 @@ export interface AgentOptions {
   reflectionEveryNSteps?: number;
   contextTokenBudget?: number;
   orchestrator?: ServiceOrchestrator;
+  repositoryReader?: GitHubRepositoryReader | null;
 }
 
 /**
@@ -61,7 +63,8 @@ export class Agent {
       new ReplanningEngine(opts.llm, this.serviceOrchestrator.registry));
     this.workflows=new WorkflowRegistry();
     const historical=new Map(builtinSkills.map(s=>[s.name,s]));
-    for(const skill of createRuntimeSkills(this.serviceOrchestrator,this.planner,this.planRunner,this.workflows)){
+    const repositoryReader=opts.repositoryReader===undefined?new GitHubRepositoryReader({token:process.env.GITHUB_TOKEN}):opts.repositoryReader;
+    for(const skill of createRuntimeSkills(this.serviceOrchestrator,this.planner,this.planRunner,this.workflows,repositoryReader)){
       const old=historical.get(skill.name);this.skills.register(old?{...skill,handler:skill.handler??old.handler,parameters:old.parameters??skill.parameters,argsHint:old.argsHint}:skill);historical.delete(skill.name);
     }
     const mission=historical.get("execute_mission")!;this.skills.register({...executeMissionMetadata,...mission,id:"execute_mission",kind:"SYSTEM",availability:"AVAILABLE",exposure:"ALWAYS"});historical.delete("execute_mission");
@@ -259,7 +262,8 @@ export class Agent {
       `Date et heure actuelles : ${dateStr} (${isoDate}).`,
       selectedNames.has("web_search")?"ACCÈS INTERNET : l'outil 'web_search' sélectionné permet une recherche Web actuelle.":"",
       selectedNames.has("web_search")?"INFORMATIONS ACTUELLES : utilise 'web_search' lorsque la réponse exige des données récentes ou externes.":"",
-      `SKILLS MÉTIER SÉLECTIONNÉS : ${["software_development","deep_research","file_management"].filter(name=>selectedNames.has(name)).join(", ")||"aucun"}. dispatch_capability est interne et ne doit jamais être appelé.`,
+      `SKILLS MÉTIER SÉLECTIONNÉS : ${["software_development","deep_research","knowledge_search","file_management"].filter(name=>selectedNames.has(name)).join(", ")||"aucun"}. dispatch_capability est interne et ne doit jamais être appelé.`,
+      selectedNames.has("knowledge_search")?"DÉPÔT : pour auditer/localiser du code, appelle knowledge_search avant toute modification. Un audit reste READ-ONLY. Pour corriger sans filePath, software_development effectue la discovery puis délègue à la Software Factory, qui doit s'arrêter à la PR.":"",
       `PLANIFICATION : utilise 'execute_mission' uniquement pour un objectif réellement multi-étapes. Capabilities actuellement planifiables : ${this.serviceOrchestrator.registry.listServices().filter(s=>s.enabled).flatMap(s=>s.capabilities).filter((x,i,a)=>a.indexOf(x)===i).join(", ") || "aucune"}.`,
       "ENRICHISSEMENT VISUEL : Structure TOUTES tes réponses complexes (listes, classements, comparaisons, synthèses) sous forme de tableaux Markdown, listes à puces thématiques et liens cliquables.",
       "RÈGLE DE FORMAT : Utilise les outils natifs mis à ta disposition. Ne rédiges JAMAIS de structures techniques JSON ou balises XML dans le texte adressé à l'utilisateur.",

@@ -16,12 +16,12 @@ const categories: Record<string, SkillCategory> = {
 };
 const descriptions: Partial<Record<CanonicalSkillId,string>> = {
   inspect_task:"Inspecte factuellement une opération, un plan ou une programmation.", cancel_task:"Annule une tâche ou demande son annulation sans exagérer le résultat.", schedule_task:"Crée et administre rappels et tâches programmées.", monitor_condition:"Surveille périodiquement une condition avec le moteur WATCH.",
-  web_search:"Recherche des informations actuelles sur le Web.", deep_research:"Effectue une recherche approfondie et documentée.", file_management:"Liste, lit, écrit ou supprime un fichier dans un workspace sécurisé.", software_development:"Délègue une modification logicielle à la Software Factory.", execute_workflow:"Exécute un workflow réutilisable actif.", manage_skill:"Administre les préférences de skills et le cycle de vie des workflows.", compare_sources:"Compare plusieurs sources sur un sujet.", monitor_web:"Surveille périodiquement une information Web.",
+  web_search:"Recherche des informations actuelles sur le Web.", deep_research:"Effectue une recherche approfondie et documentée.", knowledge_search:"Inspecte progressivement et en lecture seule un dépôt explicite.", file_management:"Liste, lit, écrit ou supprime un fichier dans un workspace sécurisé.", software_development:"Délègue une modification logicielle à la Software Factory.", execute_workflow:"Exécute un workflow réutilisable actif.", manage_skill:"Administre les préférences de skills et le cycle de vie des workflows.", compare_sources:"Compare plusieurs sources sur un sujet.", monitor_web:"Surveille périodiquement une information Web.",
 };
 
 function metadata(id: CanonicalSkillId): SkillDefinition {
   const isInternal=internal.has(id), isWorkflow=workflows.has(id);
-  const kind:SkillKind=isInternal?"INTERNAL":isWorkflow?"WORKFLOW":available.has(id)?"SKILL":"FUTURE";
+  const kind:SkillKind=isInternal?"INTERNAL":isWorkflow?"WORKFLOW":available.has(id)||id==="knowledge_search"?"SKILL":"FUTURE";
   const availability:SkillAvailability=available.has(id)||isWorkflow?"AVAILABLE":"UNAVAILABLE";
   const exposure:SkillExposure=isInternal||kind==="FUTURE"?"NEVER":"DYNAMIC";
   const serviceCapability=["deep_research","file_management","software_development"].includes(id)?id:undefined;

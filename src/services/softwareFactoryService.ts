@@ -38,9 +38,10 @@ export function parseRepoUrl(repoUrlStr?: string): { owner: string; repo: string
 export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
   const ctx = taskReq.context || {};
 
-  // Chaînes exactes de notre dépôt sur GitHub (avec le tiret final obligatoire)
-  const owner = "artisanguillonrenov-creator";
-  const repo = "Agent-autonome-socle-";
+  // Preserve the historical default only when no repository was supplied.
+  const explicitRepository=parseRepoUrl(typeof ctx.repoUrl==="string"?ctx.repoUrl:typeof ctx.repositoryUrl==="string"?ctx.repositoryUrl:undefined);
+  const owner = explicitRepository?.owner ?? "artisanguillonrenov-creator";
+  const repo = explicitRepository?.repo ?? "Agent-autonome-socle-";
 
   let filePath = String(ctx.filePath || ctx.path || ctx.file || "").trim();
   const objectiveStr = String(taskReq.objective || "").trim();
