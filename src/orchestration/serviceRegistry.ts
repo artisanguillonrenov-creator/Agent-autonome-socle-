@@ -96,7 +96,8 @@ export function validateServiceDefinition(
   if (
     r.riskByCapability !== undefined &&
     (typeof r.riskByCapability !== "object" ||
-      Object.entries(r.riskByCapability).some(([cap, val]) => !risks.has(val as string) || !r.capabilities.includes(cap)))
+      ((strict || isUserConnection || userCreated) && Object.values(r.riskByCapability).some((val) => !risks.has(val as string))) ||
+      ((isUserConnection || userCreated) && Object.keys(r.riskByCapability).some((c) => !r.capabilities.includes(c))))
   ) {
     throw new Error("invalid riskByCapability");
   }
