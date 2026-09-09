@@ -63,6 +63,8 @@ export const config = {
   agent: {
     maxIterations: int(process.env.AGENT_MAX_ITERATIONS, 5),
   },
+  planning: { maxParallel: Math.min(int(process.env.PLAN_MAX_PARALLEL, 3), 8) },
+  background: { maxConcurrent: Math.min(int(process.env.BACKGROUND_MAX_CONCURRENT, 3), 8) },
   reflection: {
     everyNSteps: int(process.env.REFLECTION_EVERY_N_STEPS, 8),
   },

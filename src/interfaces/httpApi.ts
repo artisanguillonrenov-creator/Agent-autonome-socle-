@@ -12,12 +12,15 @@ import type { TaskRequest } from "../orchestration/contract.js";
 import { NotificationStore } from "../autonomy/notificationStore.js";
 import { WorkspaceStore } from "../workspaces/workspaceStore.js";
 import { ArtifactStore } from "../workspaces/artifactStore.js";
+import { ObservabilityStore } from "../observability/observabilityStore.js";
+import { ActivityStore } from "../observability/activityStore.js";
 
 const taskStore = new TaskStore();
 const notificationStore = new NotificationStore();
 const softwareFactoryService = new SoftwareFactoryService();
 const workspaceStore = new WorkspaceStore();
 const artifactStore = new ArtifactStore(workspaceStore);
+const observabilityStore=new ObservabilityStore();const activityStore=new ActivityStore();
 let lastServerError: string | null = null;
 
 async function readBody(req: IncomingMessage): Promise<string> {
@@ -137,6 +140,9 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
     }
 
     try {
+      const operationMetrics=pathname.match(/^\/api\/operations\/([^/]+)\/metrics$/);if(req.method==="GET"&&operationMetrics){const value=observabilityStore.operation(decodeURIComponent(operationMetrics[1]));sendJson(res,value?200:404,value??{error:"not_found"});return;}
+      const planMetrics=pathname.match(/^\/api\/plans\/([^/]+)\/metrics$/);if(req.method==="GET"&&planMetrics){const value=observabilityStore.plan(decodeURIComponent(planMetrics[1]));sendJson(res,value?200:404,value??{error:"not_found"});return;}
+      if(req.method==="GET"&&pathname==="/api/activity"){sendJson(res,200,{items:activityStore.list({planRunId:parsedUrl.searchParams.get("planRunId")??undefined,operationTaskId:parsedUrl.searchParams.get("operationTaskId")??undefined,specialistId:parsedUrl.searchParams.get("specialistId")??undefined,eventType:parsedUrl.searchParams.get("eventType")??undefined,level:parsedUrl.searchParams.get("level")??undefined,limit:Number(parsedUrl.searchParams.get("limit"))||100,offset:Number(parsedUrl.searchParams.get("offset"))||0})});return;}
       // 0a. Software Factory Service Endpoint: POST /tasks
       // (Traite directement la tâche demandée par ServiceAdapter pour la Software Factory)
       if (req.method === "POST" && pathname === "/tasks") {

@@ -24,6 +24,8 @@ export interface ServiceOperation {
   cancelRequestedAt?: number;
   scheduleTaskId?: string;
   workspaceId?: string;
+  specialistId?:string; planRunId?:string; planNodeId?:string; parallelAllowed:boolean;
+  retryCount:number; transportDurationMs?:number; model?:string; inputTokens?:number; outputTokens?:number; totalTokens?:number; costUsd?:number;
   createdAt: number;
   updatedAt: number;
 }
@@ -107,8 +109,8 @@ export class OperationStore {
     if (!canTransitionOperation(operation.status, statusForEvent(candidate.type))) return { valid: false, duplicate: false, reason: "EVENT_STATE_TRANSITION_INVALID" };
     return { valid: true, event: candidate };
   }
-  createOperation(op: Omit<ServiceOperation, "createdAt" | "updatedAt" | "riskLevel" | "approvalState" | "executionMode"> &
-    Partial<Pick<ServiceOperation, "riskLevel" | "approvalState" | "executionMode">>): ServiceOperation {
+  createOperation(op: Omit<ServiceOperation, "createdAt" | "updatedAt" | "riskLevel" | "approvalState" | "executionMode" | "parallelAllowed" | "retryCount"> &
+    Partial<Pick<ServiceOperation, "riskLevel" | "approvalState" | "executionMode" | "parallelAllowed" | "retryCount">>): ServiceOperation {
     const db = getDb();
     const now = Date.now();
     const fullOp: ServiceOperation = {
@@ -117,6 +119,7 @@ export class OperationStore {
       riskLevel: op.riskLevel ?? "LOW",
       approvalState: op.approvalState ?? "NOT_REQUIRED",
       executionMode: op.executionMode ?? "foreground",
+      parallelAllowed: op.parallelAllowed ?? false, retryCount: op.retryCount ?? 0,
       createdAt: now,
       updatedAt: now,
     };
@@ -125,8 +128,8 @@ export class OperationStore {
       INSERT INTO service_operations (
         task_id, trace_id, idempotency_key, objective, capability, selected_service, status, result, error,
         risk_level, approval_state, approval_reason, approval_requested_at, pending_request_json,
-        execution_mode, dispatch_request_json, queued_at, schedule_task_id, workspace_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        execution_mode, dispatch_request_json, queued_at, schedule_task_id, workspace_id, specialist_id, plan_run_id, plan_node_id, parallel_allowed, retry_count, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       fullOp.taskId,
       fullOp.traceId,
@@ -147,12 +150,14 @@ export class OperationStore {
       fullOp.queuedAt ?? null,
       fullOp.scheduleTaskId ?? null,
       fullOp.workspaceId ?? null,
+      fullOp.specialistId??null,fullOp.planRunId??null,fullOp.planNodeId??null,fullOp.parallelAllowed?1:0,fullOp.retryCount,
       fullOp.createdAt,
       fullOp.updatedAt,
     );
 
     return fullOp;
   }
+  recordMetrics(taskId:string,transportDurationMs:number,usage?:unknown):void{let values:[string|null,number|null,number|null,number|null,number|null]=[null,null,null,null,null];if(usage&&typeof usage==="object"&&!Array.isArray(usage)){const u=usage as any;const nums=[u.input_tokens,u.output_tokens,u.total_tokens,u.cost_usd];const valid=nums.every(v=>v===undefined||(typeof v==="number"&&Number.isFinite(v)&&v>=0))&&(u.model===undefined||(typeof u.model==="string"&&!!u.model.trim()))&&(u.total_tokens===undefined||u.input_tokens===undefined||u.output_tokens===undefined||u.total_tokens===u.input_tokens+u.output_tokens);if(valid)values=[u.model??null,u.input_tokens??null,u.output_tokens??null,u.total_tokens??null,u.cost_usd??null];}getDb().prepare(`UPDATE service_operations SET transport_duration_ms=?,model=?,input_tokens=?,output_tokens=?,total_tokens=?,cost_usd=?,updated_at=? WHERE task_id=?`).run(transportDurationMs,...values,Date.now(),taskId);}
 
   setDispatchRequest(taskId: string, request: TaskRequest, queued: boolean): boolean {
     const now = Date.now();
@@ -160,10 +165,10 @@ export class OperationStore {
       .run(JSON.stringify(request), queued ? 1 : 0, now, now, taskId).changes === 1;
   }
 
-  claimNextBackground(): { operation: ServiceOperation; request: TaskRequest | null } | null {
+  claimNextBackground(parallelOnly?:boolean): { operation: ServiceOperation; request: TaskRequest | null } | null {
     const db = getDb();
     return db.transaction(() => {
-      const row = db.prepare(`SELECT task_id,dispatch_request_json FROM service_operations WHERE execution_mode='background' AND status='QUEUED' ORDER BY queued_at,created_at LIMIT 1`).get() as any;
+      const lane=parallelOnly===undefined?"":` AND parallel_allowed=${parallelOnly?1:0}`;const row = db.prepare(`SELECT task_id,dispatch_request_json FROM service_operations WHERE execution_mode='background' AND status='QUEUED'${lane} ORDER BY queued_at,created_at,task_id LIMIT 1`).get() as any;
       if (!row) return null;
       const op = this.getOperation(row.task_id); if (!op) return null;
       let parsed: unknown; try { parsed = JSON.parse(row.dispatch_request_json); } catch { parsed = null; }
@@ -312,7 +317,7 @@ export class OperationStore {
       executionMode: row.execution_mode ?? "foreground", queuedAt: row.queued_at ?? undefined,
       startedAt: row.started_at ?? undefined, finishedAt: row.finished_at ?? undefined,
       cancelRequestedAt: row.cancel_requested_at ?? undefined, scheduleTaskId: row.schedule_task_id ?? undefined,
-      workspaceId: row.workspace_id ?? undefined,
+      workspaceId: row.workspace_id ?? undefined, specialistId:(row as any).specialist_id??undefined,planRunId:(row as any).plan_run_id??undefined,planNodeId:(row as any).plan_node_id??undefined,parallelAllowed:Boolean((row as any).parallel_allowed),retryCount:(row as any).retry_count??0,transportDurationMs:(row as any).transport_duration_ms??undefined,model:(row as any).model??undefined,inputTokens:(row as any).input_tokens??undefined,outputTokens:(row as any).output_tokens??undefined,totalTokens:(row as any).total_tokens??undefined,costUsd:(row as any).cost_usd??undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -363,7 +368,7 @@ export class OperationStore {
       executionMode: row.execution_mode ?? "foreground", queuedAt: row.queued_at ?? undefined,
       startedAt: row.started_at ?? undefined, finishedAt: row.finished_at ?? undefined,
       cancelRequestedAt: row.cancel_requested_at ?? undefined, scheduleTaskId: row.schedule_task_id ?? undefined,
-      workspaceId: row.workspace_id ?? undefined,
+      workspaceId: row.workspace_id ?? undefined, specialistId:(row as any).specialist_id??undefined,planRunId:(row as any).plan_run_id??undefined,planNodeId:(row as any).plan_node_id??undefined,parallelAllowed:Boolean((row as any).parallel_allowed),retryCount:(row as any).retry_count??0,transportDurationMs:(row as any).transport_duration_ms??undefined,model:(row as any).model??undefined,inputTokens:(row as any).input_tokens??undefined,outputTokens:(row as any).output_tokens??undefined,totalTokens:(row as any).total_tokens??undefined,costUsd:(row as any).cost_usd??undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -410,7 +415,7 @@ export class OperationStore {
         executionMode: row.execution_mode ?? "foreground", queuedAt: row.queued_at ?? undefined,
         startedAt: row.started_at ?? undefined, finishedAt: row.finished_at ?? undefined,
         cancelRequestedAt: row.cancel_requested_at ?? undefined, scheduleTaskId: row.schedule_task_id ?? undefined,
-        workspaceId: row.workspace_id ?? undefined,
+        workspaceId: row.workspace_id ?? undefined, specialistId:(row as any).specialist_id??undefined,planRunId:(row as any).plan_run_id??undefined,planNodeId:(row as any).plan_node_id??undefined,parallelAllowed:Boolean((row as any).parallel_allowed),retryCount:(row as any).retry_count??0,transportDurationMs:(row as any).transport_duration_ms??undefined,model:(row as any).model??undefined,inputTokens:(row as any).input_tokens??undefined,outputTokens:(row as any).output_tokens??undefined,totalTokens:(row as any).total_tokens??undefined,costUsd:(row as any).cost_usd??undefined,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
       };

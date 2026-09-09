@@ -80,7 +80,7 @@ export class ServiceOrchestrator {
 
   async dispatchCapability(
     decision: DispatchCapabilityDecision,
-    opts?: { traceId?: string; idempotencyKey?: string; executionMode?: "foreground" | "background"; scheduleTaskId?: string; workspaceId?: string },
+    opts?: { traceId?: string; idempotencyKey?: string; executionMode?: "foreground" | "background"; scheduleTaskId?: string; workspaceId?: string; specialistId?:string; planRunId?:string; planNodeId?:string; parallelAllowed?:boolean },
   ): Promise<OrchestrationResult> {
     const traceId = opts?.traceId || `trace-${randomUUID()}`;
     const idempotencyKey = opts?.idempotencyKey || `idemp-${randomUUID()}`;
@@ -164,7 +164,7 @@ export class ServiceOrchestrator {
         executionMode: opts?.executionMode ?? "foreground",
         queuedAt: opts?.executionMode === "background" && riskLevel !== "HIGH" && riskLevel !== "CRITICAL" ? Date.now() : undefined,
         scheduleTaskId: opts?.scheduleTaskId,
-        workspaceId: opts?.workspaceId,
+        workspaceId: opts?.workspaceId, specialistId:opts?.specialistId,planRunId:opts?.planRunId,planNodeId:opts?.planNodeId,parallelAllowed:opts?.parallelAllowed??false,
       });
     } else {
       if (!this.store.updateStatus(taskId, "DISPATCHING", undefined, "Nouvelle tentative après échec réseau.")) {
@@ -214,6 +214,7 @@ export class ServiceOrchestrator {
 
     // 6. Dispatch via ServiceAdapter
     const adapterRes = await this.adapter.dispatchTask(typeof (this.adapter as any).registerLocal==="function"?service:service.endpoint, request, timeoutMs);
+    const terminalUsage=adapterRes.success?adapterRes.events.filter(e=>e.type==="TASK_COMPLETED"||e.type==="TASK_FAILED").at(-1)?.payload.usage:undefined;this.store.recordMetrics(taskId,adapterRes.transportDurationMs,terminalUsage);
 
     if (!adapterRes.success) {
       // Transport/Network Error: mark as FAILED (retryable = true) with transport info

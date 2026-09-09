@@ -1,0 +1,11 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import type { ServiceRegistry } from "./serviceRegistry.js";
+export interface SpecialistDefinition { id:string; name:string; enabled:boolean; priority:number; allowedCapabilities:string[]; maxConcurrency:number }
+export class SpecialistRegistry {
+ private specialists:SpecialistDefinition[]=[]; readonly diagnostics:string[]=[];
+ constructor(path=join(process.cwd(),"config/specialists.json"),services?:ServiceRegistry){if(!existsSync(path))return;try{const values:unknown=JSON.parse(readFileSync(path,"utf8"));if(!Array.isArray(values))throw new Error("root must be array");const ids=new Set<string>();for(const value of values)try{const s=this.validate(value);if(ids.has(s.id))throw new Error("duplicate id");if(services&&s.allowedCapabilities.some(c=>!services.findServiceForCapability(c)))throw new Error("unknown capability");ids.add(s.id);this.specialists.push(s);}catch(e){this.diagnostics.push(`Invalid specialist: ${(e as Error).message}`);}}catch(e){this.diagnostics.push(`Invalid registry: ${(e as Error).message}`);}}
+ private validate(value:unknown):SpecialistDefinition{const r=value as any;if(!r||typeof r!=="object"||Array.isArray(r)||typeof r.id!=="string"||!r.id.trim()||typeof r.name!=="string"||!r.name.trim()||typeof r.enabled!=="boolean"||!Number.isFinite(r.priority)||!Array.isArray(r.allowedCapabilities)||!r.allowedCapabilities.length||!r.allowedCapabilities.every((c:unknown)=>typeof c==="string"&&!!c.trim())||!Number.isInteger(r.maxConcurrency)||r.maxConcurrency<1||r.maxConcurrency>8)throw new Error("invalid fields");return{...r,id:r.id.trim(),name:r.name.trim(),allowedCapabilities:[...new Set(r.allowedCapabilities)]};}
+ list(){return[...this.specialists];} get(id:string){return this.specialists.find(s=>s.id===id)??null;}
+}
+export class SpecialistCoordinator{constructor(readonly registry:SpecialistRegistry){}select(capability:string){return this.registry.list().filter(s=>s.enabled&&s.allowedCapabilities.includes(capability)).sort((a,b)=>b.priority-a.priority||a.id.localeCompare(b.id))[0]??null;}}
