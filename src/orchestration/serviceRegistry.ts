@@ -226,6 +226,49 @@ export class ServiceRegistry {
     });
   }
 
+  patchService(id: string, patch: Partial<ServiceDefinition>): void {
+    const existing = this.getServiceById(id);
+    if (!existing) {
+      throw new Error(`SERVICE_NOT_FOUND: ${id}`);
+    }
+
+    const endpointChanged = patch.endpoint !== undefined && patch.endpoint !== existing.endpoint;
+    const transportChanged = patch.transport !== undefined && patch.transport !== existing.transport;
+    const priorityChanged = patch.priority !== undefined && patch.priority !== existing.priority;
+    const authChanged = patch.auth !== undefined && JSON.stringify(patch.auth) !== JSON.stringify(existing.auth);
+    const capsChanged = patch.capabilities !== undefined && JSON.stringify(patch.capabilities) !== JSON.stringify(existing.capabilities);
+    const risksChanged = patch.riskByCapability !== undefined && JSON.stringify(patch.riskByCapability) !== JSON.stringify(existing.riskByCapability);
+
+    if (endpointChanged || transportChanged || priorityChanged || authChanged || capsChanged || risksChanged) {
+      const activeOps = this.connectionStore.checkActiveOperations(id);
+      if (activeOps.length > 0) {
+        const err = new Error("SERVICE_CONNECTION_IN_USE");
+        (err as any).taskIds = activeOps;
+        throw err;
+      }
+    }
+
+    const patchRecord: any = {};
+    if (patch.name !== undefined) patchRecord.name = patch.name;
+    if (patch.enabled !== undefined) patchRecord.enabledOverride = patch.enabled;
+    if (patch.transport !== undefined) patchRecord.transportOverride = patch.transport;
+    if (patch.endpoint !== undefined) patchRecord.endpointOverride = patch.endpoint;
+    if (patch.healthPath !== undefined) patchRecord.healthPath = patch.healthPath;
+    if (patch.taskPath !== undefined) patchRecord.taskPath = patch.taskPath;
+    if (patch.priority !== undefined) patchRecord.priorityOverride = patch.priority;
+    if (patch.requestTimeoutMs !== undefined) patchRecord.requestTimeoutMs = patch.requestTimeoutMs;
+    if (patch.healthTimeoutMs !== undefined) patchRecord.healthTimeoutMs = patch.healthTimeoutMs;
+    if (patch.auth !== undefined) {
+      patchRecord.authTypeOverride = patch.auth.type;
+      patchRecord.authEnvVar = patch.auth.type === "bearer_env" ? patch.auth.envVar : undefined;
+    }
+    if (patch.capabilities !== undefined) patchRecord.capabilitiesJson = JSON.stringify(patch.capabilities);
+    if (patch.parallelSafeCapabilities !== undefined) patchRecord.parallelSafeCapabilitiesJson = JSON.stringify(patch.parallelSafeCapabilities);
+    if (patch.riskByCapability !== undefined) patchRecord.riskByCapabilityJson = JSON.stringify(patch.riskByCapability);
+
+    this.connectionStore.patchOverride(id, patchRecord);
+  }
+
   deleteService(id: string): void {
     const isFactory = this.factoryServices.some((x) => x.id === id);
     if (isFactory) {

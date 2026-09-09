@@ -17,6 +17,7 @@ import { ObservabilityStore } from "../observability/observabilityStore.js";
 import { ActivityStore } from "../observability/activityStore.js";
 import { SETTINGS_CATALOG, SETTINGS_SECTIONS } from "../settings/catalog.js";
 import { SettingsStore, SettingScopeType } from "../settings/store.js";
+import { applyAllEffectiveRuntimeSettings } from "../settings/applier.js";
 import { getDb } from "../persistence/db.js";
 
 const taskStore = new TaskStore();
@@ -133,6 +134,8 @@ function applyRuntimeSettingEffect(key: string, value: unknown, agent: Agent): v
  * Façade HTTP du Jarvis Command Center.
  */
 export function startHttpApi(agent: Agent, port: number): ReturnType<typeof createServer> {
+  // Apply all effective runtime settings at startup
+  applyAllEffectiveRuntimeSettings(agent, settingsStore);
   const server = createServer(async (req, res) => {
     // CORS Preflight
     if (req.method === "OPTIONS") {
@@ -407,10 +410,15 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
                 if (!s || typeof s.key !== "string") throw new Error("INVALID_SETTING_ENTRY");
                 const def = SETTINGS_CATALOG.find((x) => x.key === s.key);
                 if (!def) throw new Error(`UNKNOWN_SETTING: ${s.key}`);
-                if (def.availability === "FUTURE") throw new Error(`FUTURE_SETTING_CANNOT_BE_ENABLED: ${s.key}`);
-                if (!def.editable) throw new Error(`SETTING_NOT_EDITABLE: ${s.key}`);
-                settingsStore.setSetting(s.key, s.value !== undefined ? s.value : s.effectiveValue, "GLOBAL", "global");
-                applyRuntimeSettingEffect(s.key, s.value !== undefined ? s.value : s.effectiveValue, agent);
+                const valToSet = s.value !== undefined ? s.value : s.effectiveValue;
+                if (def.availability === "FUTURE") {
+                  if (valToSet !== undefined && valToSet !== null && valToSet !== def.defaultValue && valToSet !== false) {
+                    throw new Error(`FUTURE_SETTING_CANNOT_BE_ENABLED: ${s.key}`);
+                  }
+                  continue;
+                }
+                if (!def.editable) continue; // Skip system-locked / non-editable settings
+                settingsStore.setSetting(s.key, valToSet, "GLOBAL", "global");
               }
             }
 
@@ -440,7 +448,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
             }
           })();
 
-          agent.skills.refreshServiceAvailability(agent.serviceOrchestrator.registry);
+          applyAllEffectiveRuntimeSettings(agent, settingsStore);
           sendJson(res, 200, { ok: true, message: "Import réalisé avec succès" });
         } catch (e) {
           sendJson(res, 400, { error: "SETTINGS_IMPORT_INVALID", reason: (e as Error).message });
@@ -499,7 +507,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
             }
           }
 
-          agent.skills.refreshServiceAvailability(agent.serviceOrchestrator.registry);
+          applyAllEffectiveRuntimeSettings(agent, settingsStore);
           sendJson(res, 200, {
             ok: true,
             settings: settingsStore.getAllEffectiveSettings(scopeType, scopeId),
@@ -532,7 +540,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
           settingsStore.resetAll(scopeType, scopeId);
         }
 
-        agent.skills.refreshServiceAvailability(agent.serviceOrchestrator.registry);
+        applyAllEffectiveRuntimeSettings(agent, settingsStore);
         sendJson(res, 200, {
           ok: true,
           settings: settingsStore.getAllEffectiveSettings(scopeType, scopeId),
@@ -660,13 +668,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
           }
 
           try {
-            const updatedDef = {
-              ...existing,
-              ...body,
-              id: existing.id,
-              auth: body.auth ? body.auth : existing.auth,
-            };
-            agent.serviceOrchestrator.registry.register(updatedDef);
+            agent.serviceOrchestrator.registry.patchService(id, body);
             agent.skills.refreshServiceAvailability(agent.serviceOrchestrator.registry);
             sendJson(res, 200, { ok: true, connection: agent.serviceOrchestrator.registry.getServiceById(id) });
           } catch (e) {

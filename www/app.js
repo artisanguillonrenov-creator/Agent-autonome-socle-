@@ -1462,6 +1462,27 @@ async function renderSettingsView() {
     const effectiveSettings = await fetchApi(`/api/settings?level=${currentDisplayLevel}`);
     const connectionsData = await fetchApi('/api/connections');
 
+    // Synchronize local cache with effective settings from backend
+    if (Array.isArray(effectiveSettings)) {
+      effectiveSettings.forEach((item) => {
+        const key = item.definition.key;
+        const val = item.effectiveValue;
+        if (key === 'settings.interfaceMode' && typeof val === 'string') {
+          currentDisplayLevel = val;
+          localStorage.setItem('jarvis_interface_level', val);
+        } else if (key === 'settings.startupView' && typeof val === 'string') {
+          localStorage.setItem('jarvis_startup_view', val);
+        } else if (key === 'settings.timelineMode' && typeof val === 'string') {
+          localStorage.setItem('jarvis_timeline_mode', val);
+        } else if (key === 'settings.expandCompletedMissions') {
+          localStorage.setItem('jarvis_expand_completed_missions', String(val));
+        } else if (key === 'settings.theme' && typeof val === 'string') {
+          localStorage.setItem('jarvis_theme', val);
+          applyThemeRuntime(val);
+        }
+      });
+    }
+
     renderSettingsSections(sectionsContainer, schema, effectiveSettings, connectionsData);
   } catch (err) {
     sectionsContainer.replaceChildren();
@@ -1607,9 +1628,17 @@ function renderClientJarvisConnectionCard() {
   btnTest.className = 'btn btn-secondary';
   btnTest.textContent = 'Tester la connexion';
   btnTest.addEventListener('click', async () => {
+    const urlVal = inputUrl.value.trim().replace(/\/+$/, '');
+    const tokenVal = inputToken.value.trim();
+    const testEndpoint = `${urlVal}/api/status`;
+    const headers = { 'Content-Type': 'application/json' };
+    if (tokenVal) headers['Authorization'] = `Bearer ${tokenVal}`;
+
     try {
-      const res = await fetchApi('/api/status');
-      alert(`✅ Connexion réussie ! Moteur Jarvis v${res.version} en ligne.`);
+      const res = await fetch(testEndpoint, { headers });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      alert(`✅ Connexion réussie ! Moteur Jarvis v${data.version || '0.1.0'} en ligne.`);
     } catch (e) {
       alert(`❌ Échec de connexion : ${e.message}`);
     }
@@ -1633,6 +1662,110 @@ function renderClientJarvisConnectionCard() {
   return card;
 }
 
+function showUserServiceModal() {
+  const overlay = document.createElement('div');
+  overlay.className = 'sidebar-overlay active';
+  overlay.style.display = 'flex';
+  overlay.style.alignItems = 'center';
+  overlay.style.justifyContent = 'center';
+  overlay.style.zIndex = '999';
+
+  const modal = document.createElement('div');
+  modal.className = 'card';
+  modal.style.maxWidth = '500px';
+  modal.style.width = '90%';
+  modal.style.maxHeight = '90vh';
+  modal.style.overflowY = 'auto';
+
+  const title = document.createElement('div');
+  title.className = 'card-title';
+  title.textContent = 'Créer un Service Utilisateur (task_http)';
+
+  const createGroup = (label, placeholder, defaultValue = '', type = 'text') => {
+    const group = document.createElement('div');
+    group.className = 'form-group';
+    const lbl = document.createElement('label');
+    lbl.className = 'form-label';
+    lbl.textContent = label;
+    const input = document.createElement('input');
+    input.type = type;
+    input.className = 'input-field';
+    input.placeholder = placeholder;
+    input.value = defaultValue;
+    group.append(lbl, input);
+    return { group, input };
+  };
+
+  const idGroup = createGroup('Service ID', 'ex: my_custom_service', 'my_custom_service');
+  const nameGroup = createGroup('Nom du service', 'ex: My Custom Service', 'Mon Service Personnalisé');
+  const endpointGroup = createGroup('Endpoint HTTP', 'ex: http://localhost:4000', 'http://localhost:4000');
+  const healthPathGroup = createGroup('Health Path', 'ex: /health', '/health');
+  const taskPathGroup = createGroup('Task Path', 'ex: /tasks', '/tasks');
+  const priorityGroup = createGroup('Priorité (0-100)', 'ex: 10', '10', 'number');
+  const capsGroup = createGroup('Capabilities (séparées par des virgules)', 'ex: software_development, code_generation', 'software_development');
+  const authEnvGroup = createGroup('Variable d\'Env Auth (Optionnel)', 'ex: MY_SERVICE_TOKEN', '');
+
+  const buttonRow = document.createElement('div');
+  buttonRow.style.display = 'flex';
+  buttonRow.style.gap = '10px';
+  buttonRow.style.marginTop = '16px';
+
+  const btnCancel = document.createElement('button');
+  btnCancel.type = 'button';
+  btnCancel.className = 'btn btn-secondary';
+  btnCancel.textContent = 'Annuler';
+  btnCancel.addEventListener('click', () => overlay.remove());
+
+  const btnSubmit = document.createElement('button');
+  btnSubmit.type = 'button';
+  btnSubmit.className = 'btn btn-primary';
+  btnSubmit.textContent = 'Créer le Service';
+  btnSubmit.addEventListener('click', async () => {
+    try {
+      const caps = capsGroup.input.value.split(',').map((s) => s.trim()).filter(Boolean);
+      const authEnv = authEnvGroup.input.value.trim();
+      const payload = {
+        id: idGroup.input.value.trim(),
+        name: nameGroup.input.value.trim(),
+        transport: 'task_http',
+        endpoint: endpointGroup.input.value.trim(),
+        healthPath: healthPathGroup.input.value.trim() || '/health',
+        taskPath: taskPathGroup.input.value.trim() || '/tasks',
+        priority: Number(priorityGroup.input.value) || 10,
+        capabilities: caps,
+        auth: authEnv ? { type: 'bearer_env', envVar: authEnv } : { type: 'none' },
+      };
+
+      await fetchApi('/api/connections', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+
+      alert('✅ Service utilisateur créé avec succès !');
+      overlay.remove();
+      void renderSettingsView();
+    } catch (e) {
+      alert(`❌ Échec de création : ${e.message}`);
+    }
+  });
+
+  buttonRow.append(btnCancel, btnSubmit);
+  modal.append(
+    title,
+    idGroup.group,
+    nameGroup.group,
+    endpointGroup.group,
+    healthPathGroup.group,
+    taskPathGroup.group,
+    priorityGroup.group,
+    capsGroup.group,
+    authEnvGroup.group,
+    buttonRow,
+  );
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+}
+
 function renderServicesConnectionCenter(connections) {
   const container = document.createElement('div');
   container.className = 'card';
@@ -1651,6 +1784,14 @@ function renderServicesConnectionCenter(connections) {
   const actions = document.createElement('div');
   actions.style.display = 'flex';
   actions.style.gap = '8px';
+
+  const btnAddUserSvc = document.createElement('button');
+  btnAddUserSvc.type = 'button';
+  btnAddUserSvc.className = 'btn btn-primary btn-sm';
+  btnAddUserSvc.textContent = '+ Service Utilisateur';
+  btnAddUserSvc.addEventListener('click', () => {
+    showUserServiceModal();
+  });
 
   const btnTestAll = document.createElement('button');
   btnTestAll.type = 'button';
@@ -1671,7 +1812,7 @@ function renderServicesConnectionCenter(connections) {
     }
   });
 
-  actions.appendChild(btnTestAll);
+  actions.append(btnAddUserSvc, btnTestAll);
   headerRow.append(title, actions);
   container.appendChild(headerRow);
 
@@ -1795,6 +1936,22 @@ function renderServicesConnectionCenter(connections) {
   return container;
 }
 
+function applyLocalSettingCache(key, value) {
+  if (key === 'settings.interfaceMode' && typeof value === 'string') {
+    currentDisplayLevel = value;
+    localStorage.setItem('jarvis_interface_level', value);
+  } else if (key === 'settings.startupView' && typeof value === 'string') {
+    localStorage.setItem('jarvis_startup_view', value);
+  } else if (key === 'settings.timelineMode' && typeof value === 'string') {
+    localStorage.setItem('jarvis_timeline_mode', value);
+  } else if (key === 'settings.expandCompletedMissions') {
+    localStorage.setItem('jarvis_expand_completed_missions', String(value));
+  } else if (key === 'settings.theme' && typeof value === 'string') {
+    localStorage.setItem('jarvis_theme', value);
+    applyThemeRuntime(value);
+  }
+}
+
 function renderSettingCard(setting) {
   const def = setting.definition;
   const card = document.createElement('div');
@@ -1863,6 +2020,7 @@ function renderSettingCard(setting) {
             method: 'PATCH',
             body: JSON.stringify({ key: def.key, value: checkbox.checked }),
           });
+          applyLocalSettingCache(def.key, checkbox.checked);
           void renderSettingsView();
         } catch (e) {
           alert(`❌ Erreur : ${e.message}`);
@@ -1889,6 +2047,7 @@ function renderSettingCard(setting) {
             method: 'PATCH',
             body: JSON.stringify({ key: def.key, value: select.value }),
           });
+          applyLocalSettingCache(def.key, select.value);
           void renderSettingsView();
         } catch (e) {
           alert(`❌ Erreur : ${e.message}`);

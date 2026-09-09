@@ -58,7 +58,7 @@ test("SETTINGS: Audit log records changes without secrets", () => {
   assert.equal(logStr.includes("Bearer"), false);
 });
 
-test("SERVICE REGISTRY: authority order ENVIRONMENT > DATABASE > FACTORY", () => {
+test("SERVICE REGISTRY: authority order ENVIRONMENT > DATABASE > FACTORY and PATCH enabled does not freeze ENV endpoint", () => {
   setupTestDb();
   const previousEnvUrl = process.env.SOFTWARE_FACTORY_URL;
   try {
@@ -67,24 +67,31 @@ test("SERVICE REGISTRY: authority order ENVIRONMENT > DATABASE > FACTORY", () =>
     const registry = new ServiceRegistry();
     const initialSf = registry.getServiceById("software_factory")!;
     assert.equal(initialSf.source, "FACTORY");
+    const factoryEndpoint = initialSf.endpoint;
 
-    // DB Override
-    registry.register({
-      ...initialSf,
-      endpoint: "http://localhost:4050",
-      priority: 88,
-    });
-
-    const dbSf = registry.getServiceById("software_factory")!;
-    assert.equal(dbSf.endpoint, "http://localhost:4050");
-    assert.equal(dbSf.source, "DATABASE");
-    assert.equal(dbSf.priority, 88);
-
-    // ENV Override
-    process.env.SOFTWARE_FACTORY_URL = "http://localhost:9999";
+    // Set ENV endpoint
+    process.env.SOFTWARE_FACTORY_URL = "http://env-server.local:5000";
     const envSf = registry.getServiceById("software_factory")!;
-    assert.equal(envSf.endpoint, "http://localhost:9999");
+    assert.equal(envSf.endpoint, "http://env-server.local:5000");
     assert.equal(envSf.source, "ENVIRONMENT");
+
+    // PATCH enabled: false while ENV endpoint is active
+    registry.patchService("software_factory", { enabled: false });
+
+    const disabledSf = registry.getServiceById("software_factory")!;
+    assert.equal(disabledSf.enabled, false);
+    assert.equal(disabledSf.endpoint, "http://env-server.local:5000");
+    assert.equal(disabledSf.source, "ENVIRONMENT");
+
+    // Verify database override does NOT contain endpoint_override
+    const dbOverride = registry.connectionStore.getOverride("software_factory")!;
+    assert.equal(dbOverride.endpointOverride, undefined); // Never frozen in DB!
+
+    // Remove ENV variable -> endpoint reverts to factory/historical DB endpoint
+    delete process.env.SOFTWARE_FACTORY_URL;
+    const revertedSf = registry.getServiceById("software_factory")!;
+    assert.equal(revertedSf.endpoint, factoryEndpoint);
+    assert.equal(revertedSf.source, "DATABASE");
   } finally {
     if (previousEnvUrl) process.env.SOFTWARE_FACTORY_URL = previousEnvUrl;
     else delete process.env.SOFTWARE_FACTORY_URL;
@@ -221,25 +228,114 @@ test("SKILLS: live availability refresh (AVAILABLE <-> UNAVAILABLE)", () => {
   assert.equal(registry.get("test_research")?.unavailableReason, undefined);
 });
 
-test("IMPORT/EXPORT: Atomic import rollback on invalid payload and secret values excluded", async () => {
+test("HTTP IMPORT/EXPORT: Full export/import cycle, secret masking, and atomic transaction rollback", async () => {
+  setupTestDb();
+  const previousToken = config.api.token;
+  config.api.token = "export-import-test-token";
+
+  const { startHttpApi } = await import("../interfaces/httpApi.js");
+  const { Agent } = await import("../core/agent.js");
+  const { MockProvider } = await import("../llm/providers/mock.js");
+
+  const agent = new Agent({
+    llm: new MockProvider(),
+    embeddings: new LocalHashingEmbeddingProvider(),
+  });
+
+  const testPort = 4098;
+  const server = startHttpApi(agent, testPort);
+  const headers = { authorization: "Bearer export-import-test-token", "content-type": "application/json" };
+
+  try {
+    // 1. Configure initial setting
+    await fetch(`http://localhost:${testPort}/api/settings`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ key: "system.tokenBudget", value: 6500 }),
+    });
+
+    // 2. Export settings
+    const exportRes = await fetch(`http://localhost:${testPort}/api/settings/export`, { headers });
+    assert.equal(exportRes.status, 200);
+    const exportData = await exportRes.json();
+    assert.equal(exportData.schemaVersion, 1);
+    assert.ok(Array.isArray(exportData.settings));
+
+    const exportStr = JSON.stringify(exportData);
+    assert.equal(exportStr.includes("export-import-test-token"), false);
+    assert.equal(exportStr.includes("Bearer"), false);
+    assert.equal(exportStr.includes("sk-"), false);
+    assert.equal(exportStr.includes("ghp_"), false);
+
+    // 3. Valid import
+    exportData.settings.push({ key: "autonomy.maxIterations", value: 14 });
+    const validImportRes = await fetch(`http://localhost:${testPort}/api/settings/import`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(exportData),
+    });
+    assert.equal(validImportRes.status, 200);
+
+    const getSettingsRes = await fetch(`http://localhost:${testPort}/api/settings`, { headers });
+    const settingsList = await getSettingsRes.json();
+    const maxIterSetting = settingsList.find((s: any) => s.definition.key === "autonomy.maxIterations");
+    assert.equal(maxIterSetting.effectiveValue, 14);
+
+    // 4. Invalid import (valid setting + invalid/unknown setting in middle)
+    const invalidPayload = {
+      schemaVersion: 1,
+      settings: [
+        { key: "system.tokenBudget", value: 9999 }, // valid change
+        { key: "unknown.setting.key", value: "bad" }, // INVALID!
+      ],
+    };
+
+    const invalidImportRes = await fetch(`http://localhost:${testPort}/api/settings/import`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(invalidPayload),
+    });
+    assert.equal(invalidImportRes.status, 400);
+    const invalidJson = await invalidImportRes.json();
+    assert.equal(invalidJson.error, "SETTINGS_IMPORT_INVALID");
+
+    // 5. Verify total SQLite rollback: system.tokenBudget is STILL 6500 (NOT 9999!)
+    const getSettingsAfterRollback = await fetch(`http://localhost:${testPort}/api/settings`, { headers });
+    const settingsAfterRollback = await getSettingsAfterRollback.json();
+    const tokenBudgetSetting = settingsAfterRollback.find((s: any) => s.definition.key === "system.tokenBudget");
+    assert.equal(tokenBudgetSetting.effectiveValue, 6500);
+  } finally {
+    server.close();
+    config.api.token = previousToken;
+  }
+});
+
+test("SETTINGS: applyAllEffectiveRuntimeSettings applies values on startup/restart and reset restores defaults", async () => {
   setupTestDb();
   const store = new SettingsStore();
-  const connStore = new ConnectionStore();
+  const { applyAllEffectiveRuntimeSettings } = await import("./applier.js");
+  const { Agent } = await import("../core/agent.js");
+  const { MockProvider } = await import("../llm/providers/mock.js");
 
-  store.setSetting("system.tokenBudget", 7500, "GLOBAL", "global");
+  const agent = new Agent({
+    llm: new MockProvider(),
+    embeddings: new LocalHashingEmbeddingProvider(),
+  });
 
-  const exported = {
-    schemaVersion: 1,
-    exportedAt: Date.now(),
-    settings: [{ key: "system.tokenBudget", value: 7500, effectiveValue: 7500, source: "DATABASE" }],
-    serviceOverrides: [],
-  };
+  store.setSetting("system.tokenBudget", 9500, "GLOBAL", "global");
+  store.setSetting("autonomy.maxIterations", 12, "GLOBAL", "global");
 
-  const exportedStr = JSON.stringify(exported);
-  assert.equal(exportedStr.includes("API_TOKEN"), false);
-  assert.equal(exportedStr.includes("SOFTWARE_FACTORY_TOKEN"), false);
-  assert.equal(exportedStr.includes("sk-"), false);
-  assert.equal(exportedStr.includes("ghp_"), false);
+  applyAllEffectiveRuntimeSettings(agent, store);
+
+  assert.equal(config.context.tokenBudget, 9500);
+  assert.equal(config.agent.maxIterations, 12);
+
+  // Reset settings
+  store.resetAll("GLOBAL", "global");
+  applyAllEffectiveRuntimeSettings(agent, store);
+
+  assert.equal(config.context.tokenBudget, 4000); // restored default
+  assert.equal(config.agent.maxIterations, 5); // restored default
 });
 
 test("AUTH: Settings & Connections fail closed with 401 when API token is configured and missing/invalid", async () => {

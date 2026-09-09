@@ -135,6 +135,89 @@ export class ConnectionStore {
     );
   }
 
+  patchOverride(serviceId: string, patch: Partial<ServiceConnectionRecord>): void {
+    const existing = this.getOverride(serviceId);
+    const now = Date.now();
+
+    const merged: ServiceConnectionRecord = {
+      serviceId,
+      name: patch.name !== undefined ? patch.name : existing?.name ?? serviceId,
+      userCreated: existing?.userCreated ?? false,
+      enabledOverride: patch.enabledOverride !== undefined ? patch.enabledOverride : existing?.enabledOverride,
+      transportOverride: patch.transportOverride !== undefined ? patch.transportOverride : existing?.transportOverride,
+      endpointOverride: patch.endpointOverride !== undefined ? patch.endpointOverride : existing?.endpointOverride,
+      healthPath: patch.healthPath !== undefined ? patch.healthPath : existing?.healthPath,
+      taskPath: patch.taskPath !== undefined ? patch.taskPath : existing?.taskPath,
+      authTypeOverride: patch.authTypeOverride !== undefined ? patch.authTypeOverride : existing?.authTypeOverride,
+      authEnvVar: patch.authEnvVar !== undefined ? patch.authEnvVar : existing?.authEnvVar,
+      priorityOverride: patch.priorityOverride !== undefined ? patch.priorityOverride : existing?.priorityOverride,
+      requestTimeoutMs: patch.requestTimeoutMs !== undefined ? patch.requestTimeoutMs : existing?.requestTimeoutMs,
+      healthTimeoutMs: patch.healthTimeoutMs !== undefined ? patch.healthTimeoutMs : existing?.healthTimeoutMs,
+      capabilitiesJson: patch.capabilitiesJson !== undefined ? patch.capabilitiesJson : existing?.capabilitiesJson,
+      parallelSafeCapabilitiesJson: patch.parallelSafeCapabilitiesJson !== undefined ? patch.parallelSafeCapabilitiesJson : existing?.parallelSafeCapabilitiesJson,
+      riskByCapabilityJson: patch.riskByCapabilityJson !== undefined ? patch.riskByCapabilityJson : existing?.riskByCapabilityJson,
+      lastTestAt: existing?.lastTestAt,
+      lastSuccessAt: existing?.lastSuccessAt,
+      lastLatencyMs: existing?.lastLatencyMs,
+      lastError: existing?.lastError,
+      updatedAt: now,
+    };
+
+    if (this.inMemory) {
+      this.inMemoryRecords.set(serviceId, merged);
+      return;
+    }
+
+    const db = getDb();
+    db.prepare(`
+      INSERT INTO service_connections (
+        service_id, name, user_created, enabled_override, transport_override, endpoint_override,
+        health_path, task_path, auth_type_override, auth_env_var, priority_override,
+        request_timeout_ms, health_timeout_ms, capabilities_json, parallel_safe_capabilities_json,
+        risk_by_capability_json, last_test_at, last_success_at, last_latency_ms, last_error, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(service_id) DO UPDATE SET
+        name = excluded.name,
+        user_created = excluded.user_created,
+        enabled_override = excluded.enabled_override,
+        transport_override = excluded.transport_override,
+        endpoint_override = excluded.endpoint_override,
+        health_path = excluded.health_path,
+        task_path = excluded.task_path,
+        auth_type_override = excluded.auth_type_override,
+        auth_env_var = excluded.auth_env_var,
+        priority_override = excluded.priority_override,
+        request_timeout_ms = excluded.request_timeout_ms,
+        health_timeout_ms = excluded.health_timeout_ms,
+        capabilities_json = excluded.capabilities_json,
+        parallel_safe_capabilities_json = excluded.parallel_safe_capabilities_json,
+        risk_by_capability_json = excluded.risk_by_capability_json,
+        updated_at = excluded.updated_at
+    `).run(
+      merged.serviceId,
+      merged.name,
+      merged.userCreated ? 1 : 0,
+      merged.enabledOverride !== undefined ? (merged.enabledOverride ? 1 : 0) : null,
+      merged.transportOverride ?? null,
+      merged.endpointOverride ?? null,
+      merged.healthPath ?? null,
+      merged.taskPath ?? null,
+      merged.authTypeOverride ?? null,
+      merged.authEnvVar ?? null,
+      merged.priorityOverride ?? null,
+      merged.requestTimeoutMs ?? null,
+      merged.healthTimeoutMs ?? null,
+      merged.capabilitiesJson ?? null,
+      merged.parallelSafeCapabilitiesJson ?? null,
+      merged.riskByCapabilityJson ?? null,
+      merged.lastTestAt ?? null,
+      merged.lastSuccessAt ?? null,
+      merged.lastLatencyMs ?? null,
+      merged.lastError ?? null,
+      merged.updatedAt,
+    );
+  }
+
   recordDiagnostic(
     serviceId: string,
     result: { reachable: boolean; latencyMs?: number; error?: string },

@@ -26,12 +26,13 @@ export class ServiceAdapter {
 
   private definition(value: ServiceDefinition | string): ServiceDefinition {
     if (typeof value === "string") {
-      const isSoftwareFactory = ["software_factory", "in-process", "direct"].includes(value);
+      const isHttp = value.startsWith("http://") || value.startsWith("https://");
+      const isSoftwareFactory = isHttp || ["software_factory", "in-process", "direct"].includes(value);
       return {
         id: isSoftwareFactory ? "software_factory" : value,
         name: value,
         enabled: true,
-        transport: ["local", "direct", "in-process", "workspace_service", "research_service"].includes(value) ? "local" : "task_http",
+        transport: isHttp ? "task_http" : "local",
         endpoint: value,
         healthPath: "/health",
         taskPath: "/tasks",
