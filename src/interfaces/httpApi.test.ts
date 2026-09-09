@@ -94,6 +94,25 @@ test("Safe Array Contract Test for Models View - Prevents undefined.map error", 
   assert.equal(filtered.length, 0);
 });
 
+test("Chat UX V1 conserve des actions sûres et des interactions clavier explicites", async () => {
+  const source = fs.readFileSync("./www/app.js", "utf-8");
+  assert.match(source, /copyPlainText\(content\.textContent \|\| ''\)/, "la copie utilise seulement le texte de réponse");
+  assert.match(source, /'speechSynthesis' in window/, "SpeechSynthesis absent est géré par détection de capacité");
+  assert.match(source, /index !== responses\.length - 1/, "seule la dernière réponse peut être régénérée");
+  assert.match(source, /const oldText = content\.textContent/);
+  assert.match(source, /catch \{ content\.textContent = oldText/, "une erreur conserve l'ancienne réponse");
+  assert.match(source, /e\.key === 'Enter' && !e\.shiftKey/, "Entrée envoie, contrairement à Maj+Entrée");
+  assert.match(source, /if \(submitting\) return/, "la double soumission est bloquée");
+  assert.match(source, /chat-timeline-toggle/, "la timeline existante reste dépliable");
+
+  let copied = "";
+  const copyPlainText = async (text: string, navigatorRef: { clipboard?: { writeText(value: string): Promise<void> } }) => {
+    if (navigatorRef.clipboard) await navigatorRef.clipboard.writeText(text);
+  };
+  await copyPlainText("Réponse sans boutons ni metadata", { clipboard: { writeText: async (value) => { copied = value; } } });
+  assert.equal(copied, "Réponse sans boutons ni metadata");
+});
+
 test("ServiceEvent est transformé en entrée de timeline sans interpréter le texte du payload comme du HTML", () => {
   const appJsCode = fs.readFileSync("./www/app.js", "utf-8");
   const dummyElement = { classList: { add: () => {}, remove: () => {} }, textContent: "" };
@@ -352,6 +371,36 @@ test("Jarvis Command Center API Endpoints Test", async () => {
       body: JSON.stringify({ message: "Hello Jarvis" }),
     });
     assert.ok(chatRes.response);
+
+    // Regeneration is a side-effect-free LLM-only path: no tools are supplied and
+    // the existing operation count is unchanged.
+    const operationsBeforeRegeneration = agent.serviceOrchestrator.store.listOperations().length;
+    let regenerationOptions: unknown;
+    agent.setLLMProvider({
+      name: "regeneration-spy",
+      async complete(_messages, options) {
+        regenerationOptions = options;
+        return { content: "Une formulation différente." };
+      },
+    });
+    const regenerated = await checkEndpoint(`${baseUrl}/api/chat/regenerate`, { method: "POST", body: "{}" });
+    assert.equal(regenerated.response, "Une formulation différente.");
+    assert.deepEqual(regenerationOptions, { tools: undefined });
+    assert.equal(agent.serviceOrchestrator.store.listOperations().length, operationsBeforeRegeneration);
+
+    agent.setLLMProvider({
+      name: "unexpected-tool",
+      async complete() {
+        return { content: null, toolCalls: [{ id: "unsafe", type: "function", function: { name: "execute_mission", arguments: "{}" } }] };
+      },
+    });
+    const rejectedToolCall = await fetch(`${baseUrl}/api/chat/regenerate`, {
+      method: "POST", headers: { authorization: `Bearer ${config.api.token}`, "content-type": "application/json" }, body: "{}",
+    });
+    assert.equal(rejectedToolCall.status, 500);
+    assert.equal((await rejectedToolCall.json()).error, "UNEXPECTED_TOOL_CALL_DURING_REGENERATION");
+    assert.equal(agent.serviceOrchestrator.store.listOperations().length, operationsBeforeRegeneration);
+    agent.setLLMProvider(new MockProvider());
 
     // Test model selection persistence
     const savedConfig = loadLLMConfig();

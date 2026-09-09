@@ -225,6 +225,12 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         return;
       }
 
+      if (req.method === "POST" && pathname === "/api/chat/regenerate") {
+        const result = await agent.regenerateLastResponse();
+        sendJson(res, 200, result);
+        return;
+      }
+
       if (req.method === "GET" && pathname === "/api/chat/stream") {
         const queryMsg = parsedUrl.searchParams.get("message") || "";
         if (!queryMsg.trim()) {
