@@ -431,23 +431,49 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
               for (const o of body.serviceOverrides) {
                 if (!o || typeof o.serviceId !== "string" || !o.serviceId.trim()) throw new Error("INVALID_SERVICE_OVERRIDE");
                 if (o.transportOverride && !["local", "task_http"].includes(o.transportOverride)) throw new Error("UNKNOWN_TRANSPORT");
-                agent.serviceOrchestrator.registry.register({
-                  id: o.serviceId,
-                  name: o.name || o.serviceId,
-                  userCreated: Boolean(o.userCreated),
-                  enabled: o.enabledOverride ?? true,
-                  transport: o.transportOverride || "task_http",
-                  endpoint: o.endpointOverride || "http://localhost:3000",
-                  healthPath: o.healthPath || "/health",
-                  taskPath: o.taskPath || "/tasks",
-                  auth: o.authTypeOverride === "bearer_env" ? { type: "bearer_env", envVar: o.authEnvVar || "API_TOKEN" } : { type: "none" },
-                  priority: o.priorityOverride ?? 10,
-                  requestTimeoutMs: o.requestTimeoutMs ?? 120000,
-                  healthTimeoutMs: o.healthTimeoutMs ?? 5000,
-                  capabilities: o.capabilitiesJson ? JSON.parse(o.capabilitiesJson) : ["software_development"],
-                  parallelSafeCapabilities: o.parallelSafeCapabilitiesJson ? JSON.parse(o.parallelSafeCapabilitiesJson) : [],
-                  riskByCapability: o.riskByCapabilityJson ? JSON.parse(o.riskByCapabilityJson) : {},
-                });
+
+                const serviceId = o.serviceId.trim();
+                const isFactory = agent.serviceOrchestrator.registry.isFactoryService(serviceId);
+
+                if (isFactory) {
+                  // Apply ONLY present overrides for factory service without defaulting undefined fields
+                  const patchObj: any = {};
+                  if (o.enabledOverride !== undefined) patchObj.enabled = o.enabledOverride;
+                  if (o.endpointOverride !== undefined) patchObj.endpoint = o.endpointOverride;
+                  if (o.transportOverride !== undefined) patchObj.transport = o.transportOverride;
+                  if (o.healthPath !== undefined) patchObj.healthPath = o.healthPath;
+                  if (o.taskPath !== undefined) patchObj.taskPath = o.taskPath;
+                  if (o.priorityOverride !== undefined) patchObj.priority = o.priorityOverride;
+                  if (o.requestTimeoutMs !== undefined) patchObj.requestTimeoutMs = o.requestTimeoutMs;
+                  if (o.healthTimeoutMs !== undefined) patchObj.healthTimeoutMs = o.healthTimeoutMs;
+                  if (o.authTypeOverride !== undefined) {
+                    patchObj.auth = o.authTypeOverride === "bearer_env" ? { type: "bearer_env", envVar: o.authEnvVar || "API_TOKEN" } : { type: "none" };
+                  }
+                  if (o.capabilitiesJson) patchObj.capabilities = JSON.parse(o.capabilitiesJson);
+                  if (o.parallelSafeCapabilitiesJson) patchObj.parallelSafeCapabilities = JSON.parse(o.parallelSafeCapabilitiesJson);
+                  if (o.riskByCapabilityJson) patchObj.riskByCapability = JSON.parse(o.riskByCapabilityJson);
+
+                  agent.serviceOrchestrator.registry.patchService(serviceId, patchObj);
+                } else {
+                  // User-created service import requires full valid definition
+                  agent.serviceOrchestrator.registry.register({
+                    id: serviceId,
+                    name: o.name || serviceId,
+                    userCreated: true,
+                    enabled: o.enabledOverride ?? true,
+                    transport: o.transportOverride || "task_http",
+                    endpoint: o.endpointOverride || "http://localhost:3000",
+                    healthPath: o.healthPath || "/health",
+                    taskPath: o.taskPath || "/tasks",
+                    auth: o.authTypeOverride === "bearer_env" ? { type: "bearer_env", envVar: o.authEnvVar || "API_TOKEN" } : { type: "none" },
+                    priority: o.priorityOverride ?? 10,
+                    requestTimeoutMs: o.requestTimeoutMs ?? 120000,
+                    healthTimeoutMs: o.healthTimeoutMs ?? 5000,
+                    capabilities: o.capabilitiesJson ? JSON.parse(o.capabilitiesJson) : [],
+                    parallelSafeCapabilities: o.parallelSafeCapabilitiesJson ? JSON.parse(o.parallelSafeCapabilitiesJson) : [],
+                    riskByCapability: o.riskByCapabilityJson ? JSON.parse(o.riskByCapabilityJson) : {},
+                  });
+                }
               }
             }
           })();

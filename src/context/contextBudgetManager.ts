@@ -12,8 +12,18 @@ export interface ContextPiece {
  * Estimation grossière (1 token ≈ 4 caractères) pour rester sans dépendance
  * à un tokenizer spécifique à un fournisseur.
  */
+import { config } from "../config.js";
+
 export class ContextBudgetManager {
-  constructor(private readonly tokenBudget: number) {}
+  private customTokenBudget?: number;
+
+  constructor(tokenBudget?: number) {
+    this.customTokenBudget = tokenBudget;
+  }
+
+  get tokenBudget(): number {
+    return this.customTokenBudget ?? config.context.tokenBudget;
+  }
 
   private estimateTokens(text: string): number {
     return Math.ceil(text.length / 4);

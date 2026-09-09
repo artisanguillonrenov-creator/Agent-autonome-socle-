@@ -468,6 +468,261 @@ test("WORKSPACE LIMITS: Modifying workspaceMaxFileBytes via /api/settings immedi
   }
 });
 
+test("RUNTIME BEHAVIOR: autonomy.maxIterations changes actual Agent loop limit", async () => {
+  setupTestDb();
+  const { Agent } = await import("../core/agent.js");
+  const { MockProvider } = await import("../llm/providers/mock.js");
+
+  let mockCalls = 0;
+  class InfiniteToolLoopProvider extends MockProvider {
+    async complete(messages: any[], options?: any): Promise<any> {
+      mockCalls++;
+      // Return a tool call that triggers another step endlessly
+      return {
+        content: null,
+        toolCalls: [
+          {
+            id: `call_${mockCalls}`,
+            type: "function",
+            function: { name: "get_current_time", arguments: "{}" },
+          },
+        ],
+      };
+    }
+  }
+
+  const agent = new Agent({
+    llm: new InfiniteToolLoopProvider(),
+    embeddings: new LocalHashingEmbeddingProvider(),
+  });
+
+  const store = new SettingsStore();
+  store.setSetting("autonomy.maxIterations", 3, "GLOBAL", "global");
+  const { applyAllEffectiveRuntimeSettings } = await import("./applier.js");
+  applyAllEffectiveRuntimeSettings(agent, store);
+
+  assert.equal(agent.maxIterations, 3);
+  const result = await agent.step("Infinite loop test");
+
+  assert.equal(result.iterations, 3);
+  assert.ok(result.response.includes("Limite maximale d'itérations (3) atteinte"));
+});
+
+test("RUNTIME BEHAVIOR: system.tokenBudget changes ContextBudgetManager truncation threshold", async () => {
+  setupTestDb();
+  const { ContextBudgetManager } = await import("../context/contextBudgetManager.js");
+  const store = new SettingsStore();
+
+  store.setSetting("system.tokenBudget", 1000, "GLOBAL", "global"); // 1000 tokens ≈ 4000 chars
+  const { applyAllEffectiveRuntimeSettings } = await import("./applier.js");
+  applyAllEffectiveRuntimeSettings({} as any, store);
+
+  const manager = new ContextBudgetManager();
+  assert.equal(manager.tokenBudget, 1000);
+
+  const assembled = manager.assemble([
+    { label: "LongPiece", content: "A".repeat(10000), priority: 100 },
+  ]);
+
+  assert.ok(assembled.includes("(tronqué)"));
+  assert.ok(assembled.length < 5000);
+});
+
+test("RUNTIME BEHAVIOR: skills.reflectionEveryNSteps changes ReflectionEngine trigger threshold", async () => {
+  setupTestDb();
+  const { ReflectionEngine } = await import("../reflection/reflectionEngine.js");
+  const { MemoryManager } = await import("../memory/memoryManager.js");
+  const { MockProvider } = await import("../llm/providers/mock.js");
+
+  let reflectCalled = false;
+  class SpyLLM extends MockProvider {
+    async complete(messages: any[]): Promise<any> {
+      reflectCalled = true;
+      return "Reflection insight";
+    }
+  }
+
+  const memory = new MemoryManager(new LocalHashingEmbeddingProvider());
+  memory.working.add({ role: "user", content: "Hello world" });
+
+  const store = new SettingsStore();
+  store.setSetting("skills.reflectionEveryNSteps", 2, "GLOBAL", "global");
+  const { applyAllEffectiveRuntimeSettings } = await import("./applier.js");
+  applyAllEffectiveRuntimeSettings({} as any, store);
+
+  const engine = new ReflectionEngine(new SpyLLM(), memory);
+  assert.equal(engine.everyNSteps, 2);
+
+  // Step 1: threshold 2 not reached yet
+  const res1 = await engine.maybeReflect();
+  assert.equal(res1, null);
+  assert.equal(reflectCalled, false);
+
+  // Step 2: threshold 2 reached -> triggers reflect
+  const res2 = await engine.maybeReflect();
+  assert.equal(res2, "Reflection insight");
+  assert.equal(reflectCalled, true);
+});
+
+test("RUNTIME BEHAVIOR: automations.backgroundMaxConcurrent changes BackgroundRunner concurrency", async () => {
+  setupTestDb();
+  const { BackgroundRunner } = await import("../autonomy/backgroundRunner.js");
+  const { ServiceOrchestrator } = await import("../orchestration/serviceOrchestrator.js");
+
+  const store = new SettingsStore();
+  store.setSetting("automations.backgroundMaxConcurrent", 4, "GLOBAL", "global");
+  const { applyAllEffectiveRuntimeSettings } = await import("./applier.js");
+  applyAllEffectiveRuntimeSettings({} as any, store);
+
+  const runner = new BackgroundRunner(new ServiceOrchestrator());
+  assert.equal(runner.maxConcurrent, 4);
+});
+
+test("FACTORY SERVICE OVERRIDES: Export, reset, and import round-trip preserves undefined factory overrides and userCreated = false", async () => {
+  setupTestDb();
+  const previousToken = config.api.token;
+  config.api.token = "roundtrip-test-token";
+
+  const { startHttpApi } = await import("../interfaces/httpApi.js");
+  const { Agent } = await import("../core/agent.js");
+  const { MockProvider } = await import("../llm/providers/mock.js");
+
+  const agent = new Agent({
+    llm: new MockProvider(),
+    embeddings: new LocalHashingEmbeddingProvider(),
+  });
+
+  const testPort = 4103;
+  const server = startHttpApi(agent, testPort);
+  const headers = { authorization: "Bearer roundtrip-test-token", "content-type": "application/json" };
+
+  try {
+    // 1. Verify all factory services return userCreated = false and DELETE returns 405
+    for (const factoryId of ["software_factory", "mock_software_factory", "workspace_service", "research_service"]) {
+      const svc = agent.serviceOrchestrator.registry.getServiceById(factoryId);
+      if (svc) {
+        assert.equal(svc.userCreated, false, `${factoryId} must have userCreated = false`);
+        assert.throws(
+          () => agent.serviceOrchestrator.registry.deleteService(factoryId),
+          (err: any) => err.status === 405,
+          `DELETE ${factoryId} must return 405`
+        );
+      }
+    }
+
+    // 2. Patch software_factory with ONLY enabled: false (no endpoint, priority or transport overrides)
+    agent.serviceOrchestrator.registry.patchService("software_factory", { enabled: false });
+
+    const overrideBeforeExport = agent.serviceOrchestrator.registry.connectionStore.getOverride("software_factory");
+    assert.equal(overrideBeforeExport?.enabledOverride, false);
+    assert.equal(overrideBeforeExport?.endpointOverride, undefined);
+    assert.equal(overrideBeforeExport?.priorityOverride, undefined);
+
+    // 3. Export settings and connection overrides via HTTP
+    const exportRes = await fetch(`http://localhost:${testPort}/api/settings/export`, { headers });
+    assert.equal(exportRes.status, 200);
+    const exportData = await exportRes.json();
+
+    const sfExportOverride = exportData.serviceOverrides.find((o: any) => o.serviceId === "software_factory");
+    assert.ok(sfExportOverride);
+    assert.equal(sfExportOverride.enabledOverride, false);
+    assert.equal(sfExportOverride.endpointOverride, undefined);
+    assert.equal(sfExportOverride.userCreated, false);
+
+    // 4. Reset factory override in DB
+    agent.serviceOrchestrator.registry.resetFactoryOverride("software_factory");
+    assert.equal(agent.serviceOrchestrator.registry.connectionStore.getOverride("software_factory"), null);
+
+    // 5. Import exported payload
+    const importRes = await fetch(`http://localhost:${testPort}/api/settings/import`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(exportData),
+    });
+    assert.equal(importRes.status, 200);
+
+    // 6. Verify after import: enabledOverride is false, but endpointOverride/priorityOverride remain undefined!
+    const overrideAfterImport = agent.serviceOrchestrator.registry.connectionStore.getOverride("software_factory");
+    assert.equal(overrideAfterImport?.enabledOverride, false);
+    assert.equal(overrideAfterImport?.endpointOverride, undefined);
+    assert.equal(overrideAfterImport?.priorityOverride, undefined);
+
+    const reimportedSvc = agent.serviceOrchestrator.registry.getServiceById("software_factory");
+    assert.equal(reimportedSvc?.userCreated, false);
+    assert.equal(reimportedSvc?.enabled, false);
+    assert.ok(reimportedSvc?.endpoint.startsWith("http://localhost:"));
+  } finally {
+    server.close();
+    config.api.token = previousToken;
+  }
+});
+
+test("RISK VALIDATION: POST, PATCH, and IMPORT reject invalid riskByCapability values", async () => {
+  setupTestDb();
+  const previousToken = config.api.token;
+  config.api.token = "risk-test-token";
+
+  const { startHttpApi } = await import("../interfaces/httpApi.js");
+  const { Agent } = await import("../core/agent.js");
+  const { MockProvider } = await import("../llm/providers/mock.js");
+
+  const agent = new Agent({
+    llm: new MockProvider(),
+    embeddings: new LocalHashingEmbeddingProvider(),
+  });
+
+  const testPort = 4104;
+  const server = startHttpApi(agent, testPort);
+  const headers = { authorization: "Bearer risk-test-token", "content-type": "application/json" };
+
+  try {
+    // 1. POST with invalid risk level
+    const postRes = await fetch(`http://localhost:${testPort}/api/connections`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        id: "risk_svc_post",
+        name: "Risk Svc Post",
+        endpoint: "http://localhost:4000",
+        capabilities: ["software_development"],
+        riskByCapability: { software_development: "INVALID_RISK_LEVEL" },
+      }),
+    });
+    assert.equal(postRes.status, 400);
+
+    // 2. PATCH with invalid risk level
+    const patchRes = await fetch(`http://localhost:${testPort}/api/connections/software_factory`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({
+        riskByCapability: { software_development: "SUPER_CRITICAL" },
+      }),
+    });
+    assert.equal(patchRes.status, 400);
+
+    // 3. IMPORT with invalid risk level
+    const importRes = await fetch(`http://localhost:${testPort}/api/settings/import`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        schemaVersion: 1,
+        serviceOverrides: [
+          {
+            serviceId: "software_factory",
+            riskByCapabilityJson: JSON.stringify({ software_development: "BOGUS_RISK" }),
+          },
+        ],
+      }),
+    });
+    assert.equal(importRes.status, 400);
+    const importErr = await importRes.json();
+    assert.equal(importErr.error, "SETTINGS_IMPORT_INVALID");
+  } finally {
+    server.close();
+    config.api.token = previousToken;
+  }
+});
+
 test("AUTH: Settings & Connections fail closed with 401 when API token is configured and missing/invalid", async () => {
   setupTestDb();
   const previousToken = config.api.token;

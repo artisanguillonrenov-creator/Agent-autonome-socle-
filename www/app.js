@@ -1714,6 +1714,7 @@ function showUserServiceModal() {
   const reqTimeoutGroup = createGroup('Timeout Tâches HTTP (ms)', 'ex: 120000', '120000', 'number');
   const hlthTimeoutGroup = createGroup('Timeout Health Check (ms)', 'ex: 5000', '5000', 'number');
   const capsGroup = createGroup('Capabilities (séparées par des virgules)', 'ex: software_development, code_generation', 'software_development');
+  const parallelCapsGroup = createGroup('Parallel Safe Capabilities (séparées par des virgules)', 'ex: software_development', '');
   const authEnvGroup = createGroup('Variable d\'Env Auth (Optionnel)', 'ex: MY_SERVICE_TOKEN', '');
   const risksGroup = createGroup('Risques par Capability (JSON)', 'ex: {"software_development": "MEDIUM"}', '{}');
 
@@ -1744,6 +1745,7 @@ function showUserServiceModal() {
       }
 
       const caps = capsGroup.input.value.split(',').map((s) => s.trim()).filter(Boolean);
+      const parallelCaps = parallelCapsGroup.input.value.split(',').map((s) => s.trim()).filter(Boolean);
       const authEnv = authEnvGroup.input.value.trim();
       const payload = {
         id: idGroup.input.value.trim(),
@@ -1756,6 +1758,7 @@ function showUserServiceModal() {
         requestTimeoutMs: Number(reqTimeoutGroup.input.value) || 120000,
         healthTimeoutMs: Number(hlthTimeoutGroup.input.value) || 5000,
         capabilities: caps,
+        parallelSafeCapabilities: parallelCaps,
         riskByCapability: riskObj,
         auth: authEnv ? { type: 'bearer_env', envVar: authEnv } : { type: 'none' },
       };
@@ -1785,6 +1788,7 @@ function showUserServiceModal() {
     reqTimeoutGroup.group,
     hlthTimeoutGroup.group,
     capsGroup.group,
+    parallelCapsGroup.group,
     authEnvGroup.group,
     risksGroup.group,
     buttonRow,
@@ -1836,6 +1840,7 @@ function showEditServiceModal(conn) {
   const hlthTimeoutGroup = createGroup('Timeout Health Check (ms)', 'ex: 5000', String(conn.healthTimeoutMs ?? 5000), 'number');
   const authEnvGroup = createGroup('Variable d\'Env Auth', 'ex: API_TOKEN', conn.auth?.envVar || '');
   const capsGroup = createGroup('Capabilities (séparées par des virgules)', 'ex: software_development, code_generation', Array.isArray(conn.capabilities) ? conn.capabilities.join(', ') : '');
+  const parallelCapsGroup = createGroup('Parallel Safe Capabilities (séparées par des virgules)', 'ex: software_development', Array.isArray(conn.parallelSafeCapabilities) ? conn.parallelSafeCapabilities.join(', ') : '');
   const risksGroup = createGroup('Risques par Capability (JSON)', 'ex: {"software_development": "MEDIUM"}', JSON.stringify(conn.riskByCapability || {}));
 
   const enabledGroup = document.createElement('div');
@@ -1880,6 +1885,7 @@ function showEditServiceModal(conn) {
       }
 
       const caps = capsGroup.input.value.split(',').map((s) => s.trim()).filter(Boolean);
+      const parallelCaps = parallelCapsGroup.input.value.split(',').map((s) => s.trim()).filter(Boolean);
       const authEnv = authEnvGroup.input.value.trim();
 
       const patchPayload = {
@@ -1893,6 +1899,7 @@ function showEditServiceModal(conn) {
         healthTimeoutMs: Number(hlthTimeoutGroup.input.value) || 5000,
         auth: authEnv ? { type: 'bearer_env', envVar: authEnv } : { type: 'none' },
         capabilities: caps,
+        parallelSafeCapabilities: parallelCaps,
         riskByCapability: riskObj,
       };
 
@@ -1922,6 +1929,7 @@ function showEditServiceModal(conn) {
     hlthTimeoutGroup.group,
     authEnvGroup.group,
     capsGroup.group,
+    parallelCapsGroup.group,
     risksGroup.group,
     buttonRow,
   );

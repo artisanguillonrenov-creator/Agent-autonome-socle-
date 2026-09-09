@@ -39,11 +39,16 @@ export function getKnownCapabilities(): Set<string> {
   canonicalSkillCatalog.forEach((s) => {
     if (s.serviceCapability) set.add(s.serviceCapability);
   });
-  ["software_development", "code_generation", "file_management", "deep_research", "cap"].forEach((c) => set.add(c));
+  ["software_development", "code_generation", "file_management", "deep_research"].forEach((c) => set.add(c));
   return set;
 }
 
-export function validateServiceDefinition(raw: unknown, strict = false, factoryServiceIds?: Set<string>): ServiceDefinition {
+export function validateServiceDefinition(
+  raw: unknown,
+  strict = false,
+  factoryServiceIds?: Set<string>,
+  isUserConnection = false,
+): ServiceDefinition {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("service must be an object");
   const r = raw as any;
   const transport = r.transport ?? (["local", "direct", "in-process"].includes(r.endpoint) ? "local" : "task_http");
@@ -66,12 +71,12 @@ export function validateServiceDefinition(raw: unknown, strict = false, factoryS
     throw new Error("invalid required fields");
   }
 
-  // Server-side userCreated determination (Requirement 4)
-  const isFactory = factoryServiceIds ? factoryServiceIds.has(r.id.trim()) : r.id.trim() === "software_factory";
-  const userCreated = Boolean(r.userCreated) || !isFactory;
+  // Server-side userCreated determination
+  const isFactory = factoryServiceIds ? factoryServiceIds.has(r.id.trim()) : (r.id.trim() === "software_factory" || r.id.trim() === "mock_software_factory" || r.id.trim() === "workspace_service" || r.id.trim() === "research_service");
+  const userCreated = isUserConnection || (Boolean(r.userCreated) && !isFactory);
 
-  // Validate capabilities against known catalog for user-created service connections
-  if (userCreated) {
+  // Validate capabilities against known catalog for user connections
+  if (isUserConnection || userCreated) {
     const known = getKnownCapabilities();
     for (const cap of r.capabilities) {
       if (!known.has(cap)) {
@@ -88,8 +93,12 @@ export function validateServiceDefinition(raw: unknown, strict = false, factoryS
     throw new Error("invalid parallel safe capabilities");
   }
 
-  if (r.riskByCapability !== undefined && (typeof r.riskByCapability !== "object" || (strict && Object.values(r.riskByCapability).some((x) => !risks.has(x as string))))) {
-    throw new Error("invalid risks");
+  if (
+    r.riskByCapability !== undefined &&
+    (typeof r.riskByCapability !== "object" ||
+      Object.entries(r.riskByCapability).some(([cap, val]) => !risks.has(val as string) || !r.capabilities.includes(cap)))
+  ) {
+    throw new Error("invalid riskByCapability");
   }
 
   if (transport === "local" && typeof r.endpoint !== "string") r.endpoint = r.id;
@@ -330,8 +339,12 @@ export class ServiceRegistry {
     }
 
     if (patch.riskByCapability !== undefined) {
-      if (typeof patch.riskByCapability !== "object" || Object.values(patch.riskByCapability).some((x) => !risks.has(x as string))) {
-        throw new Error("invalid risks");
+      const targetCaps = patch.capabilities ?? existing.capabilities;
+      if (
+        typeof patch.riskByCapability !== "object" ||
+        Object.entries(patch.riskByCapability).some(([cap, val]) => !risks.has(val as string) || !targetCaps.includes(cap))
+      ) {
+        throw new Error("invalid riskByCapability");
       }
     }
 
@@ -372,9 +385,12 @@ export class ServiceRegistry {
     this.connectionStore.patchOverride(id, patchRecord);
   }
 
+  isFactoryService(id: string): boolean {
+    return this.factoryServices.some((x) => x.id === id);
+  }
+
   deleteService(id: string): void {
-    const isFactory = this.factoryServices.some((x) => x.id === id);
-    if (isFactory) {
+    if (this.isFactoryService(id)) {
       const err = new Error("FACTORY_SERVICE_CANNOT_BE_DELETED");
       (err as any).status = 405;
       throw err;

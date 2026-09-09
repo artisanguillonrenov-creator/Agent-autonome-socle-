@@ -41,8 +41,12 @@ export class Agent {
   readonly skillSelector: SkillSelector;
   private llm: LLMProvider;
   private readonly contextBudget: ContextBudgetManager;
-  private readonly maxIterations: number;
+  private customMaxIterations?: number;
   private stepCount = 0;
+
+  get maxIterations(): number {
+    return this.customMaxIterations ?? config.agent.maxIterations;
+  }
 
   constructor(opts: AgentOptions) {
     this.llm = opts.llm;
@@ -52,10 +56,10 @@ export class Agent {
     this.reflection = new ReflectionEngine(
       opts.llm,
       this.memory,
-      opts.reflectionEveryNSteps ?? config.reflection.everyNSteps,
+      opts.reflectionEveryNSteps,
     );
-    this.contextBudget = new ContextBudgetManager(opts.contextTokenBudget ?? config.context.tokenBudget);
-    this.maxIterations = opts.maxIterations ?? config.agent.maxIterations;
+    this.contextBudget = new ContextBudgetManager(opts.contextTokenBudget);
+    this.customMaxIterations = opts.maxIterations;
     this.serviceOrchestrator = opts.orchestrator ?? new ServiceOrchestrator();
     this.planRunner = new PlanRunner(this.serviceOrchestrator, this.planner,
       new ReplanningEngine(opts.llm, this.serviceOrchestrator.registry));
