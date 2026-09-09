@@ -90,6 +90,7 @@ export class Agent {
         skillMap.set(skill.name, skill);
       }
       const availableSkills = Array.from(skillMap.values());
+      const availableSkillNames = new Set(availableSkills.map((skill) => skill.name));
       new ActivityStore().append({eventType:"SKILLS_SELECTED",message:"Skills selected",metadata:{selectedSkillIds:availableSkills.map(s=>s.id),count:availableSkills.length}});
 
       const reflections = retrieved.relevantMemories.filter((m) => m.kind === "reflection");
@@ -135,6 +136,15 @@ export class Agent {
 
         for (const toolCall of nativeToolCalls) {
           const skillName = toolCall.function?.name;
+          if (!skillName || !availableSkillNames.has(skillName)) {
+            await this.memory.recordTurn({
+              role: "tool",
+              name: skillName || "unavailable_tool",
+              toolCallId: toolCall.id || "call_unknown",
+              content: "TOOL_NOT_AVAILABLE_THIS_TURN",
+            });
+            continue;
+          }
           let parsedInput: Record<string, unknown> = {};
 
           try {
@@ -158,7 +168,6 @@ export class Agent {
           lastActionOrStep = `Appel outil natif: ${skillName}`;
           console.log(`[Agent] Exécution de l'outil natif '${skillName}' (id: ${toolCall.id}) avec input:`, parsedInput);
 
-          const compatibilityInternal=skillName==="dispatch_capability"?this.skills.get(skillName):undefined;
           const context = {
             rememberFact: (entity:string, attribute:string, value:string) => this.memory.facts.set(entity, attribute, value),
             serviceOrchestrator: this.serviceOrchestrator,
@@ -166,10 +175,7 @@ export class Agent {
             skillRegistry:this.skills,
             toolCallId:toolCall.id,
           };
-          // Compatibility for persisted historical tool calls only; it is never advertised to an LLM.
-          const result = compatibilityInternal?.handler
-            ? await compatibilityInternal.handler(parsedInput,context)
-            : await this.skills.execute(skillName, parsedInput, context);
+          const result = await this.skills.execute(skillName, parsedInput, context);
 
           const formattedToolOutput = `[Résultat de l'outil '${skillName}']: ${result}`;
 

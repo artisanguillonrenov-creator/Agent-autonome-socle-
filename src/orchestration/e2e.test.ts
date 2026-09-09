@@ -68,7 +68,7 @@ class StructuredMockLLM implements LLMProvider {
       };
     }
 
-    // Default DISPATCH_CAPABILITY
+    // Default high-level selected skill.
     return {
       content: null,
       toolCalls: [
@@ -76,11 +76,11 @@ class StructuredMockLLM implements LLMProvider {
           id: "call_dispatch_1",
           type: "function",
           function: {
-            name: "dispatch_capability",
+            name: "software_development",
             arguments: JSON.stringify({
-              capability: "software_development",
               objective: "Crée-moi une petite application de prise de notes.",
-              context: { framework: "react" },
+              filePath: "src/App.tsx",
+              instructions: "Utiliser React.",
               constraints: ["clean code"],
             }),
           },
