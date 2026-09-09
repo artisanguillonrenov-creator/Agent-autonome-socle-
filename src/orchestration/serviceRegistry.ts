@@ -34,7 +34,16 @@ export function riskForCapability(s: ServiceDefinition, c: string): RiskLevel | 
   return risks.has(r) ? (r as RiskLevel) : null;
 }
 
-export function validateServiceDefinition(raw: unknown, strict = false): ServiceDefinition {
+export function getKnownCapabilities(): Set<string> {
+  const set = new Set<string>();
+  canonicalSkillCatalog.forEach((s) => {
+    if (s.serviceCapability) set.add(s.serviceCapability);
+  });
+  ["software_development", "code_generation", "file_management", "deep_research"].forEach((c) => set.add(c));
+  return set;
+}
+
+export function validateServiceDefinition(raw: unknown, strict = false, factoryServiceIds?: Set<string>): ServiceDefinition {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("service must be an object");
   const r = raw as any;
   const transport = r.transport ?? (["local", "direct", "in-process"].includes(r.endpoint) ? "local" : "task_http");
@@ -57,12 +66,15 @@ export function validateServiceDefinition(raw: unknown, strict = false): Service
     throw new Error("invalid required fields");
   }
 
-  // Validate capabilities against known catalog for user-created service connections (Requirement 19)
-  if (r.userCreated) {
-    const knownCapabilities = new Set(canonicalSkillCatalog.map((s) => s.serviceCapability).filter(Boolean));
-    ["software_development", "code_generation", "file_management", "deep_research"].forEach((c) => knownCapabilities.add(c));
+  // Server-side userCreated determination (Requirement 4)
+  const isFactory = factoryServiceIds ? factoryServiceIds.has(r.id.trim()) : r.id.trim() === "software_factory";
+  const userCreated = Boolean(r.userCreated) || !isFactory;
+
+  // Validate capabilities against known catalog for user-created service connections
+  if (userCreated) {
+    const known = getKnownCapabilities();
     for (const cap of r.capabilities) {
-      if (!knownCapabilities.has(cap)) {
+      if (!known.has(cap)) {
         throw new Error(`CONNECTION_CAPABILITY_UNKNOWN: ${cap}`);
       }
     }
@@ -119,7 +131,7 @@ export function validateServiceDefinition(raw: unknown, strict = false): Service
     id: r.id.trim(),
     name: r.name.trim(),
     description: typeof r.description === "string" ? r.description.trim() : undefined,
-    userCreated: Boolean(r.userCreated),
+      userCreated,
     transport,
     healthPath,
     taskPath,
@@ -181,7 +193,8 @@ export class ServiceRegistry {
   }
 
   register(raw: ServiceDefinition): void {
-    const s = validateServiceDefinition(raw);
+    const factorySet = new Set(this.factoryServices.map((x) => x.id));
+    const s = validateServiceDefinition(raw, false, factorySet);
     const existing = this.getServiceById(s.id);
 
     if (existing) {
@@ -230,6 +243,96 @@ export class ServiceRegistry {
     const existing = this.getServiceById(id);
     if (!existing) {
       throw new Error(`SERVICE_NOT_FOUND: ${id}`);
+    }
+
+    const isFactory = this.factoryServices.some((x) => x.id === id);
+
+    // Validate patch input fields
+    if (patch.endpoint !== undefined) {
+      const transport = patch.transport ?? existing.transport;
+      if (transport === "task_http") {
+        let u: URL;
+        try {
+          u = new URL(patch.endpoint);
+        } catch {
+          throw new Error("invalid endpoint");
+        }
+        if (!["http:", "https:"].includes(u.protocol)) throw new Error("invalid endpoint protocol");
+      }
+    }
+
+    if (patch.transport !== undefined && !["local", "task_http"].includes(patch.transport)) {
+      throw new Error("invalid transport");
+    }
+
+    if (patch.healthPath !== undefined) {
+      if (typeof patch.healthPath !== "string" || !patch.healthPath.startsWith("/") || patch.healthPath.includes("..") || patch.healthPath.includes("://")) {
+        throw new Error("invalid healthPath");
+      }
+    }
+
+    if (patch.taskPath !== undefined) {
+      if (typeof patch.taskPath !== "string" || !patch.taskPath.startsWith("/") || patch.taskPath.includes("..") || patch.taskPath.includes("://")) {
+        throw new Error("invalid taskPath");
+      }
+    }
+
+    if (patch.priority !== undefined) {
+      if (!Number.isFinite(patch.priority) || patch.priority < 0 || patch.priority > 100) {
+        throw new Error("invalid priority");
+      }
+    }
+
+    if (patch.requestTimeoutMs !== undefined) {
+      if (!Number.isFinite(patch.requestTimeoutMs) || patch.requestTimeoutMs < 1000 || patch.requestTimeoutMs > 600000) {
+        throw new Error("invalid requestTimeoutMs");
+      }
+    }
+
+    if (patch.healthTimeoutMs !== undefined) {
+      if (!Number.isFinite(patch.healthTimeoutMs) || patch.healthTimeoutMs < 500 || patch.healthTimeoutMs > 60000) {
+        throw new Error("invalid healthTimeoutMs");
+      }
+    }
+
+    if (patch.auth !== undefined) {
+      if (
+        !patch.auth ||
+        !["none", "bearer_env"].includes(patch.auth.type) ||
+        (patch.auth.type === "bearer_env" && (typeof patch.auth.envVar !== "string" || !patch.auth.envVar.trim() || !/^[A-Z][A-Z0-9_]*$/.test(patch.auth.envVar)))
+      ) {
+        throw new Error("invalid auth");
+      }
+    }
+
+    if (patch.capabilities !== undefined) {
+      if (!Array.isArray(patch.capabilities) || !patch.capabilities.length || !patch.capabilities.every((x) => typeof x === "string" && !!x.trim())) {
+        throw new Error("invalid capabilities");
+      }
+      if (!isFactory) {
+        const known = getKnownCapabilities();
+        for (const cap of patch.capabilities) {
+          if (!known.has(cap)) {
+            throw new Error(`CONNECTION_CAPABILITY_UNKNOWN: ${cap}`);
+          }
+        }
+      }
+    }
+
+    if (patch.parallelSafeCapabilities !== undefined) {
+      const targetCaps = patch.capabilities ?? existing.capabilities;
+      if (
+        !Array.isArray(patch.parallelSafeCapabilities) ||
+        !patch.parallelSafeCapabilities.every((x) => typeof x === "string" && !!x.trim() && targetCaps.includes(x))
+      ) {
+        throw new Error("invalid parallel safe capabilities");
+      }
+    }
+
+    if (patch.riskByCapability !== undefined) {
+      if (typeof patch.riskByCapability !== "object" || Object.values(patch.riskByCapability).some((x) => !risks.has(x as string))) {
+        throw new Error("invalid risks");
+      }
     }
 
     const endpointChanged = patch.endpoint !== undefined && patch.endpoint !== existing.endpoint;

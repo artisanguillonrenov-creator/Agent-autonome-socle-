@@ -24,14 +24,8 @@ export function applyAllEffectiveRuntimeSettings(agent: Agent, settingsStore = n
       config.background.maxConcurrent = val;
     } else if (key === "projects.workspaceMaxFileBytes" && typeof val === "number") {
       config.workspace.maxFileBytes = val;
-      if (agent.serviceOrchestrator?.workspaces) {
-        (agent.serviceOrchestrator.workspaces as any).maxFileBytes = val;
-      }
     } else if (key === "projects.workspaceMaxTotalBytes" && typeof val === "number") {
       config.workspace.maxTotalBytes = val;
-      if (agent.serviceOrchestrator?.workspaces) {
-        (agent.serviceOrchestrator.workspaces as any).maxTotalBytes = val;
-      }
     }
   }
 

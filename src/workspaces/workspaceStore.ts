@@ -11,7 +11,23 @@ const row=(r:any):Workspace=>({id:r.id,name:r.name,ownerType:r.owner_type,ownerI
 
 export class WorkspaceStore {
   readonly root:string;
-  constructor(root=config.workspace.root, readonly maxFileBytes=config.workspace.maxFileBytes, readonly maxTotalBytes=config.workspace.maxTotalBytes){this.root=resolve(root);mkdirSync(this.root,{recursive:true});}
+  private customMaxFileBytes?: number;
+  private customMaxTotalBytes?: number;
+
+  constructor(root=config.workspace.root, maxFileBytes?: number, maxTotalBytes?: number){
+    this.root=resolve(root);
+    mkdirSync(this.root,{recursive:true});
+    this.customMaxFileBytes = maxFileBytes;
+    this.customMaxTotalBytes = maxTotalBytes;
+  }
+
+  get maxFileBytes(): number {
+    return this.customMaxFileBytes ?? config.workspace.maxFileBytes;
+  }
+
+  get maxTotalBytes(): number {
+    return this.customMaxTotalBytes ?? config.workspace.maxTotalBytes;
+  }
   create(input:{name:string;ownerType:WorkspaceOwnerType;ownerId:string}):Workspace {if(!input.name.trim()||!input.ownerId.trim()||!["PLAN_RUN","ADHOC"].includes(input.ownerType))throw new Error("INVALID_WORKSPACE");const existing=this.getByOwner(input.ownerType,input.ownerId);if(existing)return existing;const now=Date.now(),id=randomUUID();getDb().prepare("INSERT INTO workspaces(id,name,owner_type,owner_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)").run(id,input.name.trim(),input.ownerType,input.ownerId,"ACTIVE",now,now);mkdirSync(resolve(this.root,id),{recursive:false});return this.get(id)!;}
   get(id:string):Workspace|null {const r=getDb().prepare("SELECT * FROM workspaces WHERE id=?").get(id);return r?row(r):null;}
   getByOwner(type:WorkspaceOwnerType,id:string):Workspace|null {const r=getDb().prepare("SELECT * FROM workspaces WHERE owner_type=? AND owner_id=?").get(type,id);return r?row(r):null;}

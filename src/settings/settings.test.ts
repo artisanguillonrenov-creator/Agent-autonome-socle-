@@ -281,12 +281,21 @@ test("HTTP IMPORT/EXPORT: Full export/import cycle, secret masking, and atomic t
     const maxIterSetting = settingsList.find((s: any) => s.definition.key === "autonomy.maxIterations");
     assert.equal(maxIterSetting.effectiveValue, 14);
 
-    // 4. Invalid import (valid setting + invalid/unknown setting in middle)
+    // 4. Invalid import (valid setting + valid service change + invalid/unknown setting in middle)
     const invalidPayload = {
       schemaVersion: 1,
       settings: [
         { key: "system.tokenBudget", value: 9999 }, // valid change
         { key: "unknown.setting.key", value: "bad" }, // INVALID!
+      ],
+      serviceOverrides: [
+        {
+          serviceId: "software_factory",
+          name: "Factory Changed Rollback Test",
+          userCreated: false,
+          transportOverride: "task_http",
+          endpointOverride: "http://invalid-rollback.local:9999",
+        },
       ],
     };
 
@@ -299,11 +308,14 @@ test("HTTP IMPORT/EXPORT: Full export/import cycle, secret masking, and atomic t
     const invalidJson = await invalidImportRes.json();
     assert.equal(invalidJson.error, "SETTINGS_IMPORT_INVALID");
 
-    // 5. Verify total SQLite rollback: system.tokenBudget is STILL 6500 (NOT 9999!)
+    // 5. Verify total SQLite rollback: BOTH system.tokenBudget AND software_factory remain unchanged!
     const getSettingsAfterRollback = await fetch(`http://localhost:${testPort}/api/settings`, { headers });
     const settingsAfterRollback = await getSettingsAfterRollback.json();
     const tokenBudgetSetting = settingsAfterRollback.find((s: any) => s.definition.key === "system.tokenBudget");
     assert.equal(tokenBudgetSetting.effectiveValue, 6500);
+
+    const sfService = agent.serviceOrchestrator.registry.getServiceById("software_factory");
+    assert.notEqual(sfService?.endpoint, "http://invalid-rollback.local:9999");
   } finally {
     server.close();
     config.api.token = previousToken;
@@ -336,6 +348,124 @@ test("SETTINGS: applyAllEffectiveRuntimeSettings applies values on startup/resta
 
   assert.equal(config.context.tokenBudget, 4000); // restored default
   assert.equal(config.agent.maxIterations, 5); // restored default
+});
+
+test("CONNECTIONS PATCH VALIDATION & SERVER-SIDE USERCREATED DETERMINATION", async () => {
+  setupTestDb();
+  const previousToken = config.api.token;
+  config.api.token = "conn-val-test-token";
+
+  const { startHttpApi } = await import("../interfaces/httpApi.js");
+  const { Agent } = await import("../core/agent.js");
+  const { MockProvider } = await import("../llm/providers/mock.js");
+
+  const agent = new Agent({
+    llm: new MockProvider(),
+    embeddings: new LocalHashingEmbeddingProvider(),
+  });
+
+  const testPort = 4101;
+  const server = startHttpApi(agent, testPort);
+  const headers = { authorization: "Bearer conn-val-test-token", "content-type": "application/json" };
+
+  try {
+    // 1. Invalid PATCH endpoint protocol
+    const badEndpointRes = await fetch(`http://localhost:${testPort}/api/connections/software_factory`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ endpoint: "ftp://invalid-protocol.local" }),
+    });
+    assert.equal(badEndpointRes.status, 400);
+
+    // 2. Invalid priority (> 100)
+    const badPriorityRes = await fetch(`http://localhost:${testPort}/api/connections/software_factory`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ priority: 150 }),
+    });
+    assert.equal(badPriorityRes.status, 400);
+
+    // 3. Invalid healthPath (traversal)
+    const badPathRes = await fetch(`http://localhost:${testPort}/api/connections/software_factory`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ healthPath: "/../etc/passwd" }),
+    });
+    assert.equal(badPathRes.status, 400);
+
+    // 4. Register new user-created service with userCreated: false claims & unknown capability -> rejected with 400
+    const unknownCapRes = await fetch(`http://localhost:${testPort}/api/connections`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        id: "user_svc_cap_test",
+        name: "User Service Cap Test",
+        userCreated: false, // Claiming to be factory service!
+        endpoint: "http://localhost:4000",
+        capabilities: ["unknown_fake_capability"], // INVALID!
+      }),
+    });
+    assert.equal(unknownCapRes.status, 400);
+    const jsonCap = await unknownCapRes.json();
+    assert.ok(jsonCap.error.includes("CONNECTION_CAPABILITY_UNKNOWN"));
+  } finally {
+    server.close();
+    config.api.token = previousToken;
+  }
+});
+
+test("WORKSPACE LIMITS: Modifying workspaceMaxFileBytes via /api/settings immediately enforces upload limit", async () => {
+  setupTestDb();
+  const previousToken = config.api.token;
+  config.api.token = "ws-limit-test-token";
+
+  const { startHttpApi } = await import("../interfaces/httpApi.js");
+  const { Agent } = await import("../core/agent.js");
+  const { MockProvider } = await import("../llm/providers/mock.js");
+
+  const agent = new Agent({
+    llm: new MockProvider(),
+    embeddings: new LocalHashingEmbeddingProvider(),
+  });
+
+  const testPort = 4102;
+  const server = startHttpApi(agent, testPort);
+  const headers = { authorization: "Bearer ws-limit-test-token", "content-type": "application/json" };
+
+  try {
+    // 1. Create workspace
+    const wsRes = await fetch(`http://localhost:${testPort}/api/workspaces`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ name: "Limit Test Workspace" }),
+    });
+    const workspace = await wsRes.json();
+
+    // 2. Reduce max file bytes setting to 1024 bytes (min allowed) via /api/settings
+    const patchRes = await fetch(`http://localhost:${testPort}/api/settings`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ key: "projects.workspaceMaxFileBytes", value: 1024 }),
+    });
+    assert.equal(patchRes.status, 200);
+
+    // 3. Upload a file of 2000 bytes -> must be rejected with 400 WORKSPACE_FILE_TOO_LARGE
+    const largeContentBase64 = Buffer.from("A".repeat(2000)).toString("base64");
+    const uploadRes = await fetch(`http://localhost:${testPort}/api/workspaces/${workspace.id}/files`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        path: "test.txt",
+        contentBase64: largeContentBase64,
+      }),
+    });
+    assert.equal(uploadRes.status, 400);
+    const uploadErr = await uploadRes.json();
+    assert.equal(uploadErr.error, "WORKSPACE_FILE_TOO_LARGE");
+  } finally {
+    server.close();
+    config.api.token = previousToken;
+  }
 });
 
 test("AUTH: Settings & Connections fail closed with 401 when API token is configured and missing/invalid", async () => {

@@ -72,11 +72,13 @@ test("Android / Capacitor post-DOMContentLoaded bootstrap timing test", async ()
   // Check that bootstrapJarvis function exists in executed context on window
   assert.equal(typeof contextObj.window.bootstrapJarvis, "function");
 
-  // Verify initialization ran immediately since document.readyState !== 'loading'
+  // Verify initialization ran immediately since document.readyState !== 'loading' without throwing
   assert.equal(contextObj.window.jarvisInitialized(), true);
 
-  // Verify calling bootstrapJarvis again is idempotent and returns without re-initializing
-  contextObj.window.bootstrapJarvis();
+  // Verify calling bootstrapJarvis again is idempotent and returns without re-initializing or throwing
+  assert.doesNotThrow(() => {
+    contextObj.window.bootstrapJarvis();
+  });
   assert.equal(contextObj.window.jarvisInitialized(), true);
 });
 

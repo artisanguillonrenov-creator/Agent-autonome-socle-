@@ -127,6 +127,10 @@ function applyRuntimeSettingEffect(key: string, value: unknown, agent: Agent): v
     config.background.maxConcurrent = value;
   } else if (key === "system.tokenBudget" && typeof value === "number") {
     config.context.tokenBudget = value;
+  } else if (key === "projects.workspaceMaxFileBytes" && typeof value === "number") {
+    config.workspace.maxFileBytes = value;
+  } else if (key === "projects.workspaceMaxTotalBytes" && typeof value === "number") {
+    config.workspace.maxTotalBytes = value;
   }
 }
 

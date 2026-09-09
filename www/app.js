@@ -723,7 +723,7 @@ function updateRegenerateAvailability() {
 
 function renderChatView() {
   const container = document.getElementById('view-chat');
-  if (container.children.length > 0) return;
+  if (!container || !container.children || container.children.length > 0) return;
 
   const layout = document.createElement('div'); layout.className = 'chat-layout';
   const messages = document.createElement('div'); messages.id = 'chat-messages'; messages.className = 'chat-messages';
@@ -1422,10 +1422,19 @@ async function renderSettingsView() {
     btn.type = 'button';
     btn.className = `settings-level-btn ${currentDisplayLevel === level ? 'active' : ''}`;
     btn.textContent = level === 'SIMPLE' ? 'Simple' : level === 'ADVANCED' ? 'Avancé' : 'Expert';
-    btn.addEventListener('click', () => {
-      currentDisplayLevel = level;
-      localStorage.setItem('jarvis_interface_level', level);
-      void renderSettingsView();
+    btn.addEventListener('click', async () => {
+      if (currentDisplayLevel === level) return;
+      try {
+        await fetchApi('/api/settings', {
+          method: 'PATCH',
+          body: JSON.stringify({ key: 'settings.interfaceMode', value: level }),
+        });
+        currentDisplayLevel = level;
+        applyLocalSettingCache('settings.interfaceMode', level);
+        void renderSettingsView();
+      } catch (e) {
+        alert(`❌ Erreur lors de la mise à jour du niveau d'interface : ${e.message}`);
+      }
     });
     levelSelector.appendChild(btn);
   });
@@ -1672,7 +1681,7 @@ function showUserServiceModal() {
 
   const modal = document.createElement('div');
   modal.className = 'card';
-  modal.style.maxWidth = '500px';
+  modal.style.maxWidth = '550px';
   modal.style.width = '90%';
   modal.style.maxHeight = '90vh';
   modal.style.overflowY = 'auto';
@@ -1702,8 +1711,11 @@ function showUserServiceModal() {
   const healthPathGroup = createGroup('Health Path', 'ex: /health', '/health');
   const taskPathGroup = createGroup('Task Path', 'ex: /tasks', '/tasks');
   const priorityGroup = createGroup('Priorité (0-100)', 'ex: 10', '10', 'number');
+  const reqTimeoutGroup = createGroup('Timeout Tâches HTTP (ms)', 'ex: 120000', '120000', 'number');
+  const hlthTimeoutGroup = createGroup('Timeout Health Check (ms)', 'ex: 5000', '5000', 'number');
   const capsGroup = createGroup('Capabilities (séparées par des virgules)', 'ex: software_development, code_generation', 'software_development');
   const authEnvGroup = createGroup('Variable d\'Env Auth (Optionnel)', 'ex: MY_SERVICE_TOKEN', '');
+  const risksGroup = createGroup('Risques par Capability (JSON)', 'ex: {"software_development": "MEDIUM"}', '{}');
 
   const buttonRow = document.createElement('div');
   buttonRow.style.display = 'flex';
@@ -1722,6 +1734,15 @@ function showUserServiceModal() {
   btnSubmit.textContent = 'Créer le Service';
   btnSubmit.addEventListener('click', async () => {
     try {
+      let riskObj = {};
+      if (risksGroup.input.value.trim()) {
+        try {
+          riskObj = JSON.parse(risksGroup.input.value.trim());
+        } catch {
+          throw new Error('Format JSON invalide pour les risques par capability');
+        }
+      }
+
       const caps = capsGroup.input.value.split(',').map((s) => s.trim()).filter(Boolean);
       const authEnv = authEnvGroup.input.value.trim();
       const payload = {
@@ -1732,7 +1753,10 @@ function showUserServiceModal() {
         healthPath: healthPathGroup.input.value.trim() || '/health',
         taskPath: taskPathGroup.input.value.trim() || '/tasks',
         priority: Number(priorityGroup.input.value) || 10,
+        requestTimeoutMs: Number(reqTimeoutGroup.input.value) || 120000,
+        healthTimeoutMs: Number(hlthTimeoutGroup.input.value) || 5000,
         capabilities: caps,
+        riskByCapability: riskObj,
         auth: authEnv ? { type: 'bearer_env', envVar: authEnv } : { type: 'none' },
       };
 
@@ -1758,8 +1782,147 @@ function showUserServiceModal() {
     healthPathGroup.group,
     taskPathGroup.group,
     priorityGroup.group,
+    reqTimeoutGroup.group,
+    hlthTimeoutGroup.group,
     capsGroup.group,
     authEnvGroup.group,
+    risksGroup.group,
+    buttonRow,
+  );
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+}
+
+function showEditServiceModal(conn) {
+  const overlay = document.createElement('div');
+  overlay.className = 'sidebar-overlay active';
+  overlay.style.display = 'flex';
+  overlay.style.alignItems = 'center';
+  overlay.style.justifyContent = 'center';
+  overlay.style.zIndex = '999';
+
+  const modal = document.createElement('div');
+  modal.className = 'card';
+  modal.style.maxWidth = '550px';
+  modal.style.width = '90%';
+  modal.style.maxHeight = '90vh';
+  modal.style.overflowY = 'auto';
+
+  const title = document.createElement('div');
+  title.className = 'card-title';
+  title.textContent = `Configurer / Modifier Service : ${conn.name} (${conn.id})`;
+
+  const createGroup = (label, placeholder, defaultValue = '', type = 'text') => {
+    const group = document.createElement('div');
+    group.className = 'form-group';
+    const lbl = document.createElement('label');
+    lbl.className = 'form-label';
+    lbl.textContent = label;
+    const input = document.createElement('input');
+    input.type = type;
+    input.className = 'input-field';
+    input.placeholder = placeholder;
+    input.value = defaultValue;
+    group.append(lbl, input);
+    return { group, input };
+  };
+
+  const nameGroup = createGroup('Nom du service', 'ex: My Service', conn.name || conn.id);
+  const endpointGroup = createGroup('Endpoint HTTP', 'ex: http://localhost:4000', conn.endpoint || '');
+  const healthPathGroup = createGroup('Health Path', 'ex: /health', conn.healthPath || '/health');
+  const taskPathGroup = createGroup('Task Path', 'ex: /tasks', conn.taskPath || '/tasks');
+  const prioGroup = createGroup('Priorité (0-100)', 'ex: 10', String(conn.priority ?? 10), 'number');
+  const reqTimeoutGroup = createGroup('Timeout Tâches HTTP (ms)', 'ex: 120000', String(conn.requestTimeoutMs ?? 120000), 'number');
+  const hlthTimeoutGroup = createGroup('Timeout Health Check (ms)', 'ex: 5000', String(conn.healthTimeoutMs ?? 5000), 'number');
+  const authEnvGroup = createGroup('Variable d\'Env Auth', 'ex: API_TOKEN', conn.auth?.envVar || '');
+  const capsGroup = createGroup('Capabilities (séparées par des virgules)', 'ex: software_development, code_generation', Array.isArray(conn.capabilities) ? conn.capabilities.join(', ') : '');
+  const risksGroup = createGroup('Risques par Capability (JSON)', 'ex: {"software_development": "MEDIUM"}', JSON.stringify(conn.riskByCapability || {}));
+
+  const enabledGroup = document.createElement('div');
+  enabledGroup.className = 'form-group';
+  const enabledLabel = document.createElement('label');
+  enabledLabel.className = 'form-label';
+  enabledLabel.style.display = 'flex';
+  enabledLabel.style.alignItems = 'center';
+  enabledLabel.style.gap = '8px';
+  const enabledCheck = document.createElement('input');
+  enabledCheck.type = 'checkbox';
+  enabledCheck.checked = Boolean(conn.enabled);
+  const enabledText = document.createElement('span');
+  enabledText.textContent = 'Service Activé';
+  enabledLabel.append(enabledCheck, enabledText);
+  enabledGroup.appendChild(enabledLabel);
+
+  const buttonRow = document.createElement('div');
+  buttonRow.style.display = 'flex';
+  buttonRow.style.gap = '10px';
+  buttonRow.style.marginTop = '16px';
+
+  const btnCancel = document.createElement('button');
+  btnCancel.type = 'button';
+  btnCancel.className = 'btn btn-secondary';
+  btnCancel.textContent = 'Annuler';
+  btnCancel.addEventListener('click', () => overlay.remove());
+
+  const btnSubmit = document.createElement('button');
+  btnSubmit.type = 'button';
+  btnSubmit.className = 'btn btn-primary';
+  btnSubmit.textContent = 'Enregistrer';
+  btnSubmit.addEventListener('click', async () => {
+    try {
+      let riskObj = {};
+      if (risksGroup.input.value.trim()) {
+        try {
+          riskObj = JSON.parse(risksGroup.input.value.trim());
+        } catch {
+          throw new Error('Format JSON invalide pour les risques par capability');
+        }
+      }
+
+      const caps = capsGroup.input.value.split(',').map((s) => s.trim()).filter(Boolean);
+      const authEnv = authEnvGroup.input.value.trim();
+
+      const patchPayload = {
+        name: nameGroup.input.value.trim(),
+        enabled: enabledCheck.checked,
+        endpoint: endpointGroup.input.value.trim(),
+        healthPath: healthPathGroup.input.value.trim() || '/health',
+        taskPath: taskPathGroup.input.value.trim() || '/tasks',
+        priority: Number(prioGroup.input.value) || 10,
+        requestTimeoutMs: Number(reqTimeoutGroup.input.value) || 120000,
+        healthTimeoutMs: Number(hlthTimeoutGroup.input.value) || 5000,
+        auth: authEnv ? { type: 'bearer_env', envVar: authEnv } : { type: 'none' },
+        capabilities: caps,
+        riskByCapability: riskObj,
+      };
+
+      await fetchApi(`/api/connections/${encodeURIComponent(conn.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patchPayload),
+      });
+
+      alert('✅ Service mis à jour avec succès !');
+      overlay.remove();
+      void renderSettingsView();
+    } catch (e) {
+      alert(`❌ Échec de la mise à jour : ${e.message}`);
+    }
+  });
+
+  buttonRow.append(btnCancel, btnSubmit);
+  modal.append(
+    title,
+    nameGroup.group,
+    enabledGroup,
+    endpointGroup.group,
+    healthPathGroup.group,
+    taskPathGroup.group,
+    prioGroup.group,
+    reqTimeoutGroup.group,
+    hlthTimeoutGroup.group,
+    authEnvGroup.group,
+    capsGroup.group,
+    risksGroup.group,
     buttonRow,
   );
   overlay.appendChild(modal);
@@ -1892,7 +2055,15 @@ function renderServicesConnectionCenter(connections) {
       }
     });
 
-    btnRow.append(btnTest, btnToggle);
+    const btnEdit = document.createElement('button');
+    btnEdit.type = 'button';
+    btnEdit.className = 'btn btn-secondary btn-sm';
+    btnEdit.textContent = 'Configurer';
+    btnEdit.addEventListener('click', () => {
+      showEditServiceModal(conn);
+    });
+
+    btnRow.append(btnTest, btnToggle, btnEdit);
 
     if (conn.source === 'DATABASE' && !conn.userCreated) {
       const btnReset = document.createElement('button');
@@ -2233,7 +2404,7 @@ function bootstrapJarvis() {
 
   initNavigation();
 
-  // Apply general settings saved in localStorage or defaults
+  // Apply general settings saved in localStorage for instant initial rendering
   const savedTheme = localStorage.getItem('jarvis_theme') || 'SYSTEM';
   applyThemeRuntime(savedTheme);
 
@@ -2246,6 +2417,24 @@ function bootstrapJarvis() {
   }
 
   switchView(initialView);
+
+  // Asynchronously sync backend authority settings when accessible
+  setTimeout(async () => {
+    try {
+      const effectiveSettings = await fetchApi('/api/settings');
+      if (Array.isArray(effectiveSettings)) {
+        effectiveSettings.forEach((item) => {
+          const key = item.definition?.key;
+          const val = item.effectiveValue;
+          if (key && val !== undefined) {
+            applyLocalSettingCache(key, val);
+          }
+        });
+      }
+    } catch {
+      // Backend offline: retain local cache gracefully
+    }
+  }, 100);
 
   if (state.ota && state.ota.autoCheck) {
     setTimeout(() => checkOtaUpdates(false), 2000);

@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { getDb } from "../persistence/db.js";
+import { config } from "../config.js";
 import {
   SETTINGS_CATALOG,
   SettingDefinition,
@@ -61,6 +62,26 @@ export class SettingsStore {
           value: false,
           effectiveValue: false,
           source: "SYSTEM",
+          scopeType,
+          scopeId,
+        };
+      }
+      if (key === "intelligence.activeProvider") {
+        return {
+          definition: def,
+          value: config.llm.provider,
+          effectiveValue: config.llm.provider,
+          source: process.env.LLM_PROVIDER ? "ENVIRONMENT" : "SYSTEM",
+          scopeType,
+          scopeId,
+        };
+      }
+      if (key === "intelligence.activeModel") {
+        return {
+          definition: def,
+          value: config.llm.model,
+          effectiveValue: config.llm.model,
+          source: process.env.LLM_MODEL ? "ENVIRONMENT" : "SYSTEM",
           scopeType,
           scopeId,
         };
