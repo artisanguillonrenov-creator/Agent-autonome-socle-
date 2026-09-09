@@ -7,6 +7,8 @@ import { ReflectionEngine } from "../reflection/reflectionEngine.js";
 import { ContextBudgetManager } from "../context/contextBudgetManager.js";
 import { saveCheckpoint, loadCheckpoint, listCheckpoints } from "../persistence/checkpoint.js";
 import { ServiceOrchestrator } from "../orchestration/serviceOrchestrator.js";
+import { PlanRunner } from "../planning/planRunner.js";
+import { ReplanningEngine } from "../planning/replanningEngine.js";
 import { builtinSkills } from "../skills/builtin/index.js";
 import { config } from "../config.js";
 import type { AgentStepResult, ChatMessage, SkillDefinition } from "../types.js";
@@ -29,6 +31,7 @@ export class Agent {
   readonly planner: Planner;
   readonly reflection: ReflectionEngine;
   readonly serviceOrchestrator: ServiceOrchestrator;
+  readonly planRunner: PlanRunner;
   private llm: LLMProvider;
   private readonly contextBudget: ContextBudgetManager;
   private readonly maxIterations: number;
@@ -47,6 +50,8 @@ export class Agent {
     this.contextBudget = new ContextBudgetManager(opts.contextTokenBudget ?? config.context.tokenBudget);
     this.maxIterations = opts.maxIterations ?? config.agent.maxIterations;
     this.serviceOrchestrator = opts.orchestrator ?? new ServiceOrchestrator();
+    this.planRunner = new PlanRunner(this.serviceOrchestrator, this.planner,
+      new ReplanningEngine(opts.llm, this.serviceOrchestrator.registry));
 
     for (const skill of builtinSkills) {
       this.skills.register(skill);
@@ -66,7 +71,7 @@ export class Agent {
       const retrieved = await this.memory.retrieve(userInput);
 
       // Category 1: Mandatory system tools sent to LLM on EVERY turn
-      const mandatorySkillNames = ["dispatch_capability"];
+      const mandatorySkillNames = ["dispatch_capability", "execute_mission"];
       const mandatorySkills = mandatorySkillNames
         .map((name) => this.skills.get(name))
         .filter((s): s is SkillDefinition => Boolean(s));
@@ -150,6 +155,7 @@ export class Agent {
           const result = await this.skills.execute(skillName, parsedInput, {
             rememberFact: (entity, attribute, value) => this.memory.facts.set(entity, attribute, value),
             serviceOrchestrator: this.serviceOrchestrator,
+            planner: this.planner,
           });
 
           const formattedToolOutput = `[Résultat de l'outil '${skillName}']: ${result}`;
@@ -200,6 +206,7 @@ export class Agent {
       "ACCÈS INTERNET : Tu possèdes un accès Internet fonctionnel grâce à l'outil 'web_search'.",
       "RÈGLE IMPÉRATIVE : Lorsque la demande de l'utilisateur nécessite des informations récentes, actuelles ou externes (ex: météo, actualités, événements, films au cinéma 'ce mois-ci' ou 'cette année'), tu DOIS obligatoirement appeler l'outil 'web_search'. Ne dis JAMAIS que tu n'as pas accès à Internet.",
       "DÉLÉGATION EXTERNE : Lorsque la demande concerne la création/développement d'un logiciel ou d'une application, utilise l'outil 'dispatch_capability' avec la capacité 'software_development'.",
+      "PLANIFICATION : utilise 'dispatch_capability' pour une action simple et 'execute_mission' pour un objectif réellement multi-étapes. Fournis alors un graphe structuré complet ; ne simule pas son exécution.",
       "ENRICHISSEMENT VISUEL : Structure TOUTES tes réponses complexes (listes, classements, comparaisons, synthèses) sous forme de tableaux Markdown, listes à puces thématiques et liens cliquables.",
       "RÈGLE DE FORMAT : Utilise les outils natifs mis à ta disposition. Ne rédiges JAMAIS de structures techniques JSON ou balises XML dans le texte adressé à l'utilisateur.",
     ].join("\n");
@@ -208,7 +215,8 @@ export class Agent {
   saveCheckpoint(label: string): string {
     return saveCheckpoint(label, {
       workingMemory: this.memory.working.all(),
-      planNodes: this.planner.all(),
+      // Agent checkpoints remain legacy-scoped and must never capture/rewind execution plans.
+      planNodes: this.planner.legacyNodes(),
       stepCount: this.stepCount,
     });
   }
@@ -216,8 +224,14 @@ export class Agent {
   restoreCheckpoint(checkpointId: string): boolean {
     const state = loadCheckpoint(checkpointId);
     if (!state) return false;
+    // Persisted planner state is restored first; validation has already completed.
+    // Working memory cannot become partially restored if the DB transaction fails.
+    try {
+      this.planner.restore(state.planNodes);
+    } catch {
+      return false;
+    }
     this.memory.working.restore(state.workingMemory);
-    this.planner.restore(state.planNodes);
     this.stepCount = state.stepCount;
     return true;
   }

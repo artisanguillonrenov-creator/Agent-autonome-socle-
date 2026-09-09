@@ -22,9 +22,9 @@ async function main(): Promise<void> {
   if (modes.has("http")) {
     const backgroundRunner=new BackgroundRunner(agent.serviceOrchestrator);
     const scheduler=new Scheduler(agent.serviceOrchestrator);
-    backgroundRunner.start(); scheduler.start();
+    backgroundRunner.start(); scheduler.start(); agent.planRunner.start();
     const server=startHttpApi(agent, config.api.port);
-    const shutdown=()=>{backgroundRunner.stop();scheduler.stop();server.close();};
+    const shutdown=()=>{backgroundRunner.stop();scheduler.stop();agent.planRunner.stop();server.close();};
     process.once("SIGTERM",shutdown);process.once("SIGINT",shutdown);
   }
 

@@ -69,6 +69,13 @@ export function getDb(): Database.Database {
       state TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS plan_runs (
+      id TEXT PRIMARY KEY, root_node_id TEXT NOT NULL, objective TEXT NOT NULL,
+      status TEXT NOT NULL, generation INTEGER NOT NULL DEFAULT 1,
+      replan_count INTEGER NOT NULL DEFAULT 0, max_replans INTEGER NOT NULL DEFAULT 2,
+      last_error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS tasks (
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
@@ -105,6 +112,31 @@ export function getDb(): Database.Database {
       read_at INTEGER
     );
   `);
+
+  const planNodeColumns = new Set(
+    (db.pragma("table_info(plan_nodes)") as Array<{ name: string }>).map((column) => column.name),
+  );
+  const missingPlanNodeColumns: Record<string, string> = {
+    plan_run_id: "TEXT", position: "INTEGER", generation: "INTEGER NOT NULL DEFAULT 0",
+    capability: "TEXT", objective: "TEXT", context_json: "TEXT", constraints_json: "TEXT",
+    priority: "TEXT", dependencies_json: "TEXT", operation_task_id: "TEXT",
+    operation_idempotency_key: "TEXT", result: "TEXT", error: "TEXT", updated_at: "INTEGER",
+    claimed_at: "INTEGER", attempt: "INTEGER NOT NULL DEFAULT 1",
+  };
+  for (const [column, definition] of Object.entries(missingPlanNodeColumns)) {
+    if (!planNodeColumns.has(column)) db.exec(`ALTER TABLE plan_nodes ADD COLUMN ${column} ${definition}`);
+  }
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_plan_node_position ON plan_nodes(plan_run_id,generation,position) WHERE plan_run_id IS NOT NULL`);
+
+  const checkpointColumns = new Set(
+    (db.pragma("table_info(checkpoints)") as Array<{ name: string }>).map((column) => column.name),
+  );
+  const missingCheckpointColumns: Record<string, string> = {
+    kind: "TEXT NOT NULL DEFAULT 'AGENT_STATE'", scope_id: "TEXT", schema_version: "INTEGER NOT NULL DEFAULT 1",
+  };
+  for (const [column, definition] of Object.entries(missingCheckpointColumns)) {
+    if (!checkpointColumns.has(column)) db.exec(`ALTER TABLE checkpoints ADD COLUMN ${column} ${definition}`);
+  }
 
   const processedEventColumns = new Set(
     (db.pragma("table_info(processed_service_events)") as Array<{ name: string }>).map((column) => column.name),

@@ -456,6 +456,15 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         sendJson(res, 200, agent.planner.all());
         return;
       }
+      if (req.method === "GET" && pathname === "/api/plans") {
+        sendJson(res, 200, agent.planner.listRuns()); return;
+      }
+      const planNodesMatch=pathname.match(/^\/api\/plans\/([^/]+)\/nodes$/);
+      if(req.method==="GET"&&planNodesMatch){const run=agent.planner.getRun(decodeURIComponent(planNodesMatch[1]));if(!run){sendJson(res,404,{error:"PLAN_NOT_FOUND"});return;}sendJson(res,200,agent.planner.nodes(run.id));return;}
+      const planCancelMatch=pathname.match(/^\/api\/plans\/([^/]+)\/cancel$/);
+      if(req.method==="POST"&&planCancelMatch){const run=agent.planRunner.cancel(decodeURIComponent(planCancelMatch[1]));sendJson(res,run?200:404,run??{error:"PLAN_NOT_FOUND"});return;}
+      const planDetailMatch=pathname.match(/^\/api\/plans\/([^/]+)$/);
+      if(req.method==="GET"&&planDetailMatch){const run=agent.planner.getRun(decodeURIComponent(planDetailMatch[1]));if(!run){sendJson(res,404,{error:"PLAN_NOT_FOUND"});return;}sendJson(res,200,{...run,nodes:agent.planner.nodes(run.id)});return;}
 
       // 8. Memory Endpoints
       if (req.method === "GET" && pathname === "/api/memory") {
