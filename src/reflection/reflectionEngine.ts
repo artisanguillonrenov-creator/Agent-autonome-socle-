@@ -13,11 +13,16 @@ export class ReflectionEngine {
   private customEveryNSteps?: number;
 
   constructor(
-    private readonly llm: LLMProvider,
+    private llm: LLMProvider,
     private readonly memory: MemoryManager,
     everyNSteps?: number,
   ) {
     this.customEveryNSteps = everyNSteps;
+  }
+
+  /** Permet à Agent.setLLMProvider() de propager le nouveau fournisseur jusqu'ici. */
+  setLLMProvider(llm: LLMProvider): void {
+    this.llm = llm;
   }
 
   get everyNSteps(): number {

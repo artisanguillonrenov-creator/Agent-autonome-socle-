@@ -19,6 +19,8 @@ import { SETTINGS_CATALOG, SETTINGS_SECTIONS } from "../settings/catalog.js";
 import { SettingsStore, SettingScopeType } from "../settings/store.js";
 import { applyAllEffectiveRuntimeSettings } from "../settings/applier.js";
 import { getDb } from "../persistence/db.js";
+import type { ChatMessage } from "../types.js";
+import type { LLMProvider, ToolDefinition } from "../llm/provider.js";
 
 const taskStore = new TaskStore();
 const notificationStore = new NotificationStore();
@@ -102,11 +104,8 @@ const DEFAULT_PRESET_MODELS: Record<string, Array<{ id: string; name: string; is
     { id: "o1", name: "o1" },
     { id: "o3-mini", name: "o3-Mini" },
   ],
-  infermatic: [
-    { id: "llama-3.3-70b-instruct", name: "Llama 3.3 70B Instruct" },
-    { id: "mistral-large-2411", name: "Mistral Large 2411" },
-    { id: "qwen2.5-72b-instruct", name: "Qwen 2.5 72B Instruct" },
-  ],
+  // Infermatic n'a volontairement pas de liste statique ici : le catalogue dépend
+  // du compte/abonnement et est récupéré dynamiquement via fetchInfermaticCatalog().
   ollama: [
     { id: "llama3", name: "Llama 3" },
     { id: "mistral", name: "Mistral" },
@@ -114,6 +113,163 @@ const DEFAULT_PRESET_MODELS: Record<string, Array<{ id: string; name: string; is
   ],
   mock: [{ id: "mock-model", name: "Mock Model (Offline)" }],
 };
+
+interface CatalogModel {
+  id: string;
+  name: string;
+}
+
+type InfermaticCatalogResult =
+  | { ok: true; models: CatalogModel[] }
+  | { ok: false; status: number; error: string };
+
+/**
+ * Interroge la Core API Infermatic (OpenAI-compatible) pour obtenir la liste réelle
+ * des modèles disponibles pour le compte/abonnement configuré. Aucune liste statique
+ * de secours : en cas d'échec, on retourne une erreur explicite plutôt qu'un faux catalogue.
+ */
+async function fetchInfermaticCatalog(): Promise<InfermaticCatalogResult> {
+  if (!config.llm.infermaticApiKey) {
+    return { ok: false, status: 400, error: "INFERMATIC_KEY_MISSING" };
+  }
+
+  const endpoint = `${config.llm.infermaticBaseUrl.replace(/\/+$/, "")}/models`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+
+  try {
+    const response = await fetch(endpoint, {
+      headers: { authorization: `Bearer ${config.llm.infermaticApiKey}` },
+      signal: controller.signal,
+    });
+
+    if (response.status === 401 || response.status === 403) {
+      return { ok: false, status: 502, error: "INFERMATIC_CATALOG_UNAUTHORIZED" };
+    }
+    if (!response.ok) {
+      return { ok: false, status: 502, error: "INFERMATIC_CATALOG_UNAVAILABLE" };
+    }
+
+    const data = (await response.json()) as { data?: Array<{ id: string; name?: string }> };
+    if (!Array.isArray(data.data)) {
+      return { ok: false, status: 502, error: "INFERMATIC_CATALOG_UNAVAILABLE" };
+    }
+
+    // L'id du modèle n'est JAMAIS transformé (casse, format...) : il doit rester
+    // strictement identique à celui renvoyé par Infermatic pour rester sélectionnable.
+    const models = data.data.map((m) => ({ id: m.id, name: m.name || m.id }));
+    return { ok: true, models };
+  } catch (err) {
+    if ((err as Error).name === "AbortError") {
+      return { ok: false, status: 504, error: "INFERMATIC_CATALOG_TIMEOUT" };
+    }
+    return { ok: false, status: 502, error: "INFERMATIC_CATALOG_UNAVAILABLE" };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Messages de validation représentatifs de l'usage réel de Jarvis (system prompt +
+ * instruction courte). Un modèle qui échoue ici (ex : pas de support system/chat)
+ * doit échouer au test AVANT de pouvoir devenir le modèle actif.
+ */
+const JARVIS_COMPATIBILITY_MESSAGES: ChatMessage[] = [
+  { role: "system", content: "You are Jarvis. Follow the user's instruction." },
+  { role: "user", content: "Reply only with OK." },
+];
+
+/**
+ * Tool factice, purement protocolaire : jamais exécuté, il sert uniquement à vérifier
+ * qu'un modèle sait déclencher un appel d'outil structuré — condition nécessaire pour
+ * devenir le cerveau principal de Jarvis, qui fonctionne avec du tool calling natif.
+ */
+const JARVIS_TOOL_PROBE: ToolDefinition = {
+  type: "function",
+  function: {
+    name: "jarvis_compatibility_probe",
+    description: "Internal Jarvis compatibility probe. Always call it immediately, never explain it in plain text.",
+    parameters: {
+      type: "object",
+      properties: { value: { type: "string" } },
+      required: ["value"],
+    },
+  },
+};
+
+type JarvisCompatibilityLevel = "CHAT_COMPATIBLE" | "JARVIS_TOOL_COMPATIBLE";
+
+interface CompatibilityProbeResult {
+  level: JarvisCompatibilityLevel;
+  responsePreview: string;
+}
+
+/**
+ * Validation représentative de l'usage réel de Jarvis. Un simple échange conversationnel
+ * (CHAT_COMPATIBLE) ne suffit pas pour Infermatic : Jarvis fonctionne avec du tool calling
+ * natif, donc un modèle Infermatic doit en plus prouver qu'il sait déclencher un appel
+ * d'outil structuré (JARVIS_TOOL_COMPATIBLE) AVANT de pouvoir devenir actif.
+ */
+async function testJarvisCompatibility(provider: LLMProvider, providerName: LLMProviderName): Promise<CompatibilityProbeResult> {
+  const chatResult = await provider.complete(JARVIS_COMPATIBILITY_MESSAGES, { maxTokens: 5 });
+  const chatText = typeof chatResult === "string" ? chatResult : chatResult.content ?? "";
+
+  if (providerName !== "infermatic") {
+    return { level: "CHAT_COMPATIBLE", responsePreview: chatText.slice(0, 100) };
+  }
+
+  if (!provider.supportsNativeTools || !provider.supportsNativeTools()) {
+    throw new Error("INFERMATIC_NATIVE_TOOLS_UNSUPPORTED");
+  }
+
+  const probeResult = await provider.complete(
+    [
+      { role: "system", content: "You are Jarvis. Follow the user's instruction." },
+      { role: "user", content: 'Call the jarvis_compatibility_probe tool with value set to exactly "OK". Do not reply in plain text.' },
+    ],
+    {
+      maxTokens: 64,
+      tools: [JARVIS_TOOL_PROBE],
+      toolChoice: { type: "function", function: { name: "jarvis_compatibility_probe" } },
+    },
+  );
+
+  const toolCall = (typeof probeResult === "string" ? undefined : probeResult.toolCalls)?.[0];
+  if (!toolCall || toolCall.function.name !== "jarvis_compatibility_probe") {
+    throw new Error("INFERMATIC_NATIVE_TOOLS_UNSUPPORTED");
+  }
+
+  let parsedArgs: { value?: unknown };
+  try {
+    parsedArgs = JSON.parse(toolCall.function.arguments);
+  } catch {
+    throw new Error("INFERMATIC_NATIVE_TOOLS_UNSUPPORTED");
+  }
+
+  if (parsedArgs.value !== "OK") {
+    throw new Error("INFERMATIC_NATIVE_TOOLS_UNSUPPORTED");
+  }
+
+  return { level: "JARVIS_TOOL_COMPATIBLE", responsePreview: chatText.slice(0, 100) };
+}
+
+/**
+ * Ne jamais exposer un message d'erreur brut au frontend : on retire toute clé API
+ * configurée et tout header Authorization/Bearer résiduel, et on tronque la longueur.
+ */
+function redactSecrets(message: string): string {
+  let redacted = message;
+  for (const secret of [
+    config.llm.infermaticApiKey,
+    config.llm.anthropicApiKey,
+    config.llm.openaiApiKey,
+    config.llm.openrouterApiKey,
+  ]) {
+    if (secret) redacted = redacted.split(secret).join("[REDACTED]");
+  }
+  redacted = redacted.replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]");
+  return redacted.length > 500 ? `${redacted.slice(0, 500)}…` : redacted;
+}
 
 function applyRuntimeSettingEffect(key: string, value: unknown, agent: Agent): void {
   if (key === "intelligence.skillSelectorMax" && typeof value === "number") {
@@ -1484,6 +1640,17 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
       if (req.method === "GET" && pathname.startsWith("/api/models/catalog/")) {
         const parts = pathname.split("/");
         const prov = parts[parts.length - 1];
+
+        if (prov === "infermatic") {
+          const result = await fetchInfermaticCatalog();
+          if (!result.ok) {
+            sendJson(res, result.status, { error: result.error, models: [] });
+            return;
+          }
+          sendJson(res, 200, result.models);
+          return;
+        }
+
         sendJson(res, 200, DEFAULT_PRESET_MODELS[prov] || []);
         return;
       }
@@ -1495,23 +1662,28 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
           return;
         }
 
+        // Fonction rigoureusement lecture-seule : createLLMProvider est pur et rien ici
+        // n'écrit dans config.llm, dans llmConfigStore, ni dans l'agent (voir point 9).
         try {
           const testProviderInstance = createLLMProvider({ provider: body.provider, model: body.model });
-          const responseResult = await testProviderInstance.complete([{ role: "user", content: "Test ping" }]);
-          const responseText = typeof responseResult === "string" ? responseResult : responseResult.content ?? "";
+          const probe = await testJarvisCompatibility(testProviderInstance, body.provider);
           sendJson(res, 200, {
             ok: true,
             provider: body.provider,
             model: body.model,
-            responsePreview: responseText.slice(0, 100),
-            message: "Modèle accessible et fonctionnel !",
+            compatibility: probe.level,
+            responsePreview: probe.responsePreview,
+            message:
+              probe.level === "JARVIS_TOOL_COMPATIBLE"
+                ? "Modèle compatible avec le fonctionnement agentique de Jarvis (tool calling natif validé) !"
+                : "Modèle accessible et fonctionnel !",
           });
         } catch (err) {
           sendJson(res, 200, {
             ok: false,
             provider: body.provider,
             model: body.model,
-            error: (err as Error).message,
+            error: redactSecrets((err as Error).message),
           });
         }
         return;
@@ -1527,13 +1699,19 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         const currentProv = config.llm.provider;
         const currentModel = config.llm.model;
 
+        // Application atomique : on valide le candidat, puis on PERSISTE en premier —
+        // c'est la seule étape qui peut réellement échouer (I/O). Les mutations en
+        // mémoire (agent + config) n'interviennent qu'une fois la persistance réussie,
+        // donc si n'importe quelle étape lève une exception, rien n'a encore été modifié
+        // et l'ancien provider/modèle reste intégralement actif — pas de rollback à
+        // effectuer, et jamais d'annonce d'un rollback qui n'aurait pas réellement eu lieu.
         try {
           const newProviderInstance = createLLMProvider({ provider: body.provider, model: body.model });
-          await newProviderInstance.complete([{ role: "user", content: "Validation du modèle" }]);
+          const probe = await testJarvisCompatibility(newProviderInstance, body.provider);
 
-          agent.setLLMProvider(newProviderInstance);
           saveLLMConfig(body.provider, body.model);
 
+          agent.setLLMProvider(newProviderInstance);
           config.llm.provider = body.provider;
           config.llm.model = body.model;
 
@@ -1541,19 +1719,15 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
             ok: true,
             activeProvider: body.provider,
             activeModel: body.model,
+            compatibility: probe.level,
             message: `Modèle actif mis à jour : ${body.model}`,
           });
         } catch (err) {
-          const fallbackInstance = createLLMProvider({ provider: currentProv, model: currentModel });
-          agent.setLLMProvider(fallbackInstance);
-          config.llm.provider = currentProv;
-          config.llm.model = currentModel;
-
           sendJson(res, 200, {
             ok: false,
             activeProvider: currentProv,
             activeModel: currentModel,
-            error: `Le modèle sélectionné n'est pas disponible (${(err as Error).message}). ${currentModel} reste actif.`,
+            error: `Le modèle sélectionné n'est pas disponible (${redactSecrets((err as Error).message)}). ${currentModel} reste actif.`,
           });
         }
         return;
