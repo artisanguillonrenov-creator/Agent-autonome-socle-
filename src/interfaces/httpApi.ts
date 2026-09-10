@@ -1665,7 +1665,9 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         // Fonction rigoureusement lecture-seule : createLLMProvider est pur et rien ici
         // n'écrit dans config.llm, dans llmConfigStore, ni dans l'agent (voir point 9).
         try {
-          const testProviderInstance = createLLMProvider({ provider: body.provider, model: body.model });
+          // sanitizeReasoning: true — la prévisualisation testée est destinée à l'utilisateur
+          // du chat Jarvis, le raisonnement interne éventuel ne doit jamais y apparaître.
+          const testProviderInstance = createLLMProvider({ provider: body.provider, model: body.model, sanitizeReasoning: true });
           const probe = await testJarvisCompatibility(testProviderInstance, body.provider);
           sendJson(res, 200, {
             ok: true,
@@ -1706,7 +1708,10 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         // et l'ancien provider/modèle reste intégralement actif — pas de rollback à
         // effectuer, et jamais d'annonce d'un rollback qui n'aurait pas réellement eu lieu.
         try {
-          const newProviderInstance = createLLMProvider({ provider: body.provider, model: body.model });
+          // sanitizeReasoning: true — l'instance créée devient le provider actif du chat
+          // Jarvis (agent.setLLMProvider ci-dessous), le raisonnement interne éventuel ne
+          // doit jamais être exposé à l'utilisateur.
+          const newProviderInstance = createLLMProvider({ provider: body.provider, model: body.model, sanitizeReasoning: true });
           const probe = await testJarvisCompatibility(newProviderInstance, body.provider);
 
           saveLLMConfig(body.provider, body.model);
