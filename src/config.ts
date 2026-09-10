@@ -93,6 +93,22 @@ export const config = {
   },
   skills: {
     selectorMax: Math.min(Math.max(int(process.env.SKILL_SELECTOR_MAX, 8), 3), 12),
+    studioProduct: false,
+    studioCreative: false,
+    officeCommercial: false,
+    officeMarketing: false,
+  },
+  automations: {
+    emailTriggers: false,
+    crmTriggers: false,
+    externalEventTriggers: false,
+  },
+  email: {
+    /** Générique et provider-agnostic : tout endpoint acceptant POST {to,subject,text} avec un Bearer optionnel. */
+    webhookUrl: process.env.EMAIL_WEBHOOK_URL || "",
+    webhookToken: process.env.EMAIL_WEBHOOK_TOKEN || "",
+    /** Destinataire des alertes activity.emailAlerts — jamais inventé si absent. */
+    alertTo: process.env.ALERT_EMAIL_TO || "",
   },
   planning: { maxParallel: Math.min(int(process.env.PLAN_MAX_PARALLEL, 3), 8) },
   background: { maxConcurrent: Math.min(int(process.env.BACKGROUND_MAX_CONCURRENT, 3), 8) },
@@ -125,5 +141,6 @@ export const config = {
   },
   activity: {
     logLevel: "NORMAL" as "NORMAL" | "DETAILED" | "DEBUG",
+    emailAlerts: false,
   },
 };

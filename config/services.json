@@ -56,5 +56,88 @@
     "parallelSafeCapabilities": [
       "deep_research"
     ]
+  },
+  {
+    "id": "product_studio",
+    "name": "Product Studio V1",
+    "enabled": false,
+    "transport": "local",
+    "endpoint": "product_studio",
+    "auth": {
+      "type": "none"
+    },
+    "capabilities": [
+      "product_studio"
+    ],
+    "priority": 20,
+    "riskByCapability": {
+      "product_studio": "LOW"
+    },
+    "parallelSafeCapabilities": [
+      "product_studio"
+    ]
+  },
+  {
+    "id": "creative_studio",
+    "name": "Creative Studio V1",
+    "enabled": false,
+    "transport": "local",
+    "endpoint": "creative_studio",
+    "auth": {
+      "type": "none"
+    },
+    "capabilities": [
+      "creative_studio"
+    ],
+    "priority": 20,
+    "riskByCapability": {
+      "creative_studio": "LOW"
+    },
+    "parallelSafeCapabilities": [
+      "creative_studio"
+    ]
+  },
+  {
+    "id": "commercial_office",
+    "name": "Commercial Office V1",
+    "enabled": false,
+    "transport": "local",
+    "endpoint": "commercial_office",
+    "auth": {
+      "type": "none"
+    },
+    "capabilities": [
+      "commercial_office",
+      "commercial_office_send"
+    ],
+    "priority": 20,
+    "riskByCapability": {
+      "commercial_office": "MEDIUM",
+      "commercial_office_send": "MEDIUM"
+    },
+    "permissionByCapability": {
+      "commercial_office_send": "SEND"
+    },
+    "parallelSafeCapabilities": []
+  },
+  {
+    "id": "marketing_office",
+    "name": "Marketing Office V1",
+    "enabled": false,
+    "transport": "local",
+    "endpoint": "marketing_office",
+    "auth": {
+      "type": "none"
+    },
+    "capabilities": [
+      "marketing_office"
+    ],
+    "priority": 20,
+    "riskByCapability": {
+      "marketing_office": "LOW"
+    },
+    "parallelSafeCapabilities": [
+      "marketing_office"
+    ]
   }
 ]

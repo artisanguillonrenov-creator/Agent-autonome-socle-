@@ -304,7 +304,10 @@ export class Agent {
       `Date et heure actuelles : ${dateStr} (${isoDate}).`,
       selectedNames.has("web_search")?"ACCÈS INTERNET : l'outil 'web_search' sélectionné permet une recherche Web actuelle.":"",
       selectedNames.has("web_search")?"INFORMATIONS ACTUELLES : utilise 'web_search' lorsque la réponse exige des données récentes ou externes.":"",
-      `SKILLS MÉTIER SÉLECTIONNÉS : ${["software_development","deep_research","file_management"].filter(name=>selectedNames.has(name)).join(", ")||"aucun"}. dispatch_capability est interne et ne doit jamais être appelé.`,
+      `SKILLS MÉTIER SÉLECTIONNÉS : ${["software_development","deep_research","file_management","product_studio","creative_studio","commercial_office","marketing_office"].filter(name=>selectedNames.has(name)).join(", ")||"aucun"}. dispatch_capability est interne et ne doit jamais être appelé.`,
+      selectedNames.has("product_studio")||selectedNames.has("creative_studio")||selectedNames.has("commercial_office")||selectedNames.has("marketing_office")
+        ? "BUREAUX MÉTIER : product_studio (quoi construire/améliorer), creative_studio (identité visuelle, mémorise et respecte la continuité artistique par projet), commercial_office (CRM ; PREPARE_MESSAGE rédige un brouillon, SEND_MESSAGE envoie réellement et respecte la permission SEND), marketing_office (positionnement/acquisition, peut réutiliser les briefs des deux premiers). Chaque bureau rend le contrôle à Jarvis : consolide leurs résultats structurés avant de répondre."
+        : "",
       `PLANIFICATION : utilise 'execute_mission' uniquement pour un objectif réellement multi-étapes. Capabilities actuellement planifiables : ${this.serviceOrchestrator.registry.listServices().filter(s=>s.enabled).flatMap(s=>s.capabilities).filter((x,i,a)=>a.indexOf(x)===i).join(", ") || "aucune"}.`,
       "ENRICHISSEMENT VISUEL : Structure TOUTES tes réponses complexes (listes, classements, comparaisons, synthèses) sous forme de tableaux Markdown, listes à puces thématiques et liens cliquables.",
       "RÈGLE DE FORMAT : Utilise les outils natifs mis à ta disposition. Ne rédiges JAMAIS de structures techniques JSON ou balises XML dans le texte adressé à l'utilisateur.",

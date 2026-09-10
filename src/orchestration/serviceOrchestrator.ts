@@ -9,6 +9,11 @@ import { WorkspaceStore } from "../workspaces/workspaceStore.js";
 import { ArtifactStore } from "../workspaces/artifactStore.js";
 import { WorkspaceService } from "../services/workspaceService.js";
 import { ResearchService } from "../services/researchService.js";
+import { ProductStudioService } from "../services/productStudioService.js";
+import { CreativeStudioService } from "../services/creativeStudioService.js";
+import { CommercialOfficeService } from "../services/commercialOfficeService.js";
+import { MarketingOfficeService } from "../services/marketingOfficeService.js";
+import { NotificationStore } from "../autonomy/notificationStore.js";
 import { getDb } from "../persistence/db.js";
 import type { ArtifactInput, ArtifactKind } from "../workspaces/artifactStore.js";
 
@@ -68,6 +73,7 @@ export class ServiceOrchestrator {
   readonly store: OperationStore;
   readonly workspaces = new WorkspaceStore();
   readonly artifacts = new ArtifactStore(this.workspaces);
+  private readonly notifications = new NotificationStore();
 
   constructor(opts?: { registry?: ServiceRegistry; adapter?: ServiceAdapter; store?: OperationStore }) {
     this.registry = opts?.registry ?? new ServiceRegistry();
@@ -76,6 +82,12 @@ export class ServiceOrchestrator {
     if(typeof (this.adapter as any).registerLocal==="function"){
       this.adapter.registerLocal("workspace_service",new WorkspaceService(this.workspaces));
       this.adapter.registerLocal("research_service",new ResearchService());
+      // Chantier 9 : les quatre bureaux métier tournent in-process dans le même runtime
+      // que Jarvis (aucun transport HTTP), au même titre que workspace_service/research_service.
+      this.adapter.registerLocal("product_studio",new ProductStudioService());
+      this.adapter.registerLocal("creative_studio",new CreativeStudioService());
+      this.adapter.registerLocal("commercial_office",new CommercialOfficeService());
+      this.adapter.registerLocal("marketing_office",new MarketingOfficeService());
     }
   }
 
@@ -215,6 +227,12 @@ export class ServiceOrchestrator {
         return { taskId, traceId: failed.traceId, status: failed.status, selectedService: failed.selectedService,
           result: failed.result, error: failed.error };
       }
+      // activity.emailAlerts : une approbation en attente est un événement suffisamment
+      // important pour justifier une alerte (voir NotificationStore.ALERT_WORTHY).
+      this.notifications.create(
+        { type: "APPROVAL_REQUIRED", severity: "warning", title: "Approbation requise", message: `${reason} (capacité: ${decision.capability}, objectif: ${decision.objective})`, operationTaskId: taskId },
+        `approval-required:${taskId}`,
+      );
       return { taskId, traceId, status: "WAITING_PERMISSION", selectedService: service.id };
     }
 
