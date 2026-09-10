@@ -56,7 +56,7 @@ test("Code Search rejects a hit attributed to another repository",async()=>{cons
 test("Software Factory token precedence keeps explicit token between factory and general",()=>{const oldFactory=process.env.GITHUB_FACTORY_TOKEN,oldGeneral=process.env.GITHUB_TOKEN;delete process.env.GITHUB_FACTORY_TOKEN;process.env.GITHUB_TOKEN="general";assert.equal((new SoftwareFactoryService({githubToken:"explicit"}) as any).githubToken,"explicit");process.env.GITHUB_FACTORY_TOKEN="factory";assert.equal((new SoftwareFactoryService({githubToken:"explicit"}) as any).githubToken,"factory");if(oldFactory===undefined)delete process.env.GITHUB_FACTORY_TOKEN;else process.env.GITHUB_FACTORY_TOKEN=oldFactory;if(oldGeneral===undefined)delete process.env.GITHUB_TOKEN;else process.env.GITHUB_TOKEN=oldGeneral;});
 
 test("bounded real audit reports observed dangerous config, missing tests and manifest inconsistency", async () => {
-  const files = { "package.json": JSON.stringify({ main: "src/missing.ts" }), "src/index.ts": "start()", "src/config.ts": "safe=true", "src/services/payment.ts": "export const pay=()=>1", "src/orchestration/router.ts": "export const route=()=>1", "src/persistence/db.ts": "export const db={}", "src/skills/run.ts": "export const run=()=>1", "src/security/auth.ts": "export const auth = false", "src/unrelated.test.ts": "test('x',()=>{})", ".github/workflows/ci.yml": "on: push" };
+  const files = { "package.json": JSON.stringify({ main: "src/missing.ts" }), "src/index.ts": "start()", "src/config.ts": "safe=true", "src/services/payment.ts": "export const pay=()=>1", "src/orchestration/router.ts": "export const route=()=>1", "src/persistence/db.ts": "export const db={}", "src/skills/run.ts": "export const run=()=>1", "src/security/auth.ts": "export const disableAuth = true", "src/unrelated.test.ts": "test('x',()=>{})", ".github/workflows/ci.yml": "on: push" };
   const audit = await new GitHubRepositoryReader(fake(files)).audit("acme/repo");
   assert.equal(audit.inspectionSufficient, true);
   assert.ok(audit.inspectionCoverage.categoriesInspected.includes("ci"));
@@ -163,4 +163,120 @@ test("byte budget is truthful even when the remaining budget runs out before byt
   assert.equal(audit.limitsReached.bytes, true);
   assert.equal(audit.inspectionSufficient, false);
   assert.equal(audit.inspectedFiles.includes("src/services/file8.ts"), false);
+});
+
+test("secret redaction covers common secret-key families (snake_case and camelCase) without a hardcoded name list", async () => {
+  const cases: Array<[string, string]> = [
+    ["AWS_SECRET_ACCESS_KEY=AKIA-should-never-leak", "AKIA-should-never-leak"],
+    ["STRIPE_SECRET_KEY=sk_live_should_never_leak", "sk_live_should_never_leak"],
+    ["JWT_SECRET=super-secret-value", "super-secret-value"],
+    ["SESSION_SECRET=super-secret-value", "super-secret-value"],
+    ["DATABASE_PASSWORD=super-secret-value", "super-secret-value"],
+    ["PRIVATE_KEY=super-secret-value", "super-secret-value"],
+    ["githubToken=super-secret-value", "super-secret-value"],
+    ["clientSecret=super-secret-value", "super-secret-value"],
+    ['"clientSecret": "super-secret-value"', "super-secret-value"],
+  ];
+  for (const [line, secret] of cases) {
+    const reader = new GitHubRepositoryReader(fake({}, { diffPages: [[{ filename: "src/app.ts", patch: `+ ${line}` }]] }));
+    const commit = await reader.readCommit("acme/repo", "sha1");
+    assert.equal(commit.files[0].patch!.includes(secret), false, `expected redaction for: ${line}`);
+    assert.match(commit.files[0].patch!, /REDACTED/);
+  }
+});
+
+test("secret-key-family redaction still avoids false positives on bare declarations and code references", async () => {
+  const safeLines = [
+    "const TOKEN = process.env.TOKEN",
+    "type Config = { api_key?: string }",
+    "if (!API_TOKEN) throw new Error('missing');",
+    "const auth = false",
+  ];
+  for (const line of safeLines) {
+    const reader = new GitHubRepositoryReader(fake({}, { diffPages: [[{ filename: "src/app.ts", patch: `+ ${line}` }]] }));
+    const commit = await reader.readCommit("acme/repo", "sha1");
+    assert.equal(commit.files[0].patch, `+ ${line}`, `did not expect redaction for: ${line}`);
+  }
+});
+
+test("ENCRYPTED PRIVATE KEY and other algorithm-qualified headers are fully redacted", async () => {
+  for (const header of ["ENCRYPTED PRIVATE KEY", "DSA PRIVATE KEY", "PRIVATE KEY"]) {
+    const key = `-----BEGIN ${header}-----\nMIIBogIBAAKCAQEA_body_that_must_never_leak\n-----END ${header}-----`;
+    const reader = new GitHubRepositoryReader(fake({}, { diffPages: [[{ filename: "src/app.ts", patch: `+ ${key}` }]] }));
+    const commit = await reader.readCommit("acme/repo", "sha1");
+    assert.equal(commit.files[0].patch!.includes("MIIBogIBAAKCAQEA_body_that_must_never_leak"), false);
+    assert.match(commit.files[0].patch!, /REDACTED: PRIVATE KEY/);
+  }
+});
+
+test("audit no longer flags a bare `auth = false` as a HIGH dangerous-configuration finding, but keeps flagging unambiguous bypasses", async () => {
+  const bare = await new GitHubRepositoryReader(fake({ "src/security/auth.ts": "export const auth = false;\nexport const isAuth = false;" })).audit("acme/repo");
+  assert.equal(bare.findings.some(finding => finding.title === "Dangerous security configuration is enabled"), false);
+
+  for (const [name, line] of [
+    ["disableAuth", "const disableAuth = true;"],
+    ["skipAuth", "skip_auth = true"],
+    ["requireAuth", "const requireAuth = false;"],
+    ["authenticationEnabled", "authenticationEnabled = false"],
+    ["rejectUnauthorized", "https.request({ rejectUnauthorized: false })"],
+    ["NODE_TLS_REJECT_UNAUTHORIZED", "process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'"],
+  ] as const) {
+    const audit = await new GitHubRepositoryReader(fake({ "src/security/auth.ts": line })).audit("acme/repo");
+    assert.ok(audit.findings.some(finding => finding.title === "Dangerous security configuration is enabled"), `expected a HIGH finding for: ${name}`);
+  }
+});
+
+test("a real GitHub read error is never absorbed into a falsely complete search result, and never leaks its details", async () => {
+  const files = { "src/services/ok1.ts": "export const ok1='export';", "src/services/broken.ts": "export const ok2='export';", "src/services/ok3.ts": "export const ok3='export';" };
+  const base = fake(files);
+  const client = { rest: { ...base.rest, repos: { ...base.rest.repos, getContent: async (args: any) => {
+    if (args.path === "src/services/broken.ts") throw new Error("403 Forbidden: rate limit exceeded for token ghp_should_never_leak_anywhere");
+    return base.rest.repos.getContent(args);
+  } } } };
+  const reader = new GitHubRepositoryReader(client);
+  const search = await reader.searchContent("acme/repo", "export");
+  assert.equal(search.truncated, true);
+  assert.ok(search.readErrors.some((e: any) => e.path === "src/services/broken.ts" && e.error === "GITHUB_READ_ERROR"));
+  assert.equal(JSON.stringify(search).includes("ghp_should_never_leak_anywhere"), false);
+  assert.equal((await reader.context("acme/repo")).truncated, true);
+});
+
+test("a real GitHub read error during audit forces inspectionSufficient=false even when category coverage would otherwise be complete", async () => {
+  const files = {
+    "package.json": JSON.stringify({ main: "src/index.ts" }),
+    "src/index.ts": "start()",
+    "src/config.ts": "safe=true",
+    "src/services/payment.ts": "export const pay=()=>1",
+    "src/services/broken.ts": "export const broken=()=>1",
+    "src/orchestration/router.ts": "export const route=()=>1",
+    "src/persistence/db.ts": "export const db={}",
+    "src/skills/run.ts": "export const run=()=>1",
+    "src/security/auth.ts": "export const isEnabled=true",
+    "src/unrelated.test.ts": "test('x',()=>{})",
+    ".github/workflows/ci.yml": "on: push",
+  };
+  const base = fake(files);
+  const client = { rest: { ...base.rest, repos: { ...base.rest.repos, getContent: async (args: any) => {
+    if (args.path === "src/services/broken.ts") throw new Error("403 Forbidden: rate limit exceeded for token ghp_should_never_leak_anywhere");
+    return base.rest.repos.getContent(args);
+  } } } };
+  const audit = await new GitHubRepositoryReader(client).audit("acme/repo");
+  assert.equal(audit.inspectionSufficient, false);
+  assert.ok(audit.readErrors.some((e: any) => e.path === "src/services/broken.ts" && e.error === "GITHUB_READ_ERROR"));
+  assert.ok(audit.inaccessibleFiles.includes("src/services/broken.ts"));
+  assert.equal(JSON.stringify(audit).includes("ghp_should_never_leak_anywhere"), false);
+});
+
+test("policy skips (a hit byte/file budget) are never mistaken for a real read error", async () => {
+  const files: Record<string, string> = {};
+  for (let i = 0; i < 8; i++) files[`src/services/file${i}.ts`] = "TARGET_TERM_".padEnd(250000, "x");
+  files["src/services/file8.ts"] = "TARGET_TERM_".padEnd(200000, "y");
+  const search = await new GitHubRepositoryReader(fake(files)).searchContent("acme/repo", "TARGET_TERM_");
+  assert.equal(search.truncated, true, "the byte budget being hit must still be truthfully reported");
+  assert.deepEqual(search.readErrors, [], "a policy skip (budget) is not a real read error");
+
+  const audit = await new GitHubRepositoryReader(fake(files)).audit("acme/repo");
+  assert.equal(audit.limitsReached.bytes, true);
+  assert.deepEqual(audit.readErrors, []);
+  assert.deepEqual(audit.inaccessibleFiles, []);
 });
