@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { Octokit } from "@octokit/rest";
 import { CONTRACT_SCHEMA_VERSION, type TaskRequest, type ServiceEvent } from "../orchestration/contract.js";
 import { config } from "../config.js";
+import { assertSoftwareFactoryRepositoryAllowed, resolveGitHubToken } from "./githubPolicy.js";
 
 export interface SoftwareFactoryConfig {
   githubToken?: string;
@@ -136,7 +137,7 @@ export class SoftwareFactoryService {
   public readonly maxRetries: number;
 
   constructor(configObj: SoftwareFactoryConfig = {}) {
-    this.githubToken = process.env.GITHUB_FACTORY_TOKEN || configObj.githubToken || process.env.GITHUB_TOKEN || "";
+    this.githubToken = configObj.githubToken || resolveGitHubToken() || "";
     this.octokit = configObj.octokitClient || new Octokit({ auth: this.githubToken || undefined });
     this.openrouterApiKey = configObj.openrouterApiKey || process.env.OPENROUTER_API_KEY || "";
     this.openrouterModel = configObj.openrouterModel || process.env.SOFTWARE_FACTORY_MODEL || "google/gemini-2.0-flash-lite-preview-02-05:free";
@@ -519,6 +520,7 @@ export class SoftwareFactoryService {
     let params: ParsedSoftwareTask;
     try {
       params = extractTaskParams(taskReq);
+      assertSoftwareFactoryRepositoryAllowed(params.owner,params.repo);
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       const errorCode = errorMsg.split(":")[0] || "FILE_PATH_MISSING";

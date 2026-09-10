@@ -63,7 +63,7 @@ export class Agent {
       new ReplanningEngine(opts.llm, this.serviceOrchestrator.registry));
     this.workflows=new WorkflowRegistry();
     const historical=new Map(builtinSkills.map(s=>[s.name,s]));
-    const repositoryReader=opts.repositoryReader===undefined?new GitHubRepositoryReader({token:process.env.GITHUB_TOKEN}):opts.repositoryReader;
+    const repositoryReader=opts.repositoryReader===undefined?new GitHubRepositoryReader():opts.repositoryReader;
     for(const skill of createRuntimeSkills(this.serviceOrchestrator,this.planner,this.planRunner,this.workflows,repositoryReader)){
       const old=historical.get(skill.name);this.skills.register(old?{...skill,handler:skill.handler??old.handler,parameters:old.parameters??skill.parameters,argsHint:old.argsHint}:skill);historical.delete(skill.name);
     }

@@ -11,6 +11,7 @@ import {
 import { OperationStore } from "../orchestration/operationStore.js";
 import { ServiceAdapter } from "../orchestration/serviceAdapter.js";
 import { Agent } from "../core/agent.js";
+process.env.SOFTWARE_FACTORY_ALLOWED_REPOS="artisanguillonrenov-creator/Agent-autonome-socle-,octocat/Hello-World,testowner/testrepo,org/repo,owner/repo";
 import { MockProvider } from "../llm/providers/mock.js";
 import { LocalHashingEmbeddingProvider } from "../llm/embeddings.js";
 import type { TaskRequest, ServiceEvent } from "../orchestration/contract.js";
