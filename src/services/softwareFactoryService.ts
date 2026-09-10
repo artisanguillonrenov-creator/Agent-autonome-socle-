@@ -276,6 +276,7 @@ export class SoftwareFactoryService {
     summary: string;
   }> {
     const { owner, repo, filePath, instructions, targetBranch, targetPr } = params;
+    assertSoftwareFactoryRepositoryAllowed(owner,repo);
     const cleanTaskId = taskId.replace(/^task-/, "");
     let branchName = `jarvis/task-${cleanTaskId}`;
 
