@@ -94,6 +94,28 @@ inactivité (premier message plus lent le temps du réveil), et le disque n'est 
 garanti persistant d'un déploiement à l'autre — la mémoire/les tâches peuvent donc
 repartir de zéro après une mise à jour du code.
 
+### Mises à jour OTA de l'app Android
+
+`npm run build` exécute aussi `scripts/build-ota.mjs`, qui régénère
+`www/ota-manifest.json` et `www/ota-bundle.json` à partir du code Web courant. Comme
+Render lance cette même commande à chaque déploiement, `/api/ota/manifest` et
+`/api/ota/bundle` correspondent toujours au code effectivement en ligne — jamais à un
+artifact GitHub Actions à part (celui du workflow `ota.yml` n'est qu'une vérification CI).
+
+Chaque bundle est identifié par un `buildId` (commit déployé) et son SHA-256, jamais par
+un numéro de version saisi à la main : l'app Android compare cette identité, pas le
+numéro de version, pour savoir si une mise à jour existe et pour ne jamais réinstaller
+en boucle un bundle déjà actif. Seuls les changements Web (HTML/CSS/JS) passent par ce
+mécanisme ; un changement natif Android/Capacitor nécessite toujours un nouvel APK.
+
+Au démarrage, une mise à jour compatible est téléchargée, vérifiée (SHA-256) et
+installée automatiquement, sans action de l'utilisateur ; l'écran Système garde un
+bouton de vérification manuelle (avec confirmation visible) et un rollback vers la
+version précédente. Le bundle embarque aussi `index.html` : au lieu d'un simple
+`window.location.reload()` qui resservirait l'index.html figé dans l'APK, l'app réécrit
+le document courant avec l'`index.html` du bundle actif — les évolutions HTML prennent
+donc réellement effet, pas seulement CSS/JS.
+
 ## Tests
 
 ```bash

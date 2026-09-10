@@ -26,6 +26,23 @@ import { runDataAnalysis, type AnalysisRequest } from "../workbench/dataAnalysis
 import { runDatabaseQuery } from "../workbench/databaseEngine.js";
 import { generateReport } from "../workbench/reportEngine.js";
 import { WORKBENCH_LIMITS } from "../workbench/limits.js";
+import { createGithubReadOnlyClient, type GithubReadOnlyClient } from "../repository/githubReadOnlyClient.js";
+import {
+  resolveRepoTarget,
+  resolveRef as resolveRepositoryRef,
+  browseTree,
+  readRepositoryFile,
+  readRepositoryFiles,
+  searchRepositoryPath,
+  searchRepositoryCode,
+  readPullRequest,
+  readPullRequestFiles,
+  readPullRequestDiff,
+  readCommit,
+  readDiffBetweenVersions,
+  buildRepositoryContext,
+  auditRepository,
+} from "../repository/repositoryIntelligenceEngine.js";
 
 const schema=(properties:Record<string,unknown>,required:string[]=[]):SkillDefinition["parameters"]=>({type:"object",properties,required,additionalProperties:false});
 const object=(v:unknown):Record<string,unknown>=>v&&typeof v==="object"&&!Array.isArray(v)?v as Record<string,unknown>:{};
@@ -36,7 +53,7 @@ const asColumns=(value:unknown):number[]|undefined=>{if(value===undefined)return
 const asFilterConditions=(value:unknown):FilterCondition[]=>{if(value===undefined)return[];if(!Array.isArray(value))throw new Error("SPREADSHEET_FILTER_INVALID");return value.map(v=>{if(!v||typeof v!=="object"||Array.isArray(v))throw new Error("SPREADSHEET_FILTER_INVALID");const f=v as Record<string,unknown>;if(typeof f.column!=="string"||!f.column||typeof f.operator!=="string")throw new Error("SPREADSHEET_FILTER_INVALID");return{column:f.column,operator:f.operator as FilterCondition["operator"],value:f.value};});};
 const asSortSpecs=(value:unknown):SortSpec[]=>{if(value===undefined)return[];if(!Array.isArray(value))throw new Error("SPREADSHEET_SORT_INVALID");return value.map(v=>{if(!v||typeof v!=="object"||Array.isArray(v))throw new Error("SPREADSHEET_SORT_INVALID");const s=v as Record<string,unknown>;if(typeof s.column!=="string"||!s.column)throw new Error("SPREADSHEET_SORT_INVALID");return{column:s.column,direction:s.direction==="desc"?"desc":"asc"} as SortSpec;});};
 function validateRepeat(value:unknown):void {if(value!==undefined&&(!Number.isSafeInteger(value)||(value as number)<=0))throw new Error("INVALID_SCHEDULE");}
-export function createRuntimeSkills(orchestrator:ServiceOrchestrator,planner:Planner,planRunner:PlanRunner,workflows:WorkflowRegistry):SkillDefinition[]{
+export function createRuntimeSkills(orchestrator:ServiceOrchestrator,planner:Planner,planRunner:PlanRunner,workflows:WorkflowRegistry,repositoryClient:GithubReadOnlyClient=createGithubReadOnlyClient()):SkillDefinition[]{
   const tasks=new TaskStore();const base=new Map(canonicalSkillCatalog.map(s=>[s.id!,{...s}]));
   const define=(id:string,parameters:SkillDefinition["parameters"],handler:NonNullable<SkillDefinition["handler"]>)=>Object.assign(base.get(id)!,{parameters,handler});
   const dispatch=(capability:string,input:Record<string,unknown>,context:Record<string,unknown>,workspaceId?:string)=>orchestrator.dispatchCapability({action:"DISPATCH_CAPABILITY",capability,objective:String(input.objective??"").trim(),context,constraints:strings(input.constraints)},{executionMode:input.executionMode==="background"?"background":"foreground",workspaceId});
@@ -77,6 +94,25 @@ export function createRuntimeSkills(orchestrator:ServiceOrchestrator,planner:Pla
     if(i.action==="READ")return JSON.stringify(await readDocument(orchestrator.workspaces,workspaceId,path));
     if(i.action==="SEARCH"){if(!nonEmpty(i.query))throw new Error("DOCUMENT_SEARCH_QUERY_REQUIRED");return JSON.stringify(await searchDocument(orchestrator.workspaces,workspaceId,path,i.query,{caseSensitive:i.caseSensitive===true,maxResults:i.maxResults as number|undefined,contextChars:i.contextChars as number|undefined}));}
     throw new Error("DOCUMENT_ACTION_INVALID");
+  });
+
+  define("knowledge_search",schema({action:{type:"string",enum:["TREE","READ_FILE","READ_MULTIPLE_FILES","SEARCH_PATH","SEARCH_CODE","READ_PR","READ_PR_FILES","READ_PR_DIFF","READ_COMMIT","READ_DIFF","BUILD_CONTEXT","AUDIT"]},owner:{type:"string"},repo:{type:"string"},repoUrl:{type:"string"},ref:{type:"string"},path:{type:"string"},paths:{type:"array",items:{type:"string"}},query:{type:"string"},caseSensitive:{type:"boolean"},maxResults:{type:"integer"},extensions:{type:"array",items:{type:"string"}},prNumber:{type:"integer"},sha:{type:"string"},base:{type:"string"},head:{type:"string"}},["action"]),async i=>{
+    const target=resolveRepoTarget(i);
+    switch(i.action){
+      case"TREE":{const ref=await resolveRepositoryRef(repositoryClient,target,i.ref);return JSON.stringify(await browseTree(repositoryClient,target,ref));}
+      case"READ_FILE":{const ref=await resolveRepositoryRef(repositoryClient,target,i.ref);return JSON.stringify(await readRepositoryFile(repositoryClient,target,ref,String(i.path??"")));}
+      case"READ_MULTIPLE_FILES":{const ref=await resolveRepositoryRef(repositoryClient,target,i.ref);return JSON.stringify(await readRepositoryFiles(repositoryClient,target,ref,strings(i.paths)));}
+      case"SEARCH_PATH":{const ref=await resolveRepositoryRef(repositoryClient,target,i.ref);return JSON.stringify(await searchRepositoryPath(repositoryClient,target,ref,String(i.query??""),{caseSensitive:i.caseSensitive===true,maxResults:i.maxResults as number|undefined}));}
+      case"SEARCH_CODE":{const ref=await resolveRepositoryRef(repositoryClient,target,i.ref);return JSON.stringify(await searchRepositoryCode(repositoryClient,target,ref,String(i.query??""),{caseSensitive:i.caseSensitive===true,maxResults:i.maxResults as number|undefined,extensions:strings(i.extensions)}));}
+      case"READ_PR":return JSON.stringify(await readPullRequest(repositoryClient,target,i.prNumber));
+      case"READ_PR_FILES":return JSON.stringify(await readPullRequestFiles(repositoryClient,target,i.prNumber));
+      case"READ_PR_DIFF":return JSON.stringify(await readPullRequestDiff(repositoryClient,target,i.prNumber));
+      case"READ_COMMIT":return JSON.stringify(await readCommit(repositoryClient,target,String(i.sha??"")));
+      case"READ_DIFF":return JSON.stringify(await readDiffBetweenVersions(repositoryClient,target,String(i.base??""),String(i.head??"")));
+      case"BUILD_CONTEXT":{const ref=await resolveRepositoryRef(repositoryClient,target,i.ref);return JSON.stringify(await buildRepositoryContext(repositoryClient,target,ref,String(i.query??"")));}
+      case"AUDIT":return JSON.stringify(await auditRepository(repositoryClient,target,{ref:i.ref as string|undefined,prNumber:i.prNumber as number|undefined}));
+      default:throw new Error("REPOSITORY_ACTION_INVALID");
+    }
   });
 
   define("spreadsheet_work",schema({action:{type:"string",enum:["LIST_SHEETS","INSPECT","READ_RANGE","FILTER","SORT","AGGREGATE","EXPORT_CSV","EXPORT_XLSX"]},workspaceId:{type:"string"},path:{type:"string"},sheet:{type:"string"},startRow:{type:"integer"},endRow:{type:"integer"},columns:{type:"array",items:{type:"integer"}},filters:{type:"array",items:{type:"object"}},sortBy:{type:"array",items:{type:"object"}},column:{type:"string"},operation:{type:"string",enum:["COUNT","SUM","MEAN","MIN","MAX"]},targetPath:{type:"string"}},["action","workspaceId","path"]),async i=>{
