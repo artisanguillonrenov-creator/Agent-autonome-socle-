@@ -14,7 +14,9 @@ async function main(): Promise<void> {
   const selection = resolveLLMSelection();
   config.llm.provider = selection.provider;
   config.llm.model = selection.model;
-  const llm = createLLMProvider(selection);
+  // sanitizeReasoning: true — flux chat Jarvis destiné à un utilisateur humain, le
+  // raisonnement interne (<think>) d'un modèle "reasoning" ne doit jamais y être visible.
+  const llm = createLLMProvider({ ...selection, sanitizeReasoning: true });
   const embeddings = createEmbeddingProvider();
   const agent = new Agent({ llm, embeddings });
 

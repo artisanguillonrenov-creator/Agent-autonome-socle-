@@ -11,6 +11,12 @@ import { loadLLMConfig } from "../../persistence/llmConfigStore.js";
 export interface LLMProviderOptions {
   provider?: LLMProviderName;
   model?: string;
+  /**
+   * Infermatic uniquement : masque le raisonnement interne (<think>) dans `content`.
+   * Par défaut false (sortie brute) — n'activer qu'aux points d'entrée du chat Jarvis
+   * destinés à un utilisateur humain (jamais pour la Software Factory, voir infermatic.ts).
+   */
+  sanitizeReasoning?: boolean;
 }
 
 /** Résout le provider/modèle à utiliser (options explicites > sélection persistée > config par défaut), sans aucun effet de bord. */
@@ -54,6 +60,7 @@ export function createLLMProvider(opts?: LLMProviderOptions): LLMProvider {
         apiKey: config.llm.infermaticApiKey,
         baseUrl: config.llm.infermaticBaseUrl,
         model: modelName,
+        sanitizeReasoning: opts?.sanitizeReasoning ?? false,
       });
     case "mock":
       return new MockProvider();

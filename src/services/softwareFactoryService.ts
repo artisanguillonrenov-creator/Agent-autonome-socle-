@@ -166,8 +166,13 @@ export class SoftwareFactoryService {
     const softwareFactoryProvider = configObj.softwareFactoryProvider || config.softwareFactory.provider;
     const softwareFactoryModel = configObj.softwareFactoryModel || config.softwareFactory.model;
     this.softwareFactoryMaxTokens = configObj.softwareFactoryMaxTokens ?? config.softwareFactory.maxTokens;
+    // sanitizeReasoning: false (explicite) — la Software Factory génère du code source, qui
+    // peut légitimement contenir un `<think>` littéral non fermé (ex. dans une chaîne).
+    // Elle doit toujours recevoir la sortie brute du provider et nettoie elle-même via
+    // cleanLLMCodeOutput() ci-dessus, jamais via le sanitizer du chat Jarvis.
     this.llmProvider =
-      configObj.llmProvider || createLLMProvider({ provider: softwareFactoryProvider, model: softwareFactoryModel });
+      configObj.llmProvider ||
+      createLLMProvider({ provider: softwareFactoryProvider, model: softwareFactoryModel, sanitizeReasoning: false });
 
     this.maxRetries = configObj.maxRetries ?? 3;
   }

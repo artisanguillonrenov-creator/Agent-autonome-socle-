@@ -1104,6 +1104,35 @@ test("Software Factory appelle Infermatic (api.totalgpt.ai) et jamais OpenRouter
   }
 });
 
+test("TEST BLOQUANT — le sanitizer <think> du chat Jarvis ne doit jamais tronquer du code Infermatic contenant un <think> littéral non fermé", async () => {
+  // Suite à l'audit de la PR : InfermaticProvider est partagé par le chat Jarvis et par
+  // la Software Factory. Du code source légitime peut contenir la chaîne "<think>" sans
+  // jamais la refermer (ex. une constante nommant une balise) — cela ne doit JAMAIS être
+  // traité comme un raisonnement non terminé et tronquer le reste du fichier généré.
+  const originalFetch = globalThis.fetch;
+  const previousInfermaticKey = config.llm.infermaticApiKey;
+  config.llm.infermaticApiKey = "test-infermatic-key";
+
+  const legitimateCode = 'const OPEN_TAG = "<think>";\nconst x = 1;';
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify({ choices: [{ message: { content: legitimateCode } }] }), { status: 200 })) as typeof fetch;
+
+  try {
+    const service = new SoftwareFactoryService({
+      softwareFactoryProvider: "infermatic",
+      softwareFactoryModel: "Qwen-Qwen3.6-35B-A3B",
+    });
+
+    const result = await service.generateCodeUpdate("old", "src/tags.ts", "ajouter OPEN_TAG");
+
+    assert.equal(result, legitimateCode);
+    assert.ok(result.includes("const x = 1;"), "le code après le <think> littéral ne doit pas être tronqué");
+  } finally {
+    globalThis.fetch = originalFetch;
+    config.llm.infermaticApiKey = previousInfermaticKey;
+  }
+});
+
 test("Le provider/modèle actif de Jarvis (llm_active_model persisté) n'est jamais modifié par la Software Factory", async () => {
   const { closeDb, getDb } = await import("../persistence/db.js");
   config.db.path = ":memory:";

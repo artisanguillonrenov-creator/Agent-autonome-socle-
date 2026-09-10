@@ -316,9 +316,15 @@ test("sanitizeInfermaticVisibleContent renvoie null quand rawContent est null ou
   assert.equal(sanitizeInfermaticVisibleContent("<think>tout est raisonnement</think>"), null);
 });
 
-// --- complete() : le raisonnement interne ne doit jamais atteindre l'utilisateur ---
+// --- complete() : sanitizeReasoning est opt-in, jamais appliqué par défaut ---
+//
+// InfermaticProvider est partagé par le chat Jarvis ET par la Software Factory
+// (génération de code). Le nettoyage du raisonnement ne doit donc JAMAIS s'appliquer
+// automatiquement à tous les appels : il ne doit s'activer que pour les points d'entrée
+// du chat Jarvis qui passent explicitement `sanitizeReasoning: true` (voir index.ts /
+// httpApi.ts / softwareFactoryService.ts).
 
-test("InfermaticProvider masque le raisonnement <think> dans content quand un tool_call est présent (tool_calls conservés)", async () => {
+test("InfermaticProvider (sanitizeReasoning: true) masque le raisonnement <think> dans content quand un tool_call est présent (tool_calls conservés)", async () => {
   const originalFetch = globalThis.fetch;
   try {
     const toolCalls = [{ id: "call_1", type: "function", function: { name: "web_search", arguments: '{"query":"test"}' } }];
@@ -337,7 +343,12 @@ test("InfermaticProvider masque le raisonnement <think> dans content quand un to
         { status: 200, headers: { "content-type": "application/json" } },
       );
 
-    const provider = new InfermaticProvider({ apiKey: "k", baseUrl: "https://api.totalgpt.ai/v1", model: "m" });
+    const provider = new InfermaticProvider({
+      apiKey: "k",
+      baseUrl: "https://api.totalgpt.ai/v1",
+      model: "m",
+      sanitizeReasoning: true,
+    });
     const result = await provider.complete([{ role: "user", content: "cherche" }]);
 
     assert.equal(result.content, null);
@@ -347,7 +358,7 @@ test("InfermaticProvider masque le raisonnement <think> dans content quand un to
   }
 });
 
-test("InfermaticProvider nettoie content en <think>...</think>\\nBonjour tout en conservant les tool_calls à l'identique", async () => {
+test("InfermaticProvider (sanitizeReasoning: true) nettoie content en <think>...</think>\\nBonjour tout en conservant les tool_calls à l'identique", async () => {
   const originalFetch = globalThis.fetch;
   try {
     const toolCalls = [{ id: "call_2", type: "function", function: { name: "web_search", arguments: '{"query":"autre"}' } }];
@@ -366,11 +377,63 @@ test("InfermaticProvider nettoie content en <think>...</think>\\nBonjour tout en
         { status: 200, headers: { "content-type": "application/json" } },
       );
 
-    const provider = new InfermaticProvider({ apiKey: "k", baseUrl: "https://api.totalgpt.ai/v1", model: "m" });
+    const provider = new InfermaticProvider({
+      apiKey: "k",
+      baseUrl: "https://api.totalgpt.ai/v1",
+      model: "m",
+      sanitizeReasoning: true,
+    });
     const result = await provider.complete([{ role: "user", content: "cherche" }]);
 
     assert.equal(result.content, "Bonjour");
     assert.deepEqual(result.toolCalls, toolCalls);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("InfermaticProvider sans sanitizeReasoning (défaut) renvoie content brut, <think> compris — comportement Software Factory", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ choices: [{ message: { content: "<think>reasoning</think>\nBonjour" } }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+
+    const provider = new InfermaticProvider({ apiKey: "k", baseUrl: "https://api.totalgpt.ai/v1", model: "m" });
+    const result = await provider.complete([{ role: "user", content: "génère du code" }]);
+
+    assert.equal(result.content, "<think>reasoning</think>\nBonjour");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("InfermaticProvider avec sanitizeReasoning: false explicite ne tronque jamais du code légitime contenant un <think> littéral non fermé", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    // Cas rapporté à l'audit de la PR : un modèle Infermatic (via la Software Factory)
+    // peut légitimement générer du code source contenant la chaîne "<think>" sans jamais
+    // la refermer (ex. une constante nommant une balise). Sans opt-in explicite, cela ne
+    // doit JAMAIS être traité comme un raisonnement non terminé ni tronquer le fichier.
+    const legitimateCode = 'const OPEN_TAG = "<think>";\nconst x = 1;';
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ choices: [{ message: { content: legitimateCode } }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+
+    const provider = new InfermaticProvider({
+      apiKey: "k",
+      baseUrl: "https://api.totalgpt.ai/v1",
+      model: "m",
+      sanitizeReasoning: false,
+    });
+    const result = await provider.complete([{ role: "user", content: "génère du code" }]);
+
+    assert.equal(result.content, legitimateCode);
+    assert.ok(result.content?.includes("const x = 1;"), "le code après le <think> littéral ne doit pas être tronqué");
   } finally {
     globalThis.fetch = originalFetch;
   }

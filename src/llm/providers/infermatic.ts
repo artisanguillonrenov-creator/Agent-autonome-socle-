@@ -5,6 +5,18 @@ interface InfermaticOptions {
   apiKey: string;
   baseUrl: string;
   model: string;
+  /**
+   * Active le masquage du raisonnement interne (<think>...</think>) dans `content`.
+   * Par défaut désactivé (contenu brut, comportement historique) : InfermaticProvider est
+   * partagé par le chat Jarvis ET par la Software Factory (génération de code), or du code
+   * source légitime peut contenir un `<think>` littéral (ex. un nom de balise dans une
+   * chaîne) sans jamais être fermé — le sanitizer le traiterait alors à tort comme un
+   * raisonnement non terminé et tronquerait le reste du fichier généré.
+   * Seul le flux conversationnel Jarvis (destiné à un utilisateur humain) doit donc passer
+   * explicitement `sanitizeReasoning: true`. La Software Factory reçoit toujours la sortie
+   * brute du provider et continue d'utiliser son propre cleanLLMCodeOutput().
+   */
+  sanitizeReasoning?: boolean;
 }
 
 const THINK_BLOCK_RE = /<think>[\s\S]*?<\/think>/gi;
@@ -139,7 +151,8 @@ export class InfermaticProvider implements LLMProvider {
     // Certains fournisseurs OpenAI-compatibles exposent un raisonnement séparé via
     // `reasoning` / `reasoning_content` : on ne les lit jamais ici, ils ne doivent ni
     // remplacer `content` ni être renvoyés à l'utilisateur.
-    const content = sanitizeInfermaticVisibleContent(message?.content ?? null);
+    const rawContent = message?.content ?? null;
+    const content = this.opts.sanitizeReasoning ? sanitizeInfermaticVisibleContent(rawContent) : rawContent;
     const toolCalls = Array.isArray(message?.tool_calls) && message.tool_calls.length > 0 ? message.tool_calls : undefined;
 
     return { content, toolCalls };
