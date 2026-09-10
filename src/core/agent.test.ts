@@ -12,6 +12,7 @@ const { LocalHashingEmbeddingProvider } = await import("../llm/embeddings.js");
 const { MockProvider } = await import("../llm/providers/mock.js");
 const { builtinSkills } = await import("../skills/builtin/index.js");
 const { selectRecentMessages } = await import("../memory/selectRecentMessages.js");
+const { validateArraySchemaItems } = await import("../llm/jsonSchema.js");
 
 const ordinaryMessage = (content: string): ChatMessage => ({ role: "user", content });
 const toolBlock = (...ids: string[]): ChatMessage[] => [
@@ -116,6 +117,17 @@ test("l'agent répond à une entrée simple (fournisseur mock)", async () => {
   const result = await agent.step("Bonjour");
   assert.match(result.response, /mock/);
   assert.equal(result.iterations, 1);
+});
+
+test("Agent.step prépare uniquement des ToolDefinitions valides récursivement", async () => {
+  let captured: CompletionOptions["tools"];
+  const provider: LLMProvider = { name: "schema_capture", async complete(_messages, options) { captured = options?.tools; return { content: "OK" }; } };
+  const agent = new Agent({ llm: provider, embeddings: new LocalHashingEmbeddingProvider() });
+  (agent.skillSelector as any).select = async () => agent.skills.selectable();
+  await agent.step("inspecte les outils");
+  assert.ok(captured?.length);
+  for (const tool of captured ?? []) validateArraySchemaItems(tool.function.parameters, `tool.${tool.function.name}`);
+  assert.ok(captured?.some(tool => tool.function.name === "knowledge_search"));
 });
 
 test("le prompt système contient la date actuelle et les instructions d'accès Internet", async () => {

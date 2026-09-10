@@ -7,7 +7,7 @@ import { TaskStore } from "../tasks/taskStore.js";
 import { WorkflowRegistry } from "../workflows/workflowRegistry.js";
 import { canonicalSkillCatalog } from "./catalog.js";
 import { config } from "../config.js";
-import { GitHubRepositoryReader, resolveSelfRepository } from "../github/repositoryReader.js";
+import { GitHubRepositoryReader, parseGitHubRepository, resolveSelfRepository, type SearchMatch } from "../github/repositoryReader.js";
 
 const schema=(properties:Record<string,unknown>,required:string[]=[]):SkillDefinition["parameters"]=>({type:"object",properties,required,additionalProperties:false});
 const object=(v:unknown):Record<string,unknown>=>v&&typeof v==="object"&&!Array.isArray(v)?v as Record<string,unknown>:{};
@@ -15,21 +15,27 @@ const strings=(v:unknown):string[]=>Array.isArray(v)&&v.every(x=>typeof x==="str
 const nonEmpty=(value:unknown):value is string=>typeof value==="string"&&value.trim().length>0;
 const validTime=(value:unknown):value is number=>Number.isSafeInteger(value)&&Number.isFinite(value)&&(value as number)>=0;
 function validateRepeat(value:unknown):void {if(value!==undefined&&(!Number.isSafeInteger(value)||(value as number)<=0))throw new Error("INVALID_SCHEDULE");}
-export function createRuntimeSkills(orchestrator:ServiceOrchestrator,planner:Planner,planRunner:PlanRunner,workflows:WorkflowRegistry):SkillDefinition[]{
+export class SoftwareDevelopmentTargetError extends Error {
+  constructor(code:string,public readonly resolvedTargets:SearchMatch[]){super(code);this.name="SoftwareDevelopmentTargetError";}
+}
+export function createRuntimeSkills(orchestrator:ServiceOrchestrator,planner:Planner,planRunner:PlanRunner,workflows:WorkflowRegistry,repositoryReaderFactory:()=>GitHubRepositoryReader=()=>new GitHubRepositoryReader()):SkillDefinition[]{
   const tasks=new TaskStore();const base=new Map(canonicalSkillCatalog.map(s=>[s.id!,{...s}]));
   const define=(id:string,parameters:SkillDefinition["parameters"],handler:NonNullable<SkillDefinition["handler"]>)=>Object.assign(base.get(id)!,{parameters,handler});
   const dispatch=(capability:string,input:Record<string,unknown>,context:Record<string,unknown>,workspaceId?:string)=>orchestrator.dispatchCapability({action:"DISPATCH_CAPABILITY",capability,objective:String(input.objective??"").trim(),context,constraints:strings(input.constraints)},{executionMode:input.executionMode==="background"?"background":"foreground",workspaceId});
 
   define("knowledge_search",schema({mode:{type:"string",enum:["SEARCH","AUDIT"]},source:{type:"string",enum:["REPOSITORY","AUTO"]},repository:{type:"string"},query:{type:"string"},ref:{type:"string"}},["mode","source"]),async i=>{
     const query=String(i.query??"");const self=/\b(ton|ta|tes|your)\b.*\b(d[eé]p[oô]t|repository|param[eè]tres|settings)\b|\baudite?\s+ton\s+d[eé]p[oô]t/i.test(query);
-    const repo=resolveSelfRepository(typeof i.repository==="string"?i.repository:undefined,self||i.source==="AUTO"),name=`${repo.owner}/${repo.repo}`,reader=new GitHubRepositoryReader();
+    const repo=resolveSelfRepository(typeof i.repository==="string"?i.repository:undefined,self||i.source==="AUTO"),name=`${repo.owner}/${repo.repo}`,reader=repositoryReaderFactory();
     return JSON.stringify(i.mode==="AUDIT"?await reader.audit(name,typeof i.ref==="string"?i.ref:undefined):await reader.searchContent(name,query,typeof i.ref==="string"?i.ref:undefined));
   });
   define("software_development",schema({objective:{type:"string"},repository:{type:"string"},filePath:{type:"string"},instructions:{type:"string"},exactContent:{type:"string"},targetBranch:{type:"string"},targetPr:{type:"integer"},constraints:{type:"array",items:{type:"string"}},executionMode:{type:"string",enum:["foreground","background"]}},["objective"]),async i=>{
     let filePath=typeof i.filePath==="string"?i.filePath.trim():"";
-    if(!filePath){const self=/\b(ton|ta|tes|your)\b.*\b(d[eé]p[oô]t|repository|param[eè]tres|settings)\b/i.test(String(i.objective));const repo=resolveSelfRepository(typeof i.repository==="string"?i.repository:undefined,self);const found=await new GitHubRepositoryReader().searchContent(`${repo.owner}/${repo.repo}`,String(i.objective));if(found.results.length!==1)throw new Error(found.results.length>1?"MULTI_FILE_CHANGE_REQUIRES_FACTORY_EXTENSION":"SOFTWARE_DEVELOPMENT_TARGET_NOT_FOUND");filePath=found.results[0].path;}
+    const self=/\b(ton|ta|tes|your)\b.*\b(d[eé]p[oô]t|repository|param[eè]tres|settings|page)\b|\b(am[eé]liore|audite?)\s+(?:ton|ta|tes)\b/i.test(String(i.objective));
+    let resolvedRepository:string|undefined;
+    if(typeof i.repository==="string"&&i.repository.trim()){const parsed=parseGitHubRepository(i.repository);resolvedRepository=`${parsed.owner}/${parsed.repo}`;}else if(self){const parsed=resolveSelfRepository(undefined,true);resolvedRepository=`${parsed.owner}/${parsed.repo}`;}
+    if(!filePath){if(!resolvedRepository)throw new SoftwareDevelopmentTargetError("SOFTWARE_DEVELOPMENT_TARGET_NOT_FOUND",[]);const discovery=await repositoryReaderFactory().searchContent(resolvedRepository,String(i.objective));const high=discovery.recommendedFiles.filter(target=>target.confidence==="HIGH");if(high.length>1)throw new SoftwareDevelopmentTargetError("MULTI_FILE_CHANGE_REQUIRES_FACTORY_EXTENSION",high);if(high.length===0)throw new SoftwareDevelopmentTargetError("SOFTWARE_DEVELOPMENT_TARGET_NOT_FOUND",discovery.recommendedFiles);filePath=high[0].path;}
     const directives=[typeof i.targetBranch==="string"?`TARGET_BRANCH=${i.targetBranch}`:null,Number.isInteger(i.targetPr)?`TARGET_PR=${i.targetPr}`:null,typeof i.instructions==="string"?i.instructions:null].filter(Boolean).join("\n");
-    return JSON.stringify(await dispatch("software_development",i,{repository:i.repository,filePath,instructions:directives,exactContent:i.exactContent,neverAutoMerge:true}));
+    return JSON.stringify(await dispatch("software_development",i,{repository:resolvedRepository,filePath,resolvedTargets:[{path:filePath,confidence:"HIGH"}],instructions:directives,exactContent:i.exactContent,neverAutoMerge:true}));
   });
   define("deep_research",schema({objective:{type:"string"},queries:{type:"array",items:{type:"string"}},maxResultsPerQuery:{type:"integer"},constraints:{type:"array",items:{type:"string"}},workspaceId:{type:"string"}},["objective"]),async i=>{
     const workspaceId=typeof i.workspaceId==="string"?i.workspaceId:orchestrator.workspaces.create({name:"Recherche",ownerType:"ADHOC",ownerId:`research-${randomUUID()}`}).id;

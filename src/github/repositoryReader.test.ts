@@ -6,12 +6,82 @@ import { assertSoftwareFactoryRepositoryAllowed, SoftwareFactoryService } from "
 import { validateArraySchemaItems } from "../llm/jsonSchema.js";
 import { CANONICAL_SKILL_IDS } from "../skills/catalog.js";
 
-function fake(files:Record<string,string>,extra:Record<string,any>={}){const tree=Object.entries(files).map(([path,content])=>({path,type:"blob",size:Buffer.byteLength(content),sha:path}));return{rest:{repos:{get:async()=>({data:{default_branch:"main",id:1}}),getContent:async({path}:any)=>({data:{content:Buffer.from(files[path]).toString("base64"),sha:path}}),getCommit:async()=>({data:{sha:"abc",commit:{message:"TOKEN=visible"},files:extra.diffFiles??[]}}),compareCommits:async()=>({data:{files:extra.diffFiles??[],total_commits:1}})},git:{getTree:async()=>({data:{tree,truncated:false}})},search:{code:async()=>{throw new Error("unavailable")}},pulls:{get:async()=>({data:{number:1,title:"PR",state:"open",changed_files:(extra.diffFiles??[]).length}}),listFiles:async()=>({data:extra.diffFiles??[]})}}};}
-test("repository parsing and self repository are strict",()=>{assert.deepEqual(parseGitHubRepository("https://github.com/acme/demo.git"),{owner:"acme",repo:"demo"});assert.throws(()=>parseGitHubRepository("github.com/acme/demo/extra"));const old=process.env.JARVIS_REPOSITORY;process.env.JARVIS_REPOSITORY="self/project";assert.deepEqual(resolveSelfRepository(undefined,true),{owner:"self",repo:"project"});if(old===undefined)delete process.env.JARVIS_REPOSITORY;else process.env.JARVIS_REPOSITORY=old;assert.throws(()=>resolveSelfRepository(undefined,false),/REPOSITORY_REQUIRED/);});
-test("shared auth prefers factory token",()=>{assert.equal(getGitHubToken({GITHUB_FACTORY_TOKEN:"factory",GITHUB_TOKEN:"general"} as any),"factory");assert.equal(getGitHubToken({GITHUB_TOKEN:"general"} as any),"general");});
-test("reader rejects secrets and binaries",async()=>{const r=new GitHubRepositoryReader(fake({".env":"TOKEN=secret","image.png":"x"}));await assert.rejects(r.readFile("acme/repo",".env"),/SECRET_FILE_BLOCKED/);await assert.rejects(r.readFile("acme/repo","image.png"),/BINARY_OR_EXCLUDED_FILE/);});
-test("search is accent/synonym aware and independent from filename",async()=>{const r=new GitHubRepositoryReader(fake({"src/odd.ts":"export const SERVICE_CONNECTION_IN_USE = true","src/settings.ts":"export function configure(){}","README.md":"Paramètres du dépôt et fichier"}));assert.ok((await r.searchPaths("acme/repo","SETTINGS")).results.some((x:any)=>x.path==="src/settings.ts"));assert.ok((await r.searchContent("acme/repo","service_connection_in_use")).results.some((x:any)=>x.path==="src/odd.ts"));const x=await new GitHubRepositoryReader(fake({"README.md":"repository file function settings"})).searchContent("acme/repo","dépôt fichier fonction paramètres");assert.equal(x.results[0].path,"README.md");});
-test("bounds and audit are read-only",async()=>{const huge="x".repeat(REPOSITORY_LIMITS.maxFileBytes+1),r=new GitHubRepositoryReader(fake({"src/huge.ts":huge}));await assert.rejects(r.readFile("acme/repo","src/huge.ts"),/REPOSITORY_READ_LIMIT_EXCEEDED/);const audit=await new GitHubRepositoryReader(fake({"README.md":"architecture","package.json":"{}"})).audit("acme/repo");assert.equal(audit.inspectionSufficient,true);assert.deepEqual(audit.findings,[]);});
-test("all diff readers redact secrets and disclose global truncation",async()=>{const many=Array.from({length:101},(_,i)=>({filename:`src/${i}.ts`,patch:i===0?"+ GITHUB_TOKEN=supersecret":"+ let TOKEN: string;"}));const r=new GitHubRepositoryReader(fake({}, {diffFiles:many}));for(const result of [await r.readPullRequest("acme/repo",1),await r.readCommit("acme/repo","abc"),await r.readDiff("acme/repo","a","b")]){assert.equal(result.truncated,true);assert.equal(result.totalFiles,101);assert.equal(result.returnedFiles,100);assert.match(result.files[0].patch!,/REDACTED/);assert.equal(result.files[1].redacted,false);}});
-test("recursive schemas and public catalog",()=>{validateArraySchemaItems({type:"object",properties:{nested:{type:"array",items:{type:"object",properties:{more:{type:"array",items:{type:"string"}}}}}}});assert.throws(()=>validateArraySchemaItems({type:"object",properties:{bad:{type:"array"}}}),/ARRAY_SCHEMA_ITEMS_REQUIRED/);assert.equal(CANONICAL_SKILL_IDS.length,40);});
-test("factory allowlist guards entry and executeWorkflow before effects",async()=>{assert.throws(()=>assertSoftwareFactoryRepositoryAllowed("evil","repo",{SOFTWARE_FACTORY_ALLOWED_REPOS:"safe/repo"} as any));const old=process.env.SOFTWARE_FACTORY_ALLOWED_REPOS;process.env.SOFTWARE_FACTORY_ALLOWED_REPOS="safe/repo";let calls=0;const service=new SoftwareFactoryService({githubToken:"x",octokitClient:{rest:{repos:{get:async()=>{calls++;}}}} as any});await assert.rejects(service.executeWorkflow({owner:"evil",repo:"repo",filePath:"x.ts",instructions:"x"},"task"),/SOFTWARE_FACTORY_REPOSITORY_NOT_ALLOWED/);assert.equal(calls,0);const events=await service.handleTaskRequest({schema_version:"1.0",task_id:"t",trace_id:"tr",idempotency_key:"i",action:"DISPATCH_CAPABILITY",capability:"software_development",objective:"x",context:{repository:"evil/repo",filePath:"x.ts"},constraints:[]} as any);assert.equal(events.at(-1)?.payload.error_code,"SOFTWARE_FACTORY_REPOSITORY_NOT_ALLOWED");if(old===undefined)delete process.env.SOFTWARE_FACTORY_ALLOWED_REPOS;else process.env.SOFTWARE_FACTORY_ALLOWED_REPOS=old;});
+type FakeOptions = { refs?: Record<string, Record<string, string>>; codeHits?: string[]; diffPages?: any[][]; totalFiles?: number };
+function fake(defaultFiles: Record<string, string>, options: FakeOptions = {}) {
+  const refs = { main: defaultFiles, ...(options.refs ?? {}) };
+  const filesAt = (ref = "main") => refs[ref] ?? {};
+  const tree = (ref = "main") => Object.entries(filesAt(ref)).map(([path, content]) => ({ path, type: "blob", size: Buffer.byteLength(content), sha: path }));
+  const diffResponse = (page = 1) => ({ data: { sha: "abc", commit: { message: "safe" }, files: options.diffPages?.[page - 1] ?? [], ...(options.totalFiles === undefined ? {} : { total_files: options.totalFiles }), total_commits: 1 } });
+  return { rest: { repos: { get: async () => ({ data: { default_branch: "main", id: 1 } }), getContent: async ({ path, ref }: any) => { const value = filesAt(ref)[path]; if (value === undefined) throw new Error("404"); return { data: { content: Buffer.from(value).toString("base64"), sha: path } }; }, getCommit: async ({ page }: any) => diffResponse(page) , compareCommits: async ({ page }: any) => diffResponse(page) }, git: { getTree: async ({ tree_sha }: any) => ({ data: { tree: tree(tree_sha), truncated: false } }) }, search: { code: async () => ({ data: { items: (options.codeHits ?? []).map(path => ({ path })) } }) }, pulls: { get: async () => ({ data: { number: 1, title: "PR", state: "open", changed_files: options.totalFiles ?? options.diffPages?.[0]?.length ?? 0 } }), listFiles: async () => ({ data: options.diffPages?.[0] ?? [] }) } } };
+}
+
+test("repository parsing, self repository and auth authority are strict", () => {
+  assert.deepEqual(parseGitHubRepository("https://github.com/acme/demo.git"), { owner: "acme", repo: "demo" });
+  assert.throws(() => parseGitHubRepository("github.com/acme/demo/extra"));
+  const old = process.env.JARVIS_REPOSITORY; process.env.JARVIS_REPOSITORY = "self/project";
+  assert.deepEqual(resolveSelfRepository(undefined, true), { owner: "self", repo: "project" });
+  if (old === undefined) delete process.env.JARVIS_REPOSITORY; else process.env.JARVIS_REPOSITORY = old;
+  assert.throws(() => resolveSelfRepository(undefined, false), /REPOSITORY_REQUIRED/);
+  assert.equal(getGitHubToken({ GITHUB_FACTORY_TOKEN: "factory", GITHUB_TOKEN: "general" } as any), "factory");
+});
+
+test("reader rejects secret and binary files", async () => {
+  const reader = new GitHubRepositoryReader(fake({ ".env": "TOKEN=secret", "image.png": "x" }));
+  await assert.rejects(reader.readFile("acme/repo", ".env"), /SECRET_FILE_BLOCKED/);
+  await assert.rejects(reader.readFile("acme/repo", "image.png"), /BINARY_OR_EXCLUDED_FILE/);
+});
+
+test("structured search ranks exact content and uses robust accent/synonym/word terms", async () => {
+  const reader = new GitHubRepositoryReader(fake({ "src/odd.ts": "export const SERVICE_CONNECTION_IN_USE = true", "src/settings.ts": "validation service connection", "README.md": "repository file function settings" }));
+  const exact = await reader.searchContent("acme/repo", "service_connection_in_use");
+  assert.deepEqual(exact.recommendedFiles[0], { path: "src/odd.ts", source: "bounded-content", score: 100, confidence: "HIGH", matches: ["service_connection_in_use"], evidence: "Matched service_connection_in_use in bounded content." });
+  assert.deepEqual(exact.matches, exact.recommendedFiles);
+  const words = await new GitHubRepositoryReader(fake({ "src/settings.ts": "validation service connection" })).searchContent("acme/repo", "corrige validation service connection");
+  assert.equal(words.recommendedFiles[0].path, "src/settings.ts");
+  assert.ok(words.recommendedFiles[0].matches?.includes("validation"));
+  const synonyms = await new GitHubRepositoryReader(fake({ "README.md": "repository file function settings" })).searchContent("acme/repo", "dépôt fichier fonction paramètres");
+  assert.equal(synonyms.recommendedFiles[0].path, "README.md");
+});
+
+test("explicit non-default ref excludes default-branch Code Search hits", async () => {
+  const reader = new GitHubRepositoryReader(fake({ "src/old.ts": "UNIQUE_SYMBOL" }, { refs: { feature: { "src/new.ts": "other" } }, codeHits: ["src/old.ts"] }));
+  const result = await reader.searchContent("acme/repo", "UNIQUE_SYMBOL", "feature");
+  assert.equal(result.matches.some(match => match.path === "src/old.ts"), false);
+});
+
+test("bounded real audit reports observed dangerous config, missing tests and manifest inconsistency", async () => {
+  const files = { "package.json": JSON.stringify({ main: "src/missing.ts" }), "src/index.ts": "start()", "src/config.ts": "safe=true", "src/services/payment.ts": "export const pay=()=>1", "src/orchestration/router.ts": "export const route=()=>1", "src/persistence/db.ts": "export const db={}", "src/skills/run.ts": "export const run=()=>1", "src/security/auth.ts": "export const auth = false", "src/unrelated.test.ts": "test('x',()=>{})", ".github/workflows/ci.yml": "on: push" };
+  const audit = await new GitHubRepositoryReader(fake(files)).audit("acme/repo");
+  assert.equal(audit.inspectionSufficient, true);
+  assert.ok(audit.inspectionCoverage.categoriesInspected.includes("ci"));
+  assert.ok(audit.findings.some(finding => finding.title === "Dangerous security configuration is enabled" && finding.files.includes("src/security/auth.ts")));
+  assert.ok(audit.findings.some(finding => finding.title === "No associated test found for an inspected critical module"));
+  assert.ok(audit.findings.some(finding => finding.title === "Package main target is missing"));
+  for (const finding of audit.findings) for (const key of ["severity", "title", "files", "evidence", "impact", "recommendation"]) assert.ok(key in finding);
+});
+
+test("audit explains insufficient coverage instead of using a two-file threshold", async () => {
+  const audit = await new GitHubRepositoryReader(fake({ "README.md": "architecture", "package.json": "{}" })).audit("acme/repo");
+  assert.equal(audit.inspectionSufficient, false);
+  assert.deepEqual(audit.limitsReached, { tree: false, files: false, bytes: false });
+});
+
+test("commit/diff pagination is globally truthful and secret-safe", async () => {
+  const first = Array.from({ length: REPOSITORY_LIMITS.maxSearchResults }, (_, i) => ({ filename: `src/${i}.ts`, patch: i === 0 ? "+ GITHUB_TOKEN=secret" : "+ let TOKEN: string;" }));
+  const second = [{ filename: "src/100.ts", patch: "+ safe" }];
+  const reader = new GitHubRepositoryReader(fake({}, { diffPages: [first, second] }));
+  for (const result of [await reader.readCommit("acme/repo", "abc"), await reader.readDiff("acme/repo", "a", "b")]) {
+    assert.equal(result.truncated, true); assert.equal(result.totalFiles, 101); assert.equal(result.returnedFiles, 100); assert.match(result.files[0].patch!, /REDACTED/);
+  }
+});
+
+test("recursive schemas, public catalog and factory write allowlist remain protected", async () => {
+  validateArraySchemaItems({ type: "object", properties: { nested: { type: "array", items: { type: "string" } } } });
+  assert.throws(() => validateArraySchemaItems({ type: "object", properties: { bad: { type: "array" } } }));
+  assert.equal(CANONICAL_SKILL_IDS.length, 40);
+  assert.throws(() => assertSoftwareFactoryRepositoryAllowed("evil", "repo", { SOFTWARE_FACTORY_ALLOWED_REPOS: "safe/repo" } as any));
+  const old = process.env.SOFTWARE_FACTORY_ALLOWED_REPOS; process.env.SOFTWARE_FACTORY_ALLOWED_REPOS = "safe/repo"; let calls = 0;
+  const service = new SoftwareFactoryService({ githubToken: "x", octokitClient: { rest: { repos: { get: async () => { calls++; } } } } as any });
+  await assert.rejects(service.executeWorkflow({ owner: "evil", repo: "repo", filePath: "x.ts", instructions: "x" }, "task"), /SOFTWARE_FACTORY_REPOSITORY_NOT_ALLOWED/); assert.equal(calls, 0);
+  if (old === undefined) delete process.env.SOFTWARE_FACTORY_ALLOWED_REPOS; else process.env.SOFTWARE_FACTORY_ALLOWED_REPOS = old;
+});
