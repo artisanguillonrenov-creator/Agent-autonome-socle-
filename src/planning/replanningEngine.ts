@@ -14,6 +14,11 @@ export interface ReplanningFacts {
 export class ReplanningEngine {
   constructor(private llm: LLMProvider, private registry: ServiceRegistry) {}
 
+  /** Permet à Agent.setLLMProvider() de propager le nouveau fournisseur jusqu'ici. */
+  setLLMProvider(llm: LLMProvider): void {
+    this.llm = llm;
+  }
+
   async propose(facts: ReplanningFacts): Promise<PlanStepSpec[]> {
     const payload = {
       objective: facts.objective,

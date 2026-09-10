@@ -1,4 +1,4 @@
-import { createLLMProvider } from "./llm/providers/index.js";
+import { createLLMProvider, resolveLLMSelection } from "./llm/providers/index.js";
 import { createEmbeddingProvider } from "./llm/embeddingFactory.js";
 import { Agent } from "./core/agent.js";
 import { builtinSkills } from "./skills/builtin/index.js";
@@ -9,7 +9,12 @@ import { BackgroundRunner } from "./autonomy/backgroundRunner.js";
 import { Scheduler } from "./autonomy/scheduler.js";
 
 async function main(): Promise<void> {
-  const llm = createLLMProvider();
+  // Au démarrage, on fige la sélection active (options explicites > persistance > défaut)
+  // dans config.llm — createLLMProvider lui-même reste pur (voir src/llm/providers/index.ts).
+  const selection = resolveLLMSelection();
+  config.llm.provider = selection.provider;
+  config.llm.model = selection.model;
+  const llm = createLLMProvider(selection);
   const embeddings = createEmbeddingProvider();
   const agent = new Agent({ llm, embeddings });
 

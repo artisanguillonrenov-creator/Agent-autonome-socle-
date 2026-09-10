@@ -9,6 +9,11 @@ function int(value: string | undefined, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+/** Retire les "/" finaux pour éviter les doubles slashs lors de la concaténation d'URLs. */
+function stripTrailingSlash(url: string): string {
+  return url.replace(/\/+$/, "");
+}
+
 export const config = {
   llm: {
     provider: (process.env.LLM_PROVIDER as LLMProviderName) || "mock",
@@ -18,7 +23,7 @@ export const config = {
     openrouterApiKey: process.env.OPENROUTER_API_KEY || "",
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL || "http://localhost:11434",
     infermaticApiKey: process.env.INFERMATIC_API_KEY || "",
-    infermaticBaseUrl: process.env.INFERMATIC_BASE_URL || "https://api.infermatic.ai/v1",
+    infermaticBaseUrl: stripTrailingSlash(process.env.INFERMATIC_BASE_URL || "https://api.totalgpt.ai/v1"),
   },
   embeddings: {
     provider: (process.env.EMBEDDING_PROVIDER as EmbeddingProviderName) || "local",
@@ -34,6 +39,14 @@ export const config = {
   softwareFactory: {
     token: process.env.SOFTWARE_FACTORY_TOKEN || process.env.API_TOKEN || "",
     timeoutMs: int(process.env.SOFTWARE_FACTORY_TIMEOUT_MS, 120000),
+    /**
+     * Provider/modèle de la Software Factory : indépendants du provider/modèle actif
+     * de Jarvis (config.llm.*), pour ne jamais être affectés par un changement fait
+     * depuis le panneau "Modèles IA" ou la sélection persistée llm_active_model.
+     */
+    provider: (process.env.SOFTWARE_FACTORY_PROVIDER as LLMProviderName) || "infermatic",
+    model: process.env.SOFTWARE_FACTORY_MODEL || "Qwen-Qwen3.6-35B-A3B",
+    maxTokens: int(process.env.SOFTWARE_FACTORY_MAX_TOKENS, 7000),
   },
   codeExecution: {
     enabled: process.env.ENABLE_CODE_EXECUTION === "true",
