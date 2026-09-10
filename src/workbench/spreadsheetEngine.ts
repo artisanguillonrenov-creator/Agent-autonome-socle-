@@ -4,6 +4,7 @@ import type { WorkspaceStore } from "../workspaces/workspaceStore.js";
 import type { ArtifactStore } from "../workspaces/artifactStore.js";
 import { WORKBENCH_LIMITS, toFiniteNumberOrNull, assertFiniteResult, workbenchError } from "./limits.js";
 import { parseDelimited, serializeDelimited } from "./csv.js";
+import { assertXlsxDecompressionSafe } from "./xlsxZipGuard.js";
 
 export type SpreadsheetFormat = "csv" | "tsv" | "xlsx";
 export type SheetSelector = string | number;
@@ -207,7 +208,10 @@ async function loadRawRowsForPath(workspaces: WorkspaceStore, workspaceId: strin
   const format = detectSpreadsheetFormat(path);
   const { absolutePath, size } = workspaces.resolveExistingFile(workspaceId, path);
   if (size > WORKBENCH_LIMITS.INPUT_FILE_MAX_BYTES) throw workbenchError("SPREADSHEET_FILE_TOO_LARGE");
-  if (format === "xlsx") return loadXlsxRawRows(absolutePath, req);
+  if (format === "xlsx") {
+    assertXlsxDecompressionSafe(absolutePath);
+    return loadXlsxRawRows(absolutePath, req);
+  }
   const text = readFileSync(absolutePath, "utf8");
   return loadCsvRawRows(text, format === "tsv" ? "\t" : ",", req);
 }
@@ -222,6 +226,7 @@ export async function listSheets(workspaces: WorkspaceStore, workspaceId: string
   const { absolutePath, size } = workspaces.resolveExistingFile(workspaceId, path);
   if (size > WORKBENCH_LIMITS.INPUT_FILE_MAX_BYTES) throw workbenchError("SPREADSHEET_FILE_TOO_LARGE");
   if (format !== "xlsx") return { path, format, sheets: [{ name: "Sheet1", index: 0 }] };
+  assertXlsxDecompressionSafe(absolutePath);
 
   const reader = new ExcelJS.stream.xlsx.WorkbookReader(absolutePath, {
     worksheets: "emit",

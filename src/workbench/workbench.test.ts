@@ -51,6 +51,45 @@ async function xlsxBuffer(build: (wb: ExcelJS.Workbook) => void): Promise<Buffer
   return Buffer.from(await wb.xlsx.writeBuffer());
 }
 
+const ZIP_EOCD_SIGNATURE = 0x06054b50;
+const ZIP_CENTRAL_DIRECTORY_SIGNATURE = 0x02014b50;
+
+function findZipEocd(buf: Buffer): number {
+  for (let i = buf.length - 22; i >= 0; i--) {
+    if (buf.readUInt32LE(i) === ZIP_EOCD_SIGNATURE) return i;
+  }
+  throw new Error("EOCD introuvable dans le fixture de test");
+}
+
+function countZipEntries(buf: Buffer): number {
+  return buf.readUInt16LE(findZipEocd(buf) + 10);
+}
+
+/**
+ * Falsifie, dans le répertoire central du ZIP, les tailles compressée/décompressée déclarées de
+ * chaque entrée — sans toucher aux données réellement compressées — pour simuler un conteneur XLSX
+ * qui reste petit sur disque mais ment sur ce qu'il prétend décompresser.
+ */
+function tamperXlsxDeclaredSizes(
+  buf: Buffer,
+  mutate: (out: Buffer, entryIndex: number, uncompressedSizeOffset: number, compressedSizeOffset: number) => void,
+): Buffer {
+  const out = Buffer.from(buf);
+  const eocd = findZipEocd(out);
+  const totalEntries = out.readUInt16LE(eocd + 10);
+  const cdOffset = out.readUInt32LE(eocd + 16);
+  let pos = cdOffset;
+  for (let i = 0; i < totalEntries; i++) {
+    if (out.readUInt32LE(pos) !== ZIP_CENTRAL_DIRECTORY_SIGNATURE) throw new Error("entrée de répertoire central inattendue dans le fixture");
+    mutate(out, i, pos + 24, pos + 20);
+    const nameLength = out.readUInt16LE(pos + 28);
+    const extraLength = out.readUInt16LE(pos + 30);
+    const commentLength = out.readUInt16LE(pos + 32);
+    pos += 46 + nameLength + extraLength + commentLength;
+  }
+  return out;
+}
+
 function buildMinimalPdf(includeText: boolean): Buffer {
   const contentStr = includeText ? "BT /F1 24 Tf 72 700 Td (Hello Workbench) Tj ET" : "";
   const content = `<< /Length ${contentStr.length} >>\nstream\n${contentStr}\nendstream`;
@@ -250,6 +289,61 @@ test("spreadsheet: fichier >25 MiB rejeté avant même listSheets", async () => 
   const { workspaces, workspaceId } = setup();
   workspaces.writeFile(workspaceId, "huge.csv", Buffer.alloc(WORKBENCH_LIMITS.INPUT_FILE_MAX_BYTES + 1, "a"));
   await assert.rejects(() => listSheets(workspaces, workspaceId, "huge.csv"), /SPREADSHEET_FILE_TOO_LARGE/);
+});
+
+test("spreadsheet: XLSX zip-bomb (entrée individuelle) rejeté avant toute décompression, via LIST_SHEETS", async () => {
+  const { workspaces, workspaceId } = setup();
+  const base = await xlsxBuffer((wb) => {
+    const sheet = wb.addWorksheet("S");
+    sheet.addRow(["a", "b"]);
+    sheet.addRow([1, 2]);
+  });
+  const bomb = tamperXlsxDeclaredSizes(base, (out, entryIndex, uncompressedOffset) => {
+    if (entryIndex === 0) out.writeUInt32LE(WORKBENCH_LIMITS.SPREADSHEET_XLSX_MAX_ENTRY_UNCOMPRESSED_BYTES + 1, uncompressedOffset);
+  });
+  assert.ok(bomb.length < WORKBENCH_LIMITS.INPUT_FILE_MAX_BYTES);
+  workspaces.writeFile(workspaceId, "bomb-entry.xlsx", bomb);
+  await assert.rejects(() => listSheets(workspaces, workspaceId, "bomb-entry.xlsx"), /SPREADSHEET_XLSX_EXPANSION_LIMIT/);
+});
+
+test("spreadsheet: XLSX zip-bomb (total décompressé) rejeté via READ_RANGE", async () => {
+  const { workspaces, workspaceId } = setup();
+  const base = await xlsxBuffer((wb) => {
+    const sheet = wb.addWorksheet("S");
+    sheet.addRow(["a", "b"]);
+    sheet.addRow([1, 2]);
+  });
+  const entryCount = countZipEntries(base);
+  const perEntryDeclared = Math.min(
+    WORKBENCH_LIMITS.SPREADSHEET_XLSX_MAX_ENTRY_UNCOMPRESSED_BYTES - 1,
+    Math.ceil((WORKBENCH_LIMITS.SPREADSHEET_XLSX_MAX_TOTAL_UNCOMPRESSED_BYTES * 2) / entryCount),
+  );
+  const bomb = tamperXlsxDeclaredSizes(base, (out, _entryIndex, uncompressedOffset) => out.writeUInt32LE(perEntryDeclared, uncompressedOffset));
+  assert.ok(bomb.length < WORKBENCH_LIMITS.INPUT_FILE_MAX_BYTES);
+  assert.ok(perEntryDeclared * entryCount > WORKBENCH_LIMITS.SPREADSHEET_XLSX_MAX_TOTAL_UNCOMPRESSED_BYTES);
+  workspaces.writeFile(workspaceId, "bomb-total.xlsx", bomb);
+  await assert.rejects(() => readRange(workspaces, workspaceId, "bomb-total.xlsx", { startRow: 0 }), /SPREADSHEET_XLSX_EXPANSION_LIMIT/);
+});
+
+test("spreadsheet: XLSX zip-bomb (ratio de compression) rejeté, y compris via data_analysis", async () => {
+  const { workspaces, workspaceId } = setup();
+  const base = await xlsxBuffer((wb) => {
+    const sheet = wb.addWorksheet("S");
+    sheet.addRow(["v"]);
+    sheet.addRow([1]);
+  });
+  const bomb = tamperXlsxDeclaredSizes(base, (out, entryIndex, uncompressedOffset, compressedOffset) => {
+    if (entryIndex === 0) {
+      out.writeUInt32LE(5 * 1024 * 1024, uncompressedOffset); // 5 MiB déclarés, sous les deux plafonds
+      out.writeUInt32LE(4, compressedOffset); // ...pour 4 octets compressés déclarés : ratio ~1.3M
+    }
+  });
+  assert.ok(bomb.length < WORKBENCH_LIMITS.INPUT_FILE_MAX_BYTES);
+  workspaces.writeFile(workspaceId, "bomb-ratio.xlsx", bomb);
+  await assert.rejects(
+    () => runDataAnalysis(workspaces, { workspaceId, path: "bomb-ratio.xlsx", action: "COUNT" }),
+    /SPREADSHEET_XLSX_EXPANSION_LIMIT/,
+  );
 });
 
 test("spreadsheet: >200 colonnes bornées avec warning", async () => {
