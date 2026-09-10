@@ -61,9 +61,19 @@ async function fetchApi(endpoint, options = {}) {
 
   try {
     const response = await fetch(url, { ...options, headers });
+
+    const contentType = response.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      const err = new Error("Le serveur configuré n'a pas renvoyé une réponse API Jarvis valide.");
+      err.code = 'API_RESPONSE_NOT_JSON';
+      throw err;
+    }
+
     if (response.status === 401) {
       updateStatusBadge(false, 'Non autorisé');
-      throw new Error('Authentification requise (token invalide ou manquant)');
+      const err = new Error('Authentification requise (token invalide ou manquant)');
+      err.code = 'AUTH_REQUIRED';
+      throw err;
     }
     if (!response.ok) {
       const errData = await response.json().catch(() => ({}));
@@ -1427,6 +1437,24 @@ async function renderSettingsView() {
   title.textContent = 'PARAMÈTRES JARVIS';
   container.appendChild(title);
 
+  // Connexion Client à Jarvis : toujours rendue en premier, indépendamment
+  // de tout appel backend (schema/settings/connections), pour rester
+  // accessible même sur une installation neuve ou après une désinstallation
+  // ayant vidé le localStorage.
+  const clientConnCard = renderClientJarvisConnectionCard();
+  container.appendChild(clientConnCard);
+
+  if (!state.backendUrl) {
+    const infoCard = document.createElement('div');
+    infoCard.className = 'card';
+    const infoText = document.createElement('div');
+    infoText.className = 'card-subtext';
+    infoText.textContent = "Configurez l'URL du backend et le token d'accès pour charger les paramètres Jarvis.";
+    infoCard.appendChild(infoText);
+    container.appendChild(infoCard);
+    return;
+  }
+
   // Top header bar with Level Selector & Actions
   const headerBar = document.createElement('div');
   headerBar.className = 'settings-header-bar';
@@ -1584,12 +1612,6 @@ function renderSettingsSections(container, schema, effectiveSettings, connection
       body.appendChild(servicesSection);
     }
 
-    // Special Section : Système -> Client Connection to Jarvis
-    if (section.id === 'system_maintenance') {
-      const clientConnCard = renderClientJarvisConnectionCard();
-      body.appendChild(clientConnCard);
-    }
-
     // Render setting cards
     sectionSettings.forEach((setting) => {
       const card = renderSettingCard(setting);
@@ -1660,8 +1682,17 @@ function renderClientJarvisConnectionCard() {
     const headers = { 'Content-Type': 'application/json' };
     if (tokenVal) headers['Authorization'] = `Bearer ${tokenVal}`;
 
+    if (!urlVal) {
+      alert("❌ Veuillez saisir une Backend URL avant de tester la connexion.");
+      return;
+    }
+
     try {
       const res = await fetch(testEndpoint, { headers });
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        throw new Error("Le serveur configuré n'a pas renvoyé une réponse API Jarvis valide.");
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       alert(`✅ Connexion réussie ! Moteur Jarvis v${data.version || '0.1.0'} en ligne.`);
@@ -1674,13 +1705,13 @@ function renderClientJarvisConnectionCard() {
   btnSave.type = 'button';
   btnSave.className = 'btn btn-primary';
   btnSave.textContent = 'Sauvegarder';
-  btnSave.addEventListener('click', () => {
+  btnSave.addEventListener('click', async () => {
     state.backendUrl = inputUrl.value.trim();
     state.token = inputToken.value.trim();
     localStorage.setItem('jarvis_backend_url', state.backendUrl);
     localStorage.setItem('jarvis_token', state.token);
     alert('✅ Paramètres de connexion enregistrés localement !');
-    void renderSettingsView();
+    await renderSettingsView();
   });
 
   buttonRow.append(btnTest, btnSave);
