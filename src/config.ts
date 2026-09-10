@@ -39,6 +39,14 @@ export const config = {
   softwareFactory: {
     token: process.env.SOFTWARE_FACTORY_TOKEN || process.env.API_TOKEN || "",
     timeoutMs: int(process.env.SOFTWARE_FACTORY_TIMEOUT_MS, 120000),
+    /**
+     * Provider/modèle de la Software Factory : indépendants du provider/modèle actif
+     * de Jarvis (config.llm.*), pour ne jamais être affectés par un changement fait
+     * depuis le panneau "Modèles IA" ou la sélection persistée llm_active_model.
+     */
+    provider: (process.env.SOFTWARE_FACTORY_PROVIDER as LLMProviderName) || "infermatic",
+    model: process.env.SOFTWARE_FACTORY_MODEL || "Qwen-Qwen3.6-35B-A3B",
+    maxTokens: int(process.env.SOFTWARE_FACTORY_MAX_TOKENS, 7000),
   },
   codeExecution: {
     enabled: process.env.ENABLE_CODE_EXECUTION === "true",
