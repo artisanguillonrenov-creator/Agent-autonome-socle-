@@ -7,6 +7,56 @@ const FORBIDDEN_KEYWORDS =
 const ALLOWED_START = /^(SELECT|WITH)\b/i;
 
 /**
+ * Retire les littéraux de chaîne ('...', '' échappé), les identifiants entre guillemets
+ * ("...", ainsi que les crochets [...] et backticks `...`) et les commentaires (--, /* *\/)
+ * avant l'analyse par mots-clés, pour ne jamais rejeter une requête de lecture légitime au seul
+ * motif qu'un mot interdit apparaît dans une chaîne ou un commentaire (ex: SELECT 'UPDATE' AS x).
+ */
+function stripSqlNoise(sql: string): string {
+  let out = "";
+  let i = 0;
+  const n = sql.length;
+  while (i < n) {
+    const ch = sql[i];
+    if (ch === "'" || ch === '"' || ch === "`") {
+      const quote = ch;
+      i++;
+      while (i < n) {
+        if (sql[i] === quote && sql[i + 1] === quote) {
+          i += 2;
+          continue;
+        }
+        if (sql[i] === quote) {
+          i++;
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+    if (ch === "[") {
+      i++;
+      while (i < n && sql[i] !== "]") i++;
+      i++;
+      continue;
+    }
+    if (ch === "-" && sql[i + 1] === "-") {
+      while (i < n && sql[i] !== "\n") i++;
+      continue;
+    }
+    if (ch === "/" && sql[i + 1] === "*") {
+      i += 2;
+      while (i < n && !(sql[i] === "*" && sql[i + 1] === "/")) i++;
+      i += 2;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
+/**
  * Rejet précoce (avant prepare) sur la forme textuelle de la requête ; complété
  * après `prepare` par la vérification `reader`/`readonly` réellement exposée
  * par better-sqlite3 — ne jamais se fier au seul premier mot du SQL.
@@ -15,7 +65,18 @@ function assertReadOnlyQueryText(sql: string): void {
   const trimmed = sql.trim();
   if (!trimmed) throw workbenchError("DATABASE_QUERY_EMPTY");
   if (!ALLOWED_START.test(trimmed)) throw workbenchError("DATABASE_WRITE_QUERY_FORBIDDEN");
-  if (FORBIDDEN_KEYWORDS.test(trimmed)) throw workbenchError("DATABASE_WRITE_QUERY_FORBIDDEN");
+  if (FORBIDDEN_KEYWORDS.test(stripSqlNoise(trimmed))) throw workbenchError("DATABASE_WRITE_QUERY_FORBIDDEN");
+}
+
+/**
+ * better-sqlite3 renvoie par défaut des `number` pour les entiers SQLite, silencieusement
+ * arrondis au-delà de Number.MAX_SAFE_INTEGER. On active `safeIntegers` sur le statement puis on
+ * ne convertit en BigInt->string (préservant la valeur exacte) que lorsque c'est réellement hors
+ * de portée d'un double ; sinon on renvoie un `number` JSON ordinaire.
+ */
+function normalizeSqliteValue(value: unknown): unknown {
+  if (typeof value !== "bigint") return value;
+  return value >= BigInt(Number.MIN_SAFE_INTEGER) && value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : value.toString();
 }
 
 export interface DatabaseQueryResult {
@@ -48,6 +109,7 @@ export function runDatabaseQuery(workspaces: WorkspaceStore, workspaceId: string
       throw workbenchError("DATABASE_QUERY_INVALID");
     }
     if (stmt.reader === false || stmt.readonly === false) throw workbenchError("DATABASE_WRITE_QUERY_FORBIDDEN");
+    stmt.safeIntegers(true);
 
     const columns = stmt.columns().map((c) => c.name);
     const rows: Record<string, unknown>[] = [];
@@ -57,7 +119,7 @@ export function runDatabaseQuery(workspaces: WorkspaceStore, workspaceId: string
         truncated = true;
         break;
       }
-      rows.push(row);
+      rows.push(Object.fromEntries(Object.entries(row).map(([key, value]) => [key, normalizeSqliteValue(value)])));
     }
     return { columns, rows, rowCountReturned: rows.length, truncated, warnings: [] };
   } finally {

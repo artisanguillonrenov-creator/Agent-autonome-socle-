@@ -121,7 +121,9 @@ function pearsonCorrelation(xs: number[], ys: number[]): number {
     assertFiniteResult(syy);
   }
   if (sxx === 0 || syy === 0) throw workbenchError("ANALYSIS_INSUFFICIENT_DATA");
-  return assertFiniteResult(sxy / Math.sqrt(sxx * syy));
+  // sqrt(sxx)*sqrt(syy) plutôt que sqrt(sxx*syy) : le produit intermédiaire peut déborder en Infinity
+  // (sxx/syy individuellement finis mais leur produit hors de portée d'un double) alors que chaque racine reste finie.
+  return assertFiniteResult(sxy / (Math.sqrt(sxx) * Math.sqrt(syy)));
 }
 
 function pad2(n: number): string {

@@ -94,6 +94,7 @@ function truncateText(text: string): { text: string; truncated: boolean } {
 }
 
 const OCR_REQUIRED_MIN_CHARS = 10;
+const DOCUMENT_SEARCH_MAX_CONTEXT_CHARS = 500;
 
 async function readPdf(absolutePath: string, path: string, size: number): Promise<DocumentReadResult> {
   const data = readFileSync(absolutePath);
@@ -176,9 +177,11 @@ export async function searchDocument(
   if (typeof query !== "string" || !query.length) throw workbenchError("DOCUMENT_SEARCH_QUERY_REQUIRED");
   const doc = await readDocument(workspaces, workspaceId, path);
   const caseSensitive = options.caseSensitive === true;
+  // Bornée : sans plafond, un appelant pourrait demander un contexte de plusieurs millions de
+  // caractères et, combiné à 100 résultats, construire une réponse de centaines de Mo.
   const contextChars =
     Number.isFinite(options.contextChars) && (options.contextChars as number) >= 0
-      ? Math.floor(options.contextChars as number)
+      ? Math.min(Math.floor(options.contextChars as number), DOCUMENT_SEARCH_MAX_CONTEXT_CHARS)
       : 40;
   const requested =
     Number.isFinite(options.maxResults) && (options.maxResults as number) > 0

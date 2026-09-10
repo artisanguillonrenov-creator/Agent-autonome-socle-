@@ -159,6 +159,13 @@ async function loadXlsxRawRows(absolutePath: string, req: RawRowsRequest): Promi
       const idx = row.number - 1;
       lastSeenRowNumber = row.number;
       if (idx < req.startRow) continue;
+      // ExcelJS n'émet que les lignes réellement peuplées (feuille creuse) : une ligne au-delà de
+      // endRow peut arriver directement sans qu'aucune ligne intermédiaire n'ait été vue — il ne
+      // faut jamais l'inclure dans le résultat.
+      if (req.endRow !== undefined && idx > req.endRow) {
+        stoppedForRange = true;
+        break;
+      }
       if (rows.length >= req.maxRows) {
         stoppedForCap = true;
         break;

@@ -160,6 +160,13 @@ test("document: recherche bornée à 100 résultats", async () => {
   assert.equal(result.truncated, true);
 });
 
+test("document: contextChars est plafonné, pas de contexte arbitrairement grand", async () => {
+  const { workspaces, workspaceId } = setup();
+  workspaces.writeFile(workspaceId, "ctx.txt", `${"a".repeat(1000)} needle ${"b".repeat(1000)}`);
+  const result = await searchDocument(workspaces, workspaceId, "ctx.txt", "needle", { contextChars: 10_000_000 });
+  assert.ok(result.matches[0].context.length < 2000);
+});
+
 // ---------------------------------------------------------------------------
 // SPREADSHEET
 // ---------------------------------------------------------------------------
@@ -327,6 +334,18 @@ test("spreadsheet: plage invalide rejetée", async () => {
   );
 });
 
+test("spreadsheet: une ligne creuse au-delà de endRow n'est jamais incluse", async () => {
+  const { workspaces, workspaceId } = setup();
+  const buf = await xlsxBuffer((wb) => {
+    const sheet = wb.addWorksheet("Sparse");
+    sheet.getCell("A1").value = "first";
+    sheet.getCell("A10").value = "far-away";
+  });
+  workspaces.writeFile(workspaceId, "sparse.xlsx", buf);
+  const result = await readRange(workspaces, workspaceId, "sparse.xlsx", { startRow: 0, endRow: 3 });
+  assert.deepEqual(result.rows, [["first"]]);
+});
+
 test("spreadsheet: traversal et symlink rejetés", async () => {
   const { workspaces, workspaceId } = setup();
   workspaces.writeFile(workspaceId, "ok.csv", "a\n1\n");
@@ -442,6 +461,14 @@ test("analysis: CORRELATION calcule un coefficient de Pearson fini", async () =>
   assert.ok(Math.abs((result.correlation as number) - 1) < 1e-9);
 });
 
+test("analysis: CORRELATION reste finie et correcte même si sxx*syy déborderait", async () => {
+  const { workspaces, workspaceId } = setup();
+  workspaces.writeFile(workspaceId, "corrbig.csv", "x,y\n1e80,1e80\n2e80,2e80\n3e80,3e80\n4e80,4e80\n");
+  const result = await runDataAnalysis(workspaces, { workspaceId, path: "corrbig.csv", action: "CORRELATION", columnX: "x", columnY: "y" });
+  assert.ok(Number.isFinite(result.correlation as number));
+  assert.ok(Math.abs((result.correlation as number) - 1) < 1e-6);
+});
+
 test("analysis: TIME_SERIES ISO-8601 place 2021-01-01 en 2020-W53", async () => {
   const { workspaces, workspaceId } = setup();
   workspaces.writeFile(workspaceId, "ts.csv", "date,v\n2021-01-01,1\n2016-01-01,1\n2017-01-01,1\n");
@@ -511,6 +538,23 @@ test("database: toute mutation est rejetée, y compris via WITH", () => {
   // La connexion elle-même est ouverte en lecture seule : une tentative d'écriture échapperait au filtre textuel échouerait quand même à s'exécuter.
   const rows = runDatabaseQuery(workspaces, workspaceId, "app.db", "SELECT COUNT(*) as n FROM items");
   assert.equal(rows.rows[0].n, 1);
+});
+
+test("database: mots interdits dans une chaîne ou un commentaire n'entraînent pas un faux rejet", () => {
+  const { workspaces, workspaceId } = setup();
+  seedSqlite(workspaces, workspaceId, "app.db", 1);
+  const literal = runDatabaseQuery(workspaces, workspaceId, "app.db", "SELECT 'UPDATE' AS action");
+  assert.equal(literal.rows[0].action, "UPDATE");
+  const commented = runDatabaseQuery(workspaces, workspaceId, "app.db", "SELECT 1 AS n -- DELETE stale cache");
+  assert.equal(commented.rows[0].n, 1);
+});
+
+test("database: préserve les entiers 64 bits hors de portée d'un double", () => {
+  const { workspaces, workspaceId } = setup();
+  seedSqlite(workspaces, workspaceId, "app.db", 1);
+  const big = runDatabaseQuery(workspaces, workspaceId, "app.db", "SELECT 9223372036854775807 AS huge, 42 AS small");
+  assert.equal(big.rows[0].huge, "9223372036854775807");
+  assert.equal(big.rows[0].small, 42);
 });
 
 test("database: résultats tronqués à 1000 lignes sans matérialisation illimitée", () => {
