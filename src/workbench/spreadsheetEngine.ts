@@ -74,7 +74,7 @@ function loadCsvRawRows(text: string, delimiter: string, req: RawRowsRequest): R
     cells += cols.length;
     rows.push(cols);
   }
-  return { sheetName: "Sheet1", rows, truncated, totalRowsKnown: true, totalRows, warnings };
+  return { sheetName: "Sheet1", rows, truncated: truncated || columnsWarned, totalRowsKnown: true, totalRows, warnings };
 }
 
 interface NormalizedCell {
@@ -194,7 +194,9 @@ async function loadXlsxRawRows(absolutePath: string, req: RawRowsRequest): Promi
       totalRowsKnown = true;
       totalRows = lastSeenRowNumber;
     }
-    truncated = stoppedForCap;
+    // Une colonne supprimée au-delà de maxColumns est elle aussi une troncature du résultat,
+    // même quand aucun plafond de lignes/cellules n'a été atteint.
+    truncated = stoppedForCap || columnsWarned;
     break;
   }
   if (!sheetFound) throw workbenchError("SPREADSHEET_SHEET_NOT_FOUND");

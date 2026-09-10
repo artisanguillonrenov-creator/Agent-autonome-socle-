@@ -167,6 +167,20 @@ test("document: contextChars est plafonné, pas de contexte arbitrairement grand
   assert.ok(result.matches[0].context.length < 2000);
 });
 
+test("document: recherche sur un texte tronqué à DOCUMENT_MAX_TEXT_CHARS est signalée truncated=true", async () => {
+  const { workspaces, workspaceId } = setup();
+  // "needle" placé bien après la coupe à DOCUMENT_MAX_TEXT_CHARS : le document lu est tronqué
+  // avant même la recherche, donc la recherche elle-même doit hériter truncated=true, même si
+  // elle ne trouve aucune occurrence dans la portion inspectée.
+  const content = "a".repeat(WORKBENCH_LIMITS.DOCUMENT_MAX_TEXT_CHARS + 1000) + "needle";
+  workspaces.writeFile(workspaceId, "cut.txt", content);
+  const result = await searchDocument(workspaces, workspaceId, "cut.txt", "needle");
+  assert.equal(result.totalMatches, 0);
+  assert.equal(result.matches.length, 0);
+  assert.equal(result.truncated, true);
+  assert.ok(result.warnings.includes("DOCUMENT_TEXT_TRUNCATED_BEFORE_SEARCH"));
+});
+
 // ---------------------------------------------------------------------------
 // SPREADSHEET
 // ---------------------------------------------------------------------------
@@ -250,6 +264,25 @@ test("spreadsheet: >200 colonnes bornées avec warning", async () => {
   });
   assert.equal(dataset.headers.length, WORKBENCH_LIMITS.SPREADSHEET_MAX_COLUMNS);
   assert.ok(dataset.warnings.includes("SPREADSHEET_COLUMNS_TRUNCATED"));
+  assert.equal(dataset.truncated, true);
+});
+
+test("spreadsheet: >200 colonnes XLSX bornées, warning et truncated=true", async () => {
+  const { workspaces, workspaceId } = setup();
+  const buf = await xlsxBuffer((wb) => {
+    const sheet = wb.addWorksheet("Wide");
+    sheet.addRow(Array.from({ length: 250 }, (_, i) => `c${i}`));
+    sheet.addRow(Array.from({ length: 250 }, (_, i) => i));
+  });
+  workspaces.writeFile(workspaceId, "wide.xlsx", buf);
+  const dataset = await loadTabularDataset(workspaces, workspaceId, "wide.xlsx", {
+    maxRows: 10,
+    maxColumns: WORKBENCH_LIMITS.SPREADSHEET_MAX_COLUMNS,
+    maxCells: WORKBENCH_LIMITS.SPREADSHEET_MAX_CELLS_PER_READ,
+  });
+  assert.equal(dataset.headers.length, WORKBENCH_LIMITS.SPREADSHEET_MAX_COLUMNS);
+  assert.ok(dataset.warnings.includes("SPREADSHEET_COLUMNS_TRUNCATED"));
+  assert.equal(dataset.truncated, true);
 });
 
 test("spreadsheet: >10k lignes bornées, XLSX arrêt anticipé, totalRowsKnown=false", async () => {

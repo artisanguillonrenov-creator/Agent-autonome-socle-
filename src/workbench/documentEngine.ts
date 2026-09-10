@@ -210,5 +210,5 @@ export async function searchDocument(
   const warnings = [...doc.warnings];
   if (doc.truncated) warnings.push("DOCUMENT_TEXT_TRUNCATED_BEFORE_SEARCH");
 
-  return { workspaceId, path, query, matches, totalMatches, truncated: totalMatches > matches.length, warnings };
+  return { workspaceId, path, query, matches, totalMatches, truncated: doc.truncated || totalMatches > matches.length, warnings };
 }
