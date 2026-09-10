@@ -5,6 +5,7 @@ import { config, type LLMProviderName } from "../config.js";
 import { createLLMProvider } from "../llm/providers/index.js";
 import type { LLMProvider } from "../llm/provider.js";
 import type { ChatMessage } from "../types.js";
+import { isForbiddenRepositoryPath, parseGitHubRepository } from "../github/repositoryReader.js";
 
 export interface SoftwareFactoryConfig {
   githubToken?: string;
@@ -28,18 +29,20 @@ export interface ParsedSoftwareTask {
   targetPr?: number;
 }
 
+/**
+ * Delegates to the single canonical GitHub repository parser (`parseGitHubRepository`) so the Software
+ * Factory never validates repository references against a more permissive rule set than RepositoryReader
+ * or the software_development skill. Returns null (rather than throwing) for callers that treat "no
+ * repository" and "invalid repository" the same way; extractTaskParams below does not use this shortcut
+ * because it must fail closed on an explicitly-provided but invalid repository.
+ */
 export function parseRepoUrl(repoUrlStr?: string): { owner: string; repo: string } | null {
   if (!repoUrlStr || typeof repoUrlStr !== "string") return null;
-  const clean = repoUrlStr.trim().replace(/\.git$/, "");
-  const matchUrl = clean.match(/github\.com\/([^/]+)\/([^/]+)/i);
-  if (matchUrl) {
-    return { owner: matchUrl[1], repo: matchUrl[2] };
+  try {
+    return parseGitHubRepository(repoUrlStr);
+  } catch {
+    return null;
   }
-  const parts = clean.split("/").filter(Boolean);
-  if (parts.length === 2 && !clean.includes(":")) {
-    return { owner: parts[0], repo: parts[1] };
-  }
-  return null;
 }
 
 export function softwareFactoryAllowedRepositories(env: NodeJS.ProcessEnv = process.env): Set<string> {
@@ -52,9 +55,28 @@ export function assertSoftwareFactoryRepositoryAllowed(owner:string,repo:string,
 export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
   const ctx = taskReq.context || {};
 
-  const requested=parseRepoUrl(typeof ctx.repository==="string"?ctx.repository:undefined);
-  const owner = requested?.owner || "artisanguillonrenov-creator";
-  const repo = requested?.repo || "Agent-autonome-socle-";
+  // ctx.repository ABSENT keeps the historical Jarvis self-repository fallback below.
+  // ctx.repository EXPLICITLY PROVIDED but invalid (including an explicit empty string) must never
+  // silently fall back to the default repository: it fails closed with REPOSITORY_INVALID instead.
+  const repositoryProvided = typeof ctx.repository === "string";
+  let owner: string;
+  let repo: string;
+  if (repositoryProvided) {
+    const rawRepository = (ctx.repository as string).trim();
+    if (!rawRepository) {
+      throw new Error("REPOSITORY_INVALID: Le dépôt fourni est vide.");
+    }
+    try {
+      const parsed = parseGitHubRepository(rawRepository);
+      owner = parsed.owner;
+      repo = parsed.repo;
+    } catch {
+      throw new Error("REPOSITORY_INVALID: Le dépôt fourni est invalide.");
+    }
+  } else {
+    owner = "artisanguillonrenov-creator";
+    repo = "Agent-autonome-socle-";
+  }
 
   let filePath = String(ctx.filePath || ctx.path || ctx.file || "").trim();
   const objectiveStr = String(taskReq.objective || "").trim();
@@ -284,8 +306,12 @@ export class SoftwareFactoryService {
     summary: string;
   }> {
     const { owner, repo, filePath, instructions, targetBranch, targetPr } = params;
-    // Direct-call guard: no GitHub read or write happens before this check.
+    // Direct-call guard: no GitHub read or write happens before these checks. This is defense in depth,
+    // independent of the same guard applied upstream by the software_development skill: even a caller that
+    // bypasses the skill (a direct executeWorkflow call, or a future entry point) can never reach repos.get,
+    // git.getRef, repos.getContent, createRef, createOrUpdateFileContents or pulls.create for a forbidden path.
     assertSoftwareFactoryRepositoryAllowed(owner,repo);
+    if (isForbiddenRepositoryPath(filePath)) throw new Error("SOFTWARE_DEVELOPMENT_TARGET_FORBIDDEN: Le chemin cible est secret, exclu, binaire ou dépasse la profondeur autorisée.");
     const cleanTaskId = taskId.replace(/^task-/, "");
     let branchName = `jarvis/task-${cleanTaskId}`;
 
@@ -530,8 +556,9 @@ export class SoftwareFactoryService {
     let params: ParsedSoftwareTask;
     try {
       params = extractTaskParams(taskReq);
-      // Service entry-point guard, independently repeated by executeWorkflow.
+      // Service entry-point guards, independently repeated by executeWorkflow for fail-fast behaviour.
       assertSoftwareFactoryRepositoryAllowed(params.owner,params.repo);
+      if (isForbiddenRepositoryPath(params.filePath)) throw new Error("SOFTWARE_DEVELOPMENT_TARGET_FORBIDDEN: Le chemin cible est secret, exclu, binaire ou dépasse la profondeur autorisée.");
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       const errorCode = errorMsg.split(":")[0] || "FILE_PATH_MISSING";

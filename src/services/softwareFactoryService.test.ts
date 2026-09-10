@@ -1284,6 +1284,116 @@ test("TEST Q — Création d'un nouveau fichier quand getContent retourne 404", 
   assert.equal(res.prNumber, 10);
 });
 
+test("SoftwareFactoryService.executeWorkflow rejects secret/excluded/binary filePath before any GitHub call (defense in depth)", async () => {
+  let calls = 0;
+  const mockOctokit = {
+    rest: { repos: { get: async () => { calls++; return { data: { default_branch: "main" } }; } } },
+  } as unknown as Octokit;
+  const service = new SoftwareFactoryService({ githubToken: "token", octokitClient: mockOctokit });
+  for (const filePath of [".env", "credentials.json", "secrets.yaml", "private_key.pem", "image.png"]) {
+    await assert.rejects(
+      service.executeWorkflow(
+        { owner: "artisanguillonrenov-creator", repo: "Agent-autonome-socle-", filePath, instructions: "x", exactContent: "y" },
+        "task-guard",
+      ),
+      /SOFTWARE_DEVELOPMENT_TARGET_FORBIDDEN/,
+    );
+  }
+  assert.equal(calls, 0, "no GitHub call should happen once a forbidden path is detected");
+});
+
+test("handleTaskRequest fails closed on a forbidden filePath without any GitHub call", async () => {
+  let calls = 0;
+  const mockOctokit = {
+    rest: { repos: { get: async () => { calls++; return { data: { default_branch: "main" } }; } } },
+  } as unknown as Octokit;
+  const service = new SoftwareFactoryService({ githubToken: "token", octokitClient: mockOctokit });
+  const req: TaskRequest = {
+    schema_version: "1.0",
+    task_id: "task-guard-entry",
+    trace_id: "trace-guard-entry",
+    idempotency_key: "idemp-guard-entry",
+    capability: "software_development",
+    objective: "x",
+    context: { filePath: ".env", instructions: "x", exactContent: "y" },
+    constraints: [],
+    priority: "medium",
+    permissions: [],
+  };
+  const events = await service.handleTaskRequest(req);
+  const failed = events.find((e) => e.type === "TASK_FAILED");
+  assert.ok(failed, "TASK_FAILED doit être émis");
+  assert.match(String(failed?.payload.error_code), /SOFTWARE_DEVELOPMENT_TARGET_FORBIDDEN/);
+  assert.equal(calls, 0);
+});
+
+test("extractTaskParams fails closed with REPOSITORY_INVALID for an explicit but invalid repository (never falls back to the default repo)", () => {
+  for (const repository of ["invalid", "owner/repo/extra", "https://evil.example/owner/repo", "github.com/owner/repo/extra", ""]) {
+    const req: TaskRequest = {
+      schema_version: "1.0",
+      task_id: "task-bad-repo",
+      trace_id: "trace-bad-repo",
+      idempotency_key: "idemp-bad-repo",
+      capability: "software_development",
+      objective: "x",
+      context: { repository, filePath: "src/x.ts", instructions: "x" },
+      constraints: [],
+      priority: "medium",
+      permissions: [],
+    };
+    assert.throws(() => extractTaskParams(req), /REPOSITORY_INVALID/, `expected REPOSITORY_INVALID for: ${JSON.stringify(repository)}`);
+  }
+});
+
+test("extractTaskParams keeps the historical self-repository fallback when repository is absent entirely", () => {
+  const req: TaskRequest = {
+    schema_version: "1.0",
+    task_id: "task-absent-repo",
+    trace_id: "trace-absent-repo",
+    idempotency_key: "idemp-absent-repo",
+    capability: "software_development",
+    objective: "x",
+    context: { filePath: "src/x.ts", instructions: "x" },
+    constraints: [],
+    priority: "medium",
+    permissions: [],
+  };
+  const params = extractTaskParams(req);
+  assert.equal(params.owner, "artisanguillonrenov-creator");
+  assert.equal(params.repo, "Agent-autonome-socle-");
+});
+
+test("handleTaskRequest fails closed on an explicitly invalid repository without any GitHub call, never defaulting to the self repository", async () => {
+  let calls = 0;
+  const mockOctokit = {
+    rest: { repos: { get: async () => { calls++; return { data: { default_branch: "main" } }; } } },
+  } as unknown as Octokit;
+  const service = new SoftwareFactoryService({ githubToken: "token", octokitClient: mockOctokit });
+  const req: TaskRequest = {
+    schema_version: "1.0",
+    task_id: "task-bad-repo-e2e",
+    trace_id: "trace-bad-repo-e2e",
+    idempotency_key: "idemp-bad-repo-e2e",
+    capability: "software_development",
+    objective: "x",
+    context: { repository: "owner/repo/extra", filePath: "src/x.ts", instructions: "x" },
+    constraints: [],
+    priority: "medium",
+    permissions: [],
+  };
+  const events = await service.handleTaskRequest(req);
+  const failed = events.find((e) => e.type === "TASK_FAILED");
+  assert.ok(failed, "TASK_FAILED doit être émis");
+  assert.match(String(failed?.payload.error_code), /REPOSITORY_INVALID/);
+  assert.equal(calls, 0);
+});
+
+test("parseRepoUrl delegates to the single canonical parser and rejects host-confusion URLs", () => {
+  assert.deepEqual(parseRepoUrl("https://github.com/myorg/myrepo"), { owner: "myorg", repo: "myrepo" });
+  assert.equal(parseRepoUrl("https://evilgithub.com/owner/repo"), null);
+  assert.equal(parseRepoUrl("owner/repo/extra"), null);
+});
+
 test("TEST R — Serveur HTTP Software Factory POST /tasks", async () => {
   const previousFactoryToken = config.softwareFactory.token;
   const previousApiToken = config.api.token;

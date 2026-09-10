@@ -91,3 +91,76 @@ test("recursive schemas, public catalog and factory write allowlist remain prote
   await assert.rejects(service.executeWorkflow({ owner: "evil", repo: "repo", filePath: "x.ts", instructions: "x" }, "task"), /SOFTWARE_FACTORY_REPOSITORY_NOT_ALLOWED/); assert.equal(calls, 0);
   if (old === undefined) delete process.env.SOFTWARE_FACTORY_ALLOWED_REPOS; else process.env.SOFTWARE_FACTORY_ALLOWED_REPOS = old;
 });
+
+test("centralized parser rejects host-confusion and multi-segment paths the same way everywhere", () => {
+  for (const invalid of ["invalid", "owner/repo/extra", "https://not-github.example/owner/repo", "https://evilgithub.com/owner/repo", "github.com/owner/repo/extra", ""]) {
+    assert.throws(() => parseGitHubRepository(invalid), /REPOSITORY_INVALID/);
+  }
+  assert.deepEqual(parseGitHubRepository("git@github.com:acme/demo.git"), { owner: "acme", repo: "demo" });
+});
+
+test("secret redaction covers KEY=value, KEY: value, quoted key/value pairs and every listed key name", async () => {
+  const cases: Array<[string, string]> = [
+    ["TOKEN=super-secret-value", "super-secret-value"],
+    ["TOKEN: super-secret-value", "super-secret-value"],
+    ['"TOKEN": "super-secret-value"', "super-secret-value"],
+    ["'TOKEN': 'super-secret-value'", "super-secret-value"],
+    ['password="super-secret-value"', "super-secret-value"],
+    ['password: "super-secret-value"', "super-secret-value"],
+    ['"api_key": "super-secret-value"', "super-secret-value"],
+    ["client_secret=very-secret-value", "very-secret-value"],
+    ["clientSecret: very-secret-value", "very-secret-value"],
+    ["GITHUB_TOKEN=long-secret-value", "long-secret-value"],
+    ["GITHUB_TOKEN: long-secret-value", "long-secret-value"],
+    ['OPENROUTER_API_KEY = "very-secret-value"', "very-secret-value"],
+    ["access_token: super-secret-value", "super-secret-value"],
+    ["refresh_token=super-secret-value", "super-secret-value"],
+    ["authorization: super-secret-value", "super-secret-value"],
+  ];
+  for (const [line, secret] of cases) {
+    const reader = new GitHubRepositoryReader(fake({}, { diffPages: [[{ filename: "src/app.ts", patch: `+ ${line}` }]] }));
+    const commit = await reader.readCommit("acme/repo", "sha1");
+    assert.equal(commit.files[0].patch!.includes(secret), false, `expected redaction for: ${line}`);
+    assert.match(commit.files[0].patch!, /REDACTED/);
+  }
+});
+
+test("secret redaction avoids false positives on bare declarations and code references", async () => {
+  const safeLines = [
+    "const GITHUB_TOKEN = process.env.GITHUB_TOKEN",
+    "type Config = { api_key?: string }",
+    "if (!API_TOKEN) throw new Error('missing');",
+  ];
+  for (const line of safeLines) {
+    const reader = new GitHubRepositoryReader(fake({}, { diffPages: [[{ filename: "src/app.ts", patch: `+ ${line}` }]] }));
+    const commit = await reader.readCommit("acme/repo", "sha1");
+    assert.equal(commit.files[0].patch, `+ ${line}`, `did not expect redaction for: ${line}`);
+  }
+});
+
+test("private key blocks are fully redacted from diffs regardless of algorithm header", async () => {
+  for (const kind of ["RSA ", "OPENSSH ", "EC ", ""]) {
+    const key = `-----BEGIN ${kind}PRIVATE KEY-----\nMIIBogIBAAKCAQEA_body_that_must_never_leak\n-----END ${kind}PRIVATE KEY-----`;
+    const reader = new GitHubRepositoryReader(fake({}, { diffPages: [[{ filename: "src/app.ts", patch: `+ ${key}` }]] }));
+    const commit = await reader.readCommit("acme/repo", "sha1");
+    assert.equal(commit.files[0].patch!.includes("MIIBogIBAAKCAQEA_body_that_must_never_leak"), false);
+    assert.match(commit.files[0].patch!, /REDACTED: PRIVATE KEY/);
+  }
+});
+
+test("byte budget is truthful even when the remaining budget runs out before bytesRead reaches the cap", async () => {
+  const files: Record<string, string> = {};
+  for (let i = 0; i < 8; i++) files[`src/services/file${i}.ts`] = "TARGET_TERM_".padEnd(250000, "x");
+  files["src/services/file8.ts"] = "TARGET_TERM_".padEnd(200000, "y");
+  assert.ok(8 * 250000 < REPOSITORY_LIMITS.maxTotalBytes, "eight files alone must stay under the total byte budget");
+  assert.ok(8 * 250000 + 200000 > REPOSITORY_LIMITS.maxTotalBytes, "the ninth file must push the running total over budget");
+
+  const search = await new GitHubRepositoryReader(fake(files)).searchContent("acme/repo", "TARGET_TERM_");
+  assert.equal(search.truncated, true);
+  assert.equal(search.matches.some(match => match.path === "src/services/file8.ts"), false);
+
+  const audit = await new GitHubRepositoryReader(fake(files)).audit("acme/repo");
+  assert.equal(audit.limitsReached.bytes, true);
+  assert.equal(audit.inspectionSufficient, false);
+  assert.equal(audit.inspectedFiles.includes("src/services/file8.ts"), false);
+});
