@@ -118,6 +118,10 @@ function buildHeaders(rawHeaders: string[]): string[] {
   return rawHeaders.map((h, i) => (h ? h : `col_${i + 1}`));
 }
 
+function isValidNonNegativeInteger(v: number): boolean {
+  return typeof v === "number" && Number.isFinite(v) && Number.isInteger(v) && v >= 0;
+}
+
 function validateRequestedColumns(requestedColumns: string[], headers: string[]): void {
   for (const col of requestedColumns) {
     if (!headers.includes(col)) {
@@ -193,23 +197,33 @@ export class SpreadsheetEngine {
       const content = readFileSync(absolutePath, "utf-8");
       const iter = parseDelimitedRows(content, delimiter);
       const headerRes = iter.next();
-      const columns = buildHeaders(headerRes.done ? [] : headerRes.value);
+      const allColumns = buildHeaders(headerRes.done ? [] : headerRes.value);
+
+      let columns = allColumns;
+      if (columns.length > SPREADSHEET_LIMITS.maxColumnsPerRead) {
+        columns = columns.slice(0, SPREADSHEET_LIMITS.maxColumnsPerRead);
+        warnings.push(
+          `Inspection limited to the first ${SPREADSHEET_LIMITS.maxColumnsPerRead} columns; the sheet has more.`
+        );
+      }
+      const effectiveSampleRows = Math.min(
+        SPREADSHEET_LIMITS.maxInspectSampleRows,
+        Math.floor(SPREADSHEET_LIMITS.maxCellsPerRead / Math.max(1, columns.length))
+      );
 
       const sampled: string[][] = [];
       let rowCount = 0;
       for (const row of iter) {
-        if (sampled.length < SPREADSHEET_LIMITS.maxInspectSampleRows) {
+        if (sampled.length < effectiveSampleRows) {
           sampled.push(row);
         }
         rowCount++;
       }
 
-      if (rowCount > SPREADSHEET_LIMITS.maxInspectSampleRows) {
+      if (rowCount > effectiveSampleRows) {
+        warnings.push(`Type inference and statistics estimated from first ${effectiveSampleRows} rows.`);
         warnings.push(
-          `Type inference and statistics estimated from first ${SPREADSHEET_LIMITS.maxInspectSampleRows} rows.`
-        );
-        warnings.push(
-          `sampledEmptyCells reflects only the first ${SPREADSHEET_LIMITS.maxInspectSampleRows} rows, not the full sheet.`
+          `sampledEmptyCells reflects only the first ${effectiveSampleRows} rows, not the full sheet.`
         );
       }
 
@@ -228,7 +242,7 @@ export class SpreadsheetEngine {
         format,
         sheetNames: ["Sheet1"],
         rowCount,
-        columnCount: columns.length,
+        columnCount: allColumns.length,
         columns,
         inferredTypes: inferredTypes.types,
         sampledEmptyCells: inferredTypes.emptyCells,
@@ -239,6 +253,7 @@ export class SpreadsheetEngine {
 
     return this.withXlsxWorkbookReader(absolutePath, async (reader) => {
       const sheetNames: string[] = [];
+      let allColumns: string[] = [];
       let columns: string[] = [];
       let rowCount = 0;
       const inspectedRows: Record<string, unknown>[] = [];
@@ -254,8 +269,20 @@ export class SpreadsheetEngine {
           const headerRow = headerRes.done ? undefined : headerRes.value;
           const headerValues =
             headerRow && Array.isArray(headerRow.values) ? headerRow.values.slice(1) : [];
-          columns = headerValues.map((h: unknown, i: number) =>
+          allColumns = headerValues.map((h: unknown, i: number) =>
             h !== null && h !== undefined && String(h).trim() !== "" ? String(h) : `col_${i + 1}`
+          );
+
+          columns = allColumns;
+          if (columns.length > SPREADSHEET_LIMITS.maxColumnsPerRead) {
+            columns = columns.slice(0, SPREADSHEET_LIMITS.maxColumnsPerRead);
+            warnings.push(
+              `Inspection limited to the first ${SPREADSHEET_LIMITS.maxColumnsPerRead} columns; the sheet has more.`
+            );
+          }
+          const effectiveSampleRows = Math.min(
+            SPREADSHEET_LIMITS.maxInspectSampleRows,
+            Math.floor(SPREADSHEET_LIMITS.maxCellsPerRead / Math.max(1, columns.length))
           );
 
           let lastDataIndex = -1;
@@ -263,7 +290,7 @@ export class SpreadsheetEngine {
             const dataIndex = row.number - 2;
             if (dataIndex < 0) continue;
             lastDataIndex = Math.max(lastDataIndex, dataIndex);
-            if (dataIndex < SPREADSHEET_LIMITS.maxInspectSampleRows) {
+            if (dataIndex < effectiveSampleRows) {
               const rowObj: Record<string, unknown> = {};
               columns.forEach((col, cIdx) => {
                 rowObj[col] = this.extractCellValue(row.getCell(cIdx + 1).value);
@@ -272,6 +299,13 @@ export class SpreadsheetEngine {
             }
           }
           rowCount = lastDataIndex + 1;
+
+          if (rowCount > effectiveSampleRows) {
+            warnings.push(`Type inference and statistics estimated from first ${effectiveSampleRows} rows.`);
+            warnings.push(
+              `sampledEmptyCells reflects only the first ${effectiveSampleRows} rows, not the full sheet.`
+            );
+          }
         } else {
           // Drain remaining sheets (required to advance the underlying zip
           // stream) but discard their content — only sheet[0] is inspected.
@@ -285,15 +319,6 @@ export class SpreadsheetEngine {
         throw new Error(WORKBENCH_ERRORS.SPREADSHEET_FORMAT_UNSUPPORTED);
       }
 
-      if (rowCount > SPREADSHEET_LIMITS.maxInspectSampleRows) {
-        warnings.push(
-          `Type inference and statistics estimated from first ${SPREADSHEET_LIMITS.maxInspectSampleRows} rows.`
-        );
-        warnings.push(
-          `sampledEmptyCells reflects only the first ${SPREADSHEET_LIMITS.maxInspectSampleRows} rows, not the full sheet.`
-        );
-      }
-
       const inferredTypes = this.inferTypesFromRows(inspectedRows, columns);
 
       return {
@@ -301,7 +326,7 @@ export class SpreadsheetEngine {
         format,
         sheetNames,
         rowCount,
-        columnCount: columns.length,
+        columnCount: allColumns.length,
         columns,
         inferredTypes: inferredTypes.types,
         sampledEmptyCells: inferredTypes.emptyCells,
@@ -319,13 +344,14 @@ export class SpreadsheetEngine {
     );
 
     const format = this.detectFormat(cleanRel);
-    if (format === "csv" || format === "tsv") {
-      return ["Sheet1"];
-    }
 
     const stats = statSync(absolutePath);
     if (stats.size > SPREADSHEET_LIMITS.maxInputBytes) {
       throw new Error(WORKBENCH_ERRORS.SPREADSHEET_LIMIT_EXCEEDED);
+    }
+
+    if (format === "csv" || format === "tsv") {
+      return ["Sheet1"];
     }
 
     return this.withXlsxWorkbookReader(absolutePath, async (reader) => {
@@ -358,11 +384,22 @@ export class SpreadsheetEngine {
 
     const format = this.detectFormat(cleanRel);
 
-    const startRow = options.startRow ?? 0;
-    const desiredEndRow = options.endRow ?? Infinity;
-    if (startRow < 0 || desiredEndRow < startRow) {
+    // startRow/endRow come straight from the caller: a NaN or Infinity
+    // here would silently compare as false against every real row index
+    // (never throwing) and just return an empty, unexplained result.
+    if (options.startRow !== undefined && !isValidNonNegativeInteger(options.startRow)) {
       throw new Error(WORKBENCH_ERRORS.SPREADSHEET_RANGE_INVALID);
     }
+    const startRow = options.startRow ?? 0;
+
+    if (options.endRow !== undefined) {
+      if (!isValidNonNegativeInteger(options.endRow) || options.endRow < startRow) {
+        throw new Error(WORKBENCH_ERRORS.SPREADSHEET_RANGE_INVALID);
+      }
+    }
+    // Infinity is an internal "read to the end" sentinel, never a value a
+    // caller is allowed to pass in directly (rejected above).
+    const desiredEndRow = options.endRow ?? Infinity;
 
     if (format === "csv" || format === "tsv") {
       const delimiter = format === "csv" ? "," : "\t";
@@ -578,7 +615,12 @@ export class SpreadsheetEngine {
         } else if (typeof val === "boolean") {
           typeCounts[col].BOOLEAN++;
         } else if (typeof val === "number") {
-          if (Number.isInteger(val)) {
+          // A raw NaN/Infinity is never a genuine INTEGER/FLOAT value;
+          // classifying it as such would let non-finite numbers leak into
+          // downstream numeric-type assumptions.
+          if (!Number.isFinite(val)) {
+            typeCounts[col].STRING++;
+          } else if (Number.isInteger(val)) {
             typeCounts[col].INTEGER++;
           } else {
             typeCounts[col].FLOAT++;
@@ -587,8 +629,9 @@ export class SpreadsheetEngine {
           typeCounts[col].DATE++;
         } else if (typeof val === "string") {
           const trimmed = val.trim();
-          if (!isNaN(Number(trimmed)) && trimmed !== "") {
-            if (Number.isInteger(Number(trimmed))) {
+          const asNum = Number(trimmed);
+          if (trimmed !== "" && Number.isFinite(asNum)) {
+            if (Number.isInteger(asNum)) {
               typeCounts[col].INTEGER++;
             } else {
               typeCounts[col].FLOAT++;
@@ -747,16 +790,19 @@ export class SpreadsheetEngine {
   private calcAggregate(vals: unknown[], fn: AggregateFunction): number {
     if (fn === "COUNT") return vals.length;
 
-    const validNums = vals
-      .filter(
-        (v) =>
-          v !== null &&
-          v !== undefined &&
-          v !== "" &&
-          typeof v !== "boolean" &&
-          !isNaN(Number(v))
-      )
-      .map((v) => Number(v));
+    const validNums: number[] = [];
+    for (const v of vals) {
+      if (v === null || v === undefined || v === "" || typeof v === "boolean") continue;
+      const n = Number(v);
+      // A value that claims to be numeric but is NaN/Infinity/-Infinity
+      // (including those spellings as strings) must not silently
+      // contaminate SUM/MEAN/MIN/MAX with a non-finite result.
+      if (Number.isFinite(n)) {
+        validNums.push(n);
+      } else {
+        throw new Error(WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED);
+      }
+    }
 
     if (validNums.length === 0) return 0;
 

@@ -71,15 +71,23 @@ export class DataAnalysisEngine {
 
       for (const v of nonNullVals) {
         if (typeof v === "number") {
-          numericVals.push(v);
+          // A raw NaN/Infinity is never a usable numeric value for
+          // aggregation; treat it as opaque text rather than contaminate
+          // min/max/mean/stddev with a non-finite result.
+          if (Number.isFinite(v)) {
+            numericVals.push(v);
+          } else {
+            strVals.push(String(v));
+          }
         } else if (typeof v === "boolean") {
           strVals.push(String(v));
         } else if (v instanceof Date) {
           dateVals.push(v);
         } else if (typeof v === "string") {
           const trimmed = v.trim();
-          if (!isNaN(Number(trimmed)) && trimmed !== "") {
-            numericVals.push(Number(trimmed));
+          const asNum = Number(trimmed);
+          if (trimmed !== "" && Number.isFinite(asNum)) {
+            numericVals.push(asNum);
           } else {
             const parsedTs = Date.parse(trimmed);
             if (!isNaN(parsedTs) && trimmed.length >= 8 && (trimmed.includes("-") || trimmed.includes("/"))) {
@@ -179,7 +187,11 @@ export class DataAnalysisEngine {
       const v = r[column];
       if (v !== null && v !== undefined && v !== "" && typeof v !== "boolean") {
         const n = Number(v);
-        if (!isNaN(n)) nums.push(n);
+        // Number.isFinite rejects NaN, Infinity, -Infinity and their
+        // string spellings ("NaN", "Infinity", "-Infinity") alike: a
+        // value that claims to be numeric but isn't finite is unusable
+        // for aggregation, not silently ignorable.
+        if (Number.isFinite(n)) nums.push(n);
         else throw new Error(WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED);
       }
     }
@@ -305,7 +317,11 @@ export class DataAnalysisEngine {
 
       const valA = Number(rawA);
       const valB = Number(rawB);
-      if (!isNaN(valA) && !isNaN(valB)) return valB - valA;
+      // A value that merely looks numeric ("Infinity", "NaN") but isn't
+      // finite must not be treated as comparable-as-a-number: fall back
+      // to the string comparison branch instead of ranking it as an
+      // extreme value.
+      if (Number.isFinite(valA) && Number.isFinite(valB)) return valB - valA;
       return String(rawB).localeCompare(String(rawA));
     });
 
@@ -346,7 +362,9 @@ export class DataAnalysisEngine {
 
       const valA = Number(rawA);
       const valB = Number(rawB);
-      if (!isNaN(valA) && !isNaN(valB)) return valA - valB;
+      // See topN: non-finite numeric-looking values fall back to string
+      // comparison instead of being ranked as extreme numbers.
+      if (Number.isFinite(valA) && Number.isFinite(valB)) return valA - valB;
       return String(rawA).localeCompare(String(rawB));
     });
 
@@ -467,7 +485,10 @@ export class DataAnalysisEngine {
       const val = r[column];
       if (val !== null && val !== undefined && val !== "" && typeof val !== "boolean") {
         const num = Number(val);
-        if (!isNaN(num)) {
+        // Excluding non-finite values here (rather than just NaN) keeps
+        // "Infinity"/"-Infinity" from silently becoming the reported
+        // min/max/quartile bounds.
+        if (Number.isFinite(num)) {
           numericVals.push(num);
         }
       }
@@ -538,7 +559,7 @@ export class DataAnalysisEngine {
       ) {
         const numA = Number(valA);
         const numB = Number(valB);
-        if (!isNaN(numA) && !isNaN(numB)) {
+        if (Number.isFinite(numA) && Number.isFinite(numB)) {
           pairs.push([numA, numB]);
         } else {
           throw new Error(WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED);
@@ -626,7 +647,7 @@ export class DataAnalysisEngine {
         const rawVal = r[valueColumn];
         if (rawVal !== null && rawVal !== undefined && rawVal !== "" && typeof rawVal !== "boolean") {
           const val = Number(rawVal);
-          if (!isNaN(val) && isFinite(val)) {
+          if (Number.isFinite(val)) {
             groups.get(key)!.push(val);
           } else {
             throw new Error(WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED);

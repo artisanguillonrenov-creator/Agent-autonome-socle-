@@ -181,6 +181,112 @@ test("DATA ANALYSIS BOUNDS & COUNT_NON_NULL VALIDATION: timeSeries, groupBy, dis
   assert.equal(tsRes.truncated, true);
 });
 
+test("NON-FINITE NUMBER REJECTION: DataAnalysisEngine never treats NaN/Infinity as a usable numeric value", () => {
+  const engine = new DataAnalysisEngine();
+  const nonFiniteValues = [NaN, Infinity, -Infinity, "Infinity", "-Infinity", "NaN"];
+
+  for (const bad of nonFiniteValues) {
+    const rows = [{ n: 1 }, { n: 2 }, { n: bad }];
+    for (const op of ["sum", "mean", "median", "min", "max", "stddev"] as const) {
+      assert.throws(
+        () => (engine as any)[op](rows, "n"),
+        (err: any) => err.message === WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED,
+        `${op} should reject non-finite value ${String(bad)}`
+      );
+    }
+
+    assert.throws(
+      () => engine.correlation(rows, "n", "n"),
+      (err: any) => err.message === WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED,
+      `correlation should reject non-finite value ${String(bad)}`
+    );
+  }
+
+  // groupBy numeric aggregation inherits the same rejection via sum/mean/min/max.
+  const groupRows = [
+    { g: "a", n: 1 },
+    { g: "a", n: Infinity }
+  ];
+  assert.throws(
+    () => engine.groupBy(groupRows, "g", "n", "SUM"),
+    (err: any) => err.message === WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED
+  );
+
+  // describe() is a lenient summarizer: non-finite values must never leak
+  // into numeric statistics, but describe() itself should not throw.
+  const describeRows = [{ n: "1" }, { n: "2" }, { n: "3" }, { n: "Infinity" }];
+  const described = engine.describe(describeRows);
+  if (described.numericColumns.n) {
+    assert.ok(Number.isFinite(described.numericColumns.n.max));
+    assert.notEqual(described.numericColumns.n.max, Infinity);
+  }
+
+  // outliers() silently excludes junk rather than throwing; must never
+  // report a non-finite bound.
+  const outlierRows = [{ n: 1 }, { n: 2 }, { n: 3 }, { n: 4 }, { n: "Infinity" }];
+  const outlierRes = engine.outliers(outlierRows, "n");
+  assert.ok(Number.isFinite(outlierRes.q1));
+  assert.ok(Number.isFinite(outlierRes.q3));
+  assert.ok(Number.isFinite(outlierRes.lowerBound));
+  assert.ok(Number.isFinite(outlierRes.upperBound));
+
+  // Ordinary numeric ranking must be unaffected by the finite check.
+  const allNumericRows = [{ n: "5" }, { n: "30" }, { n: "2" }];
+  const topAllNumeric = engine.topN(allNumericRows, "n", 3);
+  assert.deepEqual(
+    topAllNumeric.rows.map((r) => r.n),
+    ["30", "5", "2"]
+  );
+  const bottomAllNumeric = engine.bottomN(allNumericRows, "n", 3);
+  assert.deepEqual(
+    bottomAllNumeric.rows.map((r) => r.n),
+    ["2", "5", "30"]
+  );
+
+  // Before the fix, "Infinity" parsed as a numeric value and the pairwise
+  // comparison `numA - numB` would treat it as always greater than any
+  // real number (e.g. Infinity > 30). It must not crash or numerically
+  // outrank real values now that it falls back to string comparison.
+  const mixedRows = [...allNumericRows, { n: "Infinity" }];
+  assert.doesNotThrow(() => engine.topN(mixedRows, "n", 4));
+  assert.doesNotThrow(() => engine.bottomN(mixedRows, "n", 4));
+});
+
+test("NON-FINITE NUMBER REJECTION: SpreadsheetEngine aggregate and type inference never produce NaN/Infinity", async () => {
+  const { workspaceStore, workspace } = setupTestEnvironment();
+  const engine = new SpreadsheetEngine(workspaceStore);
+
+  for (const bad of ["Infinity", "-Infinity", "NaN"]) {
+    assert.throws(
+      () => engine.aggregate([{ n: 1 }, { n: 2 }, { n: bad }], { function: "SUM", valueColumn: "n" }),
+      (err: any) => err.message === WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED,
+      `SUM should reject ${bad}`
+    );
+    assert.throws(
+      () => engine.aggregate([{ n: 1 }, { n: 2 }, { n: bad }], { function: "MEAN", valueColumn: "n" }),
+      (err: any) => err.message === WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED,
+      `MEAN should reject ${bad}`
+    );
+    assert.throws(
+      () => engine.aggregate([{ n: 1 }, { n: 2 }, { n: bad }], { function: "MIN", valueColumn: "n" }),
+      (err: any) => err.message === WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED,
+      `MIN should reject ${bad}`
+    );
+    assert.throws(
+      () => engine.aggregate([{ n: 1 }, { n: 2 }, { n: bad }], { function: "MAX", valueColumn: "n" }),
+      (err: any) => err.message === WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED,
+      `MAX should reject ${bad}`
+    );
+  }
+
+  workspaceStore.writeFile(workspace.id, "nonfinite.csv", "id,val\n1,1\n2,Infinity\n3,3");
+  const inspected = await engine.inspect(workspace.id, "nonfinite.csv");
+  assert.notEqual(inspected.inferredTypes.val, "INTEGER");
+  assert.notEqual(inspected.inferredTypes.val, "FLOAT");
+
+  cleanupTestEnvironment();
+});
+
 test("DATABASE SECURITY KEYWORDS & ITERATOR BOUNDS: Explicit SQL mutation keyword rejections & exactly 1000 rows", () => {
   const { workspaceStore, workspace } = setupTestEnvironment();
   const dbEngine = new DatabaseQueryEngine(workspaceStore);
@@ -398,6 +504,82 @@ test("XLSX MAXCOLUMNS BOUND: >200 columns capped at 200 with truncated=true", as
   cleanupTestEnvironment();
 });
 
+test("INSPECT COLUMNS BOUNDED (CSV): >200 columns capped, sample-row cap still uses the capped column count", async () => {
+  const { workspaceStore, workspace } = setupTestEnvironment();
+  const engine = new SpreadsheetEngine(workspaceStore);
+
+  const COLS = 600;
+  const ROWS = 700;
+  const headers = Array.from({ length: COLS }, (_, i) => `c_${i + 1}`);
+  const dataLine = headers.map(() => "1").join(",");
+  const lines = [headers.join(",")];
+  for (let i = 0; i < ROWS; i++) lines.push(dataLine);
+  workspaceStore.writeFile(workspace.id, "wide_inspect.csv", lines.join("\n"));
+
+  const result = await engine.inspect(workspace.id, "wide_inspect.csv");
+
+  assert.equal(result.columnCount, COLS); // real detected total
+  assert.equal(result.columns.length, SPREADSHEET_LIMITS.maxColumnsPerRead); // bounded to 200
+  assert.equal(result.rowCount, ROWS);
+  assert.ok(Object.keys(result.inferredTypes).length <= SPREADSHEET_LIMITS.maxColumnsPerRead);
+  assert.ok(result.sampleRows.every((r) => Object.keys(r).length <= SPREADSHEET_LIMITS.maxColumnsPerRead));
+  assert.ok(result.warnings.some((w) => w.includes("columns")));
+  assert.ok(result.warnings.some((w) => w.toLowerCase().includes("sample") || w.includes("500")));
+
+  cleanupTestEnvironment();
+});
+
+test("INSPECT COLUMNS BOUNDED (XLSX): >200 columns capped for inspection sampling", async () => {
+  const { workspaceStore, workspace } = setupTestEnvironment();
+  const engine = new SpreadsheetEngine(workspaceStore);
+
+  const COLS = 300;
+  const ROWS = 600;
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("Sheet1");
+  const headers = Array.from({ length: COLS }, (_, i) => `c_${i + 1}`);
+  ws.addRow(headers);
+  for (let i = 0; i < ROWS; i++) {
+    ws.addRow(headers.map(() => 1));
+  }
+  const buf = Buffer.from(await wb.xlsx.writeBuffer());
+  workspaceStore.writeFile(workspace.id, "wide_inspect.xlsx", buf);
+
+  const result = await engine.inspect(workspace.id, "wide_inspect.xlsx");
+
+  assert.equal(result.columnCount, COLS);
+  assert.equal(result.columns.length, SPREADSHEET_LIMITS.maxColumnsPerRead);
+  assert.equal(result.rowCount, ROWS);
+  assert.ok(Object.keys(result.inferredTypes).length <= SPREADSHEET_LIMITS.maxColumnsPerRead);
+  assert.ok(result.warnings.some((w) => w.includes("columns")));
+
+  cleanupTestEnvironment();
+});
+
+test("INSPECT CELLS BOUNDED: sample-row count never lets sampled columns x rows exceed maxCellsPerRead", async () => {
+  const { workspaceStore, workspace } = setupTestEnvironment();
+  const engine = new SpreadsheetEngine(workspaceStore);
+
+  // 200 columns (at the column cap) x 501 rows: naive floor(250000/200)=1250
+  // would wrongly allow all rows; the 500-row inspection cap must still win.
+  const COLS = 200;
+  const ROWS = 501;
+  const headers = Array.from({ length: COLS }, (_, i) => `c_${i + 1}`);
+  const dataLine = headers.map(() => "1").join(",");
+  const lines = [headers.join(",")];
+  for (let i = 0; i < ROWS; i++) lines.push(dataLine);
+  workspaceStore.writeFile(workspace.id, "cells_inspect.csv", lines.join("\n"));
+
+  const result = await engine.inspect(workspace.id, "cells_inspect.csv");
+
+  assert.equal(result.columns.length, COLS);
+  assert.equal(result.rowCount, ROWS);
+  assert.ok(result.sampleRows.length <= 5);
+  assert.ok(result.warnings.some((w) => w.toLowerCase().includes("sample") || w.includes("500")));
+
+  cleanupTestEnvironment();
+});
+
 test("XLSX FORMULA CELLS: cached result exposed, never executed/evaluated by Jarvis", async () => {
   const { workspaceStore, workspace } = setupTestEnvironment();
   const engine = new SpreadsheetEngine(workspaceStore);
@@ -454,7 +636,7 @@ test("XLS FORMAT REJECTED: legacy binary .xls is never claimed as supported", as
   cleanupTestEnvironment();
 });
 
-test("LISTSHEETS INPUT LIMIT: oversized XLSX rejected before hitting the WorkbookReader", async () => {
+test("LISTSHEETS INPUT LIMIT: oversized files rejected before any parsing, for every format", async () => {
   // The default WorkspaceStore file-size cap (10 MB) is smaller than the
   // spreadsheet input limit (25 MB), so this test needs its own store with
   // a higher cap to actually exercise SPREADSHEET_LIMIT_EXCEEDED rather
@@ -475,15 +657,23 @@ test("LISTSHEETS INPUT LIMIT: oversized XLSX rejected before hitting the Workboo
   });
   const engine = new SpreadsheetEngine(workspaceStore);
 
-  // A valid XLSX header is not required: the size check must happen before
-  // any parsing is attempted, so an oversized garbage buffer is sufficient.
+  // A valid XLSX/CSV/TSV body is not required: the size check must happen
+  // before any parsing (or the CSV/TSV short-circuit) is attempted, so an
+  // oversized garbage buffer is sufficient for every format. Files are
+  // written and removed one at a time: the workspace's own total-bytes
+  // budget only has room for one oversized file at once.
   const oversized = Buffer.alloc(SPREADSHEET_LIMITS.maxInputBytes + 1, 1);
-  workspaceStore.writeFile(workspace.id, "oversized.xlsx", oversized);
 
-  await assert.rejects(
-    () => engine.listSheets(workspace.id, "oversized.xlsx"),
-    (err: any) => err.message === WORKBENCH_ERRORS.SPREADSHEET_LIMIT_EXCEEDED
-  );
+  for (const ext of ["xlsx", "csv", "tsv"]) {
+    const relPath = `oversized.${ext}`;
+    workspaceStore.writeFile(workspace.id, relPath, oversized);
+    await assert.rejects(
+      () => engine.listSheets(workspace.id, relPath),
+      (err: any) => err.message === WORKBENCH_ERRORS.SPREADSHEET_LIMIT_EXCEEDED,
+      `listSheets should reject an oversized .${ext} file`
+    );
+    rmSync(resolve(TEST_WORKSPACES_ROOT, workspace.id, relPath), { force: true });
+  }
 
   cleanupTestEnvironment();
 });
@@ -498,6 +688,44 @@ test("SPREADSHEET COLUMN VALIDATION: unknown requested column raises a stable er
     () => engine.readRange(workspace.id, "cols.csv", { columns: ["id", "does_not_exist"] }),
     (err: any) => err.message === WORKBENCH_ERRORS.SPREADSHEET_RANGE_INVALID
   );
+
+  cleanupTestEnvironment();
+});
+
+test("SPREADSHEET RANGE VALIDATION: startRow/endRow reject NaN, Infinity, non-integers, and negatives", async () => {
+  const { workspaceStore, workspace } = setupTestEnvironment();
+  const engine = new SpreadsheetEngine(workspaceStore);
+
+  workspaceStore.writeFile(workspace.id, "range.csv", "id,name\n1,Alice\n2,Bob\n3,Carol");
+
+  const invalidStartRows = [NaN, Infinity, -Infinity, 1.5, -1];
+  for (const bad of invalidStartRows) {
+    await assert.rejects(
+      () => engine.readRange(workspace.id, "range.csv", { startRow: bad }),
+      (err: any) => err.message === WORKBENCH_ERRORS.SPREADSHEET_RANGE_INVALID,
+      `startRow=${bad} should be rejected`
+    );
+  }
+
+  const invalidEndRows = [NaN, Infinity, -Infinity, 1.5, -1];
+  for (const bad of invalidEndRows) {
+    await assert.rejects(
+      () => engine.readRange(workspace.id, "range.csv", { startRow: 0, endRow: bad }),
+      (err: any) => err.message === WORKBENCH_ERRORS.SPREADSHEET_RANGE_INVALID,
+      `endRow=${bad} should be rejected`
+    );
+  }
+
+  // endRow < startRow remains invalid.
+  await assert.rejects(
+    () => engine.readRange(workspace.id, "range.csv", { startRow: 2, endRow: 1 }),
+    (err: any) => err.message === WORKBENCH_ERRORS.SPREADSHEET_RANGE_INVALID
+  );
+
+  // Valid bounds still work normally.
+  const valid = await engine.readRange(workspace.id, "range.csv", { startRow: 1, endRow: 3 });
+  assert.equal(valid.rows.length, 2);
+  assert.equal(valid.rows[0].id, "2");
 
   cleanupTestEnvironment();
 });
