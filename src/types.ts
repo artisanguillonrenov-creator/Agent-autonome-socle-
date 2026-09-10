@@ -23,8 +23,8 @@ export interface ChatMessage {
 export interface MemoryEntry {
   id: string;
   text: string;
-  /** "episodic" (événement brut) | "reflection" (enseignement de haut niveau) */
-  kind: "episodic" | "reflection";
+  /** "episodic" (événement brut) | "reflection" (enseignement de haut niveau) | "knowledge" (chunk indexé RAG projet) */
+  kind: "episodic" | "reflection" | "knowledge";
   createdAt: number;
   embedding: number[];
 }

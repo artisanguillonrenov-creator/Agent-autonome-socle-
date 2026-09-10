@@ -15,7 +15,8 @@ import { WorkspaceStore } from "../workspaces/workspaceStore.js";
 import { ArtifactStore } from "../workspaces/artifactStore.js";
 import { ObservabilityStore } from "../observability/observabilityStore.js";
 import { ActivityStore } from "../observability/activityStore.js";
-import { SETTINGS_CATALOG, SETTINGS_SECTIONS } from "../settings/catalog.js";
+import { SETTINGS_CATALOG } from "../settings/catalog.js";
+import { localizedSettingsSections } from "../i18n/sections.js";
 import { SettingsStore, SettingScopeType } from "../settings/store.js";
 import { applyAllEffectiveRuntimeSettings } from "../settings/applier.js";
 import { getDb } from "../persistence/db.js";
@@ -317,25 +318,6 @@ function redactSecrets(message: string): string {
   return redacted.length > 500 ? `${redacted.slice(0, 500)}…` : redacted;
 }
 
-function applyRuntimeSettingEffect(key: string, value: unknown, agent: Agent): void {
-  if (key === "intelligence.skillSelectorMax" && typeof value === "number") {
-    config.skills.selectorMax = value;
-    (agent.skillSelector as any).maxSkills = value;
-  } else if (key === "autonomy.maxIterations" && typeof value === "number") {
-    config.agent.maxIterations = value;
-  } else if (key === "skills.reflectionEveryNSteps" && typeof value === "number") {
-    config.reflection.everyNSteps = value;
-  } else if (key === "automations.backgroundMaxConcurrent" && typeof value === "number") {
-    config.background.maxConcurrent = value;
-  } else if (key === "system.tokenBudget" && typeof value === "number") {
-    config.context.tokenBudget = value;
-  } else if (key === "projects.workspaceMaxFileBytes" && typeof value === "number") {
-    config.workspace.maxFileBytes = value;
-  } else if (key === "projects.workspaceMaxTotalBytes" && typeof value === "number") {
-    config.workspace.maxTotalBytes = value;
-  }
-}
-
 /**
  * Façade HTTP du Jarvis Command Center.
  */
@@ -484,13 +466,13 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
 
       // 2. Chat & Streaming Chat Endpoints
       if (req.method === "POST" && (pathname === "/chat" || pathname === "/api/chat")) {
-        const body = JSON.parse((await readBody(req)) || "{}") as { message?: string };
+        const body = JSON.parse((await readBody(req)) || "{}") as { message?: string; workspaceId?: string };
         const message = (body.message ?? "").trim();
         if (!message) {
           sendJson(res, 400, { error: "message requis" });
           return;
         }
-        const result = await agent.step(message);
+        const result = await agent.step(message, typeof body.workspaceId === "string" && body.workspaceId.trim() ? body.workspaceId.trim() : undefined);
         sendJson(res, 200, result);
         return;
       }
@@ -526,7 +508,8 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         res.write(`data: ${JSON.stringify({ type: "thought", content: "Analyse de la demande en cours..." })}\n\n`);
 
         try {
-          const result = await agent.step(queryMsg.trim());
+          const streamWorkspaceId = parsedUrl.searchParams.get("workspaceId") || undefined;
+          const result = await agent.step(queryMsg.trim(), streamWorkspaceId);
           res.write(`data: ${JSON.stringify({ type: "answer", content: result.response, iterations: result.iterations })}\n\n`);
           res.write(`data: [DONE]\n\n`);
           res.end();
@@ -539,9 +522,12 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
 
       // 3. Settings Endpoints
       if (req.method === "GET" && pathname === "/api/settings/schema") {
+        // settings.language : sections localisées quand la langue effective est "en" —
+        // effet réel de ce réglage sur l'IHM, au-delà de la langue de restitution du chat.
         sendJson(res, 200, {
-          sections: SETTINGS_SECTIONS,
+          sections: localizedSettingsSections(config.locale.language),
           catalog: SETTINGS_CATALOG,
+          language: config.locale.language,
         });
         return;
       }
@@ -577,6 +563,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
             capabilitiesJson: o.capabilitiesJson,
             parallelSafeCapabilitiesJson: o.parallelSafeCapabilitiesJson,
             riskByCapabilityJson: o.riskByCapabilityJson,
+            permissionByCapabilityJson: o.permissionByCapabilityJson,
           })),
         });
         return;
@@ -658,6 +645,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
                   if (o.capabilitiesJson) patchObj.capabilities = JSON.parse(o.capabilitiesJson);
                   if (o.parallelSafeCapabilitiesJson) patchObj.parallelSafeCapabilities = JSON.parse(o.parallelSafeCapabilitiesJson);
                   if (o.riskByCapabilityJson) patchObj.riskByCapability = JSON.parse(o.riskByCapabilityJson);
+                  if (o.permissionByCapabilityJson) patchObj.permissionByCapability = JSON.parse(o.permissionByCapabilityJson);
 
                   agent.serviceOrchestrator.registry.patchService(serviceId, patchObj);
                 } else {
@@ -676,11 +664,15 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
                     taskPath: o.taskPath || "/tasks",
                     auth: o.authTypeOverride === "bearer_env" ? { type: "bearer_env", envVar: o.authEnvVar || "API_TOKEN" } : { type: "none" },
                     priority: o.priorityOverride ?? 10,
-                    requestTimeoutMs: o.requestTimeoutMs ?? 120000,
-                    healthTimeoutMs: o.healthTimeoutMs ?? 5000,
+                    // Pas de défaut littéral ici : un service importé sans timeout explicite
+                    // retombe dynamiquement sur connections.requestTimeoutMs/healthTimeoutMs
+                    // (voir ServiceAdapter), qui reste réellement modifiable après import.
+                    requestTimeoutMs: o.requestTimeoutMs,
+                    healthTimeoutMs: o.healthTimeoutMs,
                     capabilities: o.capabilitiesJson ? JSON.parse(o.capabilitiesJson) : [],
                     parallelSafeCapabilities: o.parallelSafeCapabilitiesJson ? JSON.parse(o.parallelSafeCapabilitiesJson) : [],
                     riskByCapability: o.riskByCapabilityJson ? JSON.parse(o.riskByCapabilityJson) : {},
+                    permissionByCapability: o.permissionByCapabilityJson ? JSON.parse(o.permissionByCapabilityJson) : {},
                   });
                 }
               }
@@ -724,11 +716,9 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         try {
           if (typeof body.key === "string") {
             settingsStore.setSetting(body.key, body.value, scopeType, scopeId);
-            applyRuntimeSettingEffect(body.key, body.value, agent);
           } else if (body.settings && typeof body.settings === "object") {
             for (const [k, v] of Object.entries(body.settings)) {
               settingsStore.setSetting(k, v, scopeType, scopeId);
-              applyRuntimeSettingEffect(k, v, agent);
             }
           } else {
             // Legacy backwards-compatibility payload { tokenBudget, maxIterations, reflectionEveryNSteps }
@@ -787,6 +777,35 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         return;
       }
 
+      // intelligence.toolCompatibilityTest : teste le tool calling structuré sur le
+      // modèle/provider RÉELLEMENT actif (jamais un provider arbitraire fourni par le
+      // client) — même mécanisme de compatibilité que /api/models/test (dont Infermatic,
+      // qui peut retomber sur le protocole texte de compatibilité). Ne modifie jamais le
+      // modèle actif : lecture seule.
+      if (req.method === "POST" && pathname === "/api/settings/tool-compatibility-test") {
+        try {
+          const activeProvider = agent.getLLMProvider();
+          const probe = await testJarvisCompatibility(activeProvider, config.llm.provider);
+          sendJson(res, 200, {
+            ok: true,
+            provider: config.llm.provider,
+            model: config.llm.model,
+            compatibility: probe.level,
+            toolCallingSupported: probe.level === "JARVIS_TOOL_COMPATIBLE" || config.llm.provider !== "infermatic",
+            responsePreview: probe.responsePreview,
+          });
+        } catch (err) {
+          sendJson(res, 200, {
+            ok: false,
+            provider: config.llm.provider,
+            model: config.llm.model,
+            toolCallingSupported: false,
+            error: redactSecrets((err as Error).message),
+          });
+        }
+        return;
+      }
+
       // 4. Service Connection Center Endpoints
       if (req.method === "GET" && pathname === "/api/connections") {
         const services = agent.serviceOrchestrator.registry.listServices();
@@ -807,11 +826,12 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
               healthPath: s.healthPath || "/health",
               taskPath: s.taskPath || "/tasks",
               priority: s.priority,
-              requestTimeoutMs: s.requestTimeoutMs || 120000,
-              healthTimeoutMs: s.healthTimeoutMs || 5000,
+              requestTimeoutMs: s.requestTimeoutMs || config.connections.requestTimeoutMs,
+              healthTimeoutMs: s.healthTimeoutMs || config.connections.healthTimeoutMs,
               capabilities: s.capabilities,
               parallelSafeCapabilities: s.parallelSafeCapabilities || [],
               riskByCapability: s.riskByCapability || {},
+              permissionByCapability: s.permissionByCapability || {},
               source: s.source || "FACTORY",
               auth: {
                 type: s.auth.type,
@@ -869,11 +889,12 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
             healthPath: service.healthPath || "/health",
             taskPath: service.taskPath || "/tasks",
             priority: service.priority,
-            requestTimeoutMs: service.requestTimeoutMs || 120000,
-            healthTimeoutMs: service.healthTimeoutMs || 5000,
+            requestTimeoutMs: service.requestTimeoutMs || config.connections.requestTimeoutMs,
+            healthTimeoutMs: service.healthTimeoutMs || config.connections.healthTimeoutMs,
             capabilities: service.capabilities,
             parallelSafeCapabilities: service.parallelSafeCapabilities || [],
             riskByCapability: service.riskByCapability || {},
+            permissionByCapability: service.permissionByCapability || {},
             source: service.source || "FACTORY",
             auth: {
               type: service.auth.type,
@@ -978,12 +999,15 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
             healthPath: body.healthPath || "/health",
             taskPath: body.taskPath || "/tasks",
             priority: body.priority ?? 10,
-            requestTimeoutMs: body.requestTimeoutMs ?? 120000,
-            healthTimeoutMs: body.healthTimeoutMs ?? 5000,
+            // Pas de défaut littéral ici : retombe dynamiquement sur
+            // connections.requestTimeoutMs/healthTimeoutMs quand non fourni.
+            requestTimeoutMs: body.requestTimeoutMs,
+            healthTimeoutMs: body.healthTimeoutMs,
             auth: body.auth || { type: "none" },
             capabilities: body.capabilities || [],
             parallelSafeCapabilities: body.parallelSafeCapabilities || [],
             riskByCapability: body.riskByCapability || {},
+            permissionByCapability: body.permissionByCapability || {},
           };
 
           agent.serviceOrchestrator.registry.register(newDef);

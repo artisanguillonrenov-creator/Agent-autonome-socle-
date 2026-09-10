@@ -7,6 +7,9 @@ import { startHttpApi } from "./interfaces/httpApi.js";
 import { config } from "./config.js";
 import { BackgroundRunner } from "./autonomy/backgroundRunner.js";
 import { Scheduler } from "./autonomy/scheduler.js";
+import { applyAllEffectiveRuntimeSettings } from "./settings/applier.js";
+import { runStartupHealthChecks } from "./connections/startupHealthCheck.js";
+import { MemoryRetentionScheduler } from "./memory/retentionSweeper.js";
 
 async function main(): Promise<void> {
   // Au démarrage, on fige la sélection active (options explicites > persistance > défaut)
@@ -24,6 +27,22 @@ async function main(): Promise<void> {
     agent.skills.register(skill);
   }
 
+  // Applique les réglages persistés au runtime AVANT tout autre démarrage — chemin unique
+  // (voir applier.ts), qu'on tourne en HTTP, en CLI ou les deux, pour que les réglages
+  // restent réellement effectifs après un redémarrage quel que soit le mode d'interface.
+  applyAllEffectiveRuntimeSettings(agent);
+
+  // connections.autoTestOnStartup : health check réel de tous les services activés.
+  if (config.connections.autoTestOnStartup) {
+    runStartupHealthChecks(agent.serviceOrchestrator).catch((err) => {
+      console.error("[Startup] Health check échoué:", err);
+    });
+  }
+
+  // projects.memoryRetentionDays : purge périodique des souvenirs episodic expirés.
+  const retentionScheduler = new MemoryRetentionScheduler(() => config.projects.memoryRetentionDays);
+  retentionScheduler.start();
+
   const modes = new Set(config.interface.modes);
 
   if (modes.has("http")) {
@@ -31,7 +50,7 @@ async function main(): Promise<void> {
     const scheduler=new Scheduler(agent.serviceOrchestrator);
     backgroundRunner.start(); scheduler.start(); agent.planRunner.start();
     const server=startHttpApi(agent, config.api.port);
-    const shutdown=()=>{backgroundRunner.stop();scheduler.stop();agent.planRunner.stop();server.close();};
+    const shutdown=()=>{backgroundRunner.stop();scheduler.stop();agent.planRunner.stop();retentionScheduler.stop();server.close();};
     process.once("SIGTERM",shutdown);process.once("SIGINT",shutdown);
   }
 

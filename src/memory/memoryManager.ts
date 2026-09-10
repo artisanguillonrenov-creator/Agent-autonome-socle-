@@ -29,15 +29,16 @@ export class MemoryManager {
     this.userModel = new UserModel();
   }
 
-  async recordTurn(message: ChatMessage): Promise<void> {
+  /** `workspaceId` : projet actif (projects.projectIsolation) — voir VectorMemory.add/search. */
+  async recordTurn(message: ChatMessage, workspaceId?: string): Promise<void> {
     this.working.add(message);
     if (typeof message.content === "string" && message.content.trim().length > 0) {
-      await this.vector.add(`${message.role}: ${message.content}`, "episodic");
+      await this.vector.add(`${message.role}: ${message.content}`, "episodic", { workspaceId });
     }
   }
 
-  async retrieve(query: string, topK = 5): Promise<RetrievedContext> {
-    const relevantMemories = await this.vector.search(query, topK);
+  async retrieve(query: string, topK = 5, workspaceId?: string): Promise<RetrievedContext> {
+    const relevantMemories = await this.vector.search(query, topK, { workspaceId });
     const facts = this.facts.all().map((f) => `${f.entity}.${f.attribute} = ${f.value}`);
     return {
       recentMessages: selectRecentMessages(this.working.all(), 10),

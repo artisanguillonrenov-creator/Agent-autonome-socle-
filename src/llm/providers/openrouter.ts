@@ -13,8 +13,11 @@ interface OpenRouterOptions {
 
 export class OpenRouterProvider implements LLMProvider {
   readonly name = "openrouter";
+  readonly model: string;
 
-  constructor(private readonly opts: OpenRouterOptions) {}
+  constructor(private readonly opts: OpenRouterOptions) {
+    this.model = opts.model;
+  }
 
   supportsNativeTools(): boolean {
     return true;
@@ -57,6 +60,7 @@ export class OpenRouterProvider implements LLMProvider {
       messages: formattedMessages,
       max_tokens: options.maxTokens ?? 1024,
       temperature: options.temperature,
+      top_p: options.topP,
       stop: options.stopSequences,
     };
 

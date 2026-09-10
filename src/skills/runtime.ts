@@ -8,6 +8,9 @@ import { WorkflowRegistry } from "../workflows/workflowRegistry.js";
 import { canonicalSkillCatalog } from "./catalog.js";
 import { config } from "../config.js";
 import { readDocument, searchDocument } from "../workbench/documentEngine.js";
+import { indexWorkspaceDocument, removeWorkspaceDocumentIndex, searchWorkspaceKnowledge } from "../workbench/knowledgeIndex.js";
+import { VectorMemory } from "../memory/vectorMemory.js";
+import { LocalHashingEmbeddingProvider } from "../llm/embeddings.js";
 import {
   listSheets,
   inspectSpreadsheet,
@@ -53,7 +56,7 @@ const asColumns=(value:unknown):number[]|undefined=>{if(value===undefined)return
 const asFilterConditions=(value:unknown):FilterCondition[]=>{if(value===undefined)return[];if(!Array.isArray(value))throw new Error("SPREADSHEET_FILTER_INVALID");return value.map(v=>{if(!v||typeof v!=="object"||Array.isArray(v))throw new Error("SPREADSHEET_FILTER_INVALID");const f=v as Record<string,unknown>;if(typeof f.column!=="string"||!f.column||typeof f.operator!=="string")throw new Error("SPREADSHEET_FILTER_INVALID");return{column:f.column,operator:f.operator as FilterCondition["operator"],value:f.value};});};
 const asSortSpecs=(value:unknown):SortSpec[]=>{if(value===undefined)return[];if(!Array.isArray(value))throw new Error("SPREADSHEET_SORT_INVALID");return value.map(v=>{if(!v||typeof v!=="object"||Array.isArray(v))throw new Error("SPREADSHEET_SORT_INVALID");const s=v as Record<string,unknown>;if(typeof s.column!=="string"||!s.column)throw new Error("SPREADSHEET_SORT_INVALID");return{column:s.column,direction:s.direction==="desc"?"desc":"asc"} as SortSpec;});};
 function validateRepeat(value:unknown):void {if(value!==undefined&&(!Number.isSafeInteger(value)||(value as number)<=0))throw new Error("INVALID_SCHEDULE");}
-export function createRuntimeSkills(orchestrator:ServiceOrchestrator,planner:Planner,planRunner:PlanRunner,workflows:WorkflowRegistry,repositoryClient:GithubReadOnlyClient=createGithubReadOnlyClient()):SkillDefinition[]{
+export function createRuntimeSkills(orchestrator:ServiceOrchestrator,planner:Planner,planRunner:PlanRunner,workflows:WorkflowRegistry,repositoryClient:GithubReadOnlyClient=createGithubReadOnlyClient(),vectorMemory:VectorMemory=new VectorMemory(new LocalHashingEmbeddingProvider())):SkillDefinition[]{
   const tasks=new TaskStore();const base=new Map(canonicalSkillCatalog.map(s=>[s.id!,{...s}]));
   const define=(id:string,parameters:SkillDefinition["parameters"],handler:NonNullable<SkillDefinition["handler"]>)=>Object.assign(base.get(id)!,{parameters,handler});
   const dispatch=(capability:string,input:Record<string,unknown>,context:Record<string,unknown>,workspaceId?:string)=>orchestrator.dispatchCapability({action:"DISPATCH_CAPABILITY",capability,objective:String(input.objective??"").trim(),context,constraints:strings(input.constraints)},{executionMode:input.executionMode==="background"?"background":"foreground",workspaceId});
@@ -69,6 +72,13 @@ export function createRuntimeSkills(orchestrator:ServiceOrchestrator,planner:Pla
   });
   define("file_management",schema({action:{type:"string",enum:["LIST","READ","WRITE","DELETE"]},workspaceId:{type:"string"},path:{type:"string"},content:{type:"string"},encoding:{type:"string"}},["action","workspaceId"]),async i=>{
     const result=await dispatch("file_management",{...i,objective:`${i.action} workspace file`},{action:i.action,path:i.path,...(i.encoding==="base64"?{contentBase64:i.content}:{text:i.content})},String(i.workspaceId));
+    // projects.autoIndexing (nécessite projects.knowledgeRag) : maintient l'index RAG
+    // cohérent avec le contenu réel du workspace — jamais de doublon (delete-then-insert
+    // par source_key), jamais d'entrée fantôme après suppression d'un fichier.
+    if(result.status==="COMPLETED"&&config.projects.autoIndexing&&config.projects.knowledgeRag&&nonEmpty(i.path)){
+      if(i.action==="WRITE")await indexWorkspaceDocument(orchestrator.workspaces,vectorMemory,String(i.workspaceId),i.path).catch(()=>undefined);
+      else if(i.action==="DELETE")removeWorkspaceDocumentIndex(vectorMemory,String(i.workspaceId),i.path);
+    }
     return JSON.stringify({...result,workspaceId:i.workspaceId,artifacts:orchestrator.artifacts.listByOperation(result.taskId)});
   });
   define("inspect_task",schema({id:{type:"string"},type:{type:"string",enum:["operation","plan","schedule"]}},["id"]),async i=>{const id=String(i.id),type=i.type;const found=[!type||type==="operation"?orchestrator.store.getOperation(id):null,!type||type==="plan"?planner.getRun(id):null,!type||type==="schedule"?tasks.get(id):null].filter(Boolean);if(found.length>1)return"AMBIGUOUS_TASK_ID";if(!found.length)return"TASK_NOT_FOUND";return JSON.stringify(found[0]);});
@@ -89,10 +99,21 @@ export function createRuntimeSkills(orchestrator:ServiceOrchestrator,planner:Pla
     const run=workflows.execute(key,object(i.inputs),planner,orchestrator.registry,ctx.toolCallId??"");return JSON.stringify({workflowId:workflow.id,workflowVersion:workflow.version,planRunId:run.id,workspaceId:run.workspaceId,status:run.status});
   });
   define("manage_skill",schema({action:{type:"string"},skillId:{type:"string"},workflowId:{type:"string"},planRunId:{type:"string"}},["action"]),async(i,ctx:SkillContext)=>{const registry=ctx.skillRegistry;switch(i.action){case"LIST":return JSON.stringify(registry.list().map((s:SkillDefinition)=>({id:s.id,enabled:registry.isEnabled(s)})));case"ENABLE":case"DISABLE":registry.setEnabled(String(i.skillId),i.action==="ENABLE");return JSON.stringify({ok:true});case"LIST_WORKFLOWS":return JSON.stringify(workflows.list());case"LEARN_WORKFLOW_FROM_PLAN":return JSON.stringify(workflows.learnFromPlan(String(i.planRunId),planner));case"APPROVE_WORKFLOW":return JSON.stringify({ok:workflows.setStatus(String(i.workflowId),"ACTIVE",orchestrator.registry)});case"DISABLE_WORKFLOW":return JSON.stringify({ok:workflows.setStatus(String(i.workflowId),"DISABLED",orchestrator.registry)});case"ARCHIVE_WORKFLOW":return JSON.stringify({ok:workflows.setStatus(String(i.workflowId),"ARCHIVED",orchestrator.registry)});default:return"INVALID_MANAGE_ACTION";}});
-  define("document_work",schema({action:{type:"string",enum:["READ","SEARCH"]},workspaceId:{type:"string"},path:{type:"string"},query:{type:"string"},caseSensitive:{type:"boolean"},maxResults:{type:"integer"},contextChars:{type:"integer"}},["action","workspaceId","path"]),async i=>{
-    const workspaceId=String(i.workspaceId),path=String(i.path);
-    if(i.action==="READ")return JSON.stringify(await readDocument(orchestrator.workspaces,workspaceId,path));
-    if(i.action==="SEARCH"){if(!nonEmpty(i.query))throw new Error("DOCUMENT_SEARCH_QUERY_REQUIRED");return JSON.stringify(await searchDocument(orchestrator.workspaces,workspaceId,path,i.query,{caseSensitive:i.caseSensitive===true,maxResults:i.maxResults as number|undefined,contextChars:i.contextChars as number|undefined}));}
+  define("document_work",schema({action:{type:"string",enum:["READ","SEARCH","INDEX","RAG_SEARCH"]},workspaceId:{type:"string"},path:{type:"string"},query:{type:"string"},caseSensitive:{type:"boolean"},maxResults:{type:"integer"},contextChars:{type:"integer"},topK:{type:"integer"}},["action","workspaceId"]),async i=>{
+    const workspaceId=String(i.workspaceId);
+    if(i.action==="READ"){if(!nonEmpty(i.path))throw new Error("DOCUMENT_PATH_REQUIRED");return JSON.stringify(await readDocument(orchestrator.workspaces,workspaceId,i.path));}
+    if(i.action==="SEARCH"){if(!nonEmpty(i.path))throw new Error("DOCUMENT_PATH_REQUIRED");if(!nonEmpty(i.query))throw new Error("DOCUMENT_SEARCH_QUERY_REQUIRED");return JSON.stringify(await searchDocument(orchestrator.workspaces,workspaceId,i.path,i.query,{caseSensitive:i.caseSensitive===true,maxResults:i.maxResults as number|undefined,contextChars:i.contextChars as number|undefined}));}
+    // projects.knowledgeRag : RAG projet réel (embeddings + VectorMemory, scopé au workspace).
+    if(i.action==="INDEX"){
+      if(!config.projects.knowledgeRag)throw new Error("KNOWLEDGE_RAG_DISABLED");
+      if(!nonEmpty(i.path))throw new Error("DOCUMENT_PATH_REQUIRED");
+      return JSON.stringify(await indexWorkspaceDocument(orchestrator.workspaces,vectorMemory,workspaceId,i.path));
+    }
+    if(i.action==="RAG_SEARCH"){
+      if(!config.projects.knowledgeRag)throw new Error("KNOWLEDGE_RAG_DISABLED");
+      if(!nonEmpty(i.query))throw new Error("DOCUMENT_SEARCH_QUERY_REQUIRED");
+      return JSON.stringify(await searchWorkspaceKnowledge(vectorMemory,workspaceId,i.query,Number.isInteger(i.topK)?i.topK as number:5));
+    }
     throw new Error("DOCUMENT_ACTION_INVALID");
   });
 

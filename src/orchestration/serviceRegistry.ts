@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { RiskLevel } from "./contract.js";
 import { ConnectionStore, hasConfigOverride } from "../connections/store.js";
 import { canonicalSkillCatalog } from "../skills/catalog.js";
+import { config } from "../config.js";
 
 export type ServiceTransport = "local" | "task_http";
 export type ServiceAuth = { type: "none" } | { type: "bearer_env"; envVar: string };
@@ -21,6 +22,8 @@ export interface ServiceDefinition {
   parallelSafeCapabilities?: string[];
   priority: number;
   riskByCapability?: Record<string, RiskLevel>;
+  /** Chantier 8 (autonomy.permissionMatrix) : permission explicite par capacité — sinon dérivée du risque (voir riskPolicy.ts). */
+  permissionByCapability?: Record<string, string>;
   auth: ServiceAuth;
   requestTimeoutMs?: number;
   healthTimeoutMs?: number;
@@ -28,6 +31,7 @@ export interface ServiceDefinition {
 }
 
 const risks = new Set(["LOW", "MEDIUM", "HIGH", "CRITICAL"]);
+const permissions = new Set(["READ", "WRITE", "DELETE", "EXECUTE", "SEND", "PURCHASE", "COMPUTER_CONTROL"]);
 
 export function riskForCapability(s: ServiceDefinition, c: string): RiskLevel | null {
   const r = s.riskByCapability?.[c] ?? "LOW";
@@ -102,6 +106,15 @@ export function validateServiceDefinition(
     throw new Error("invalid riskByCapability");
   }
 
+  if (
+    r.permissionByCapability !== undefined &&
+    (typeof r.permissionByCapability !== "object" ||
+      ((strict || isUserConnection || userCreated) && Object.values(r.permissionByCapability).some((val) => !permissions.has(val as string))) ||
+      ((isUserConnection || userCreated) && Object.keys(r.permissionByCapability).some((c) => !r.capabilities.includes(c))))
+  ) {
+    throw new Error("invalid permissionByCapability");
+  }
+
   if (transport === "local" && typeof r.endpoint !== "string") r.endpoint = r.id;
 
   if (transport === "task_http") {
@@ -127,12 +140,17 @@ export function validateServiceDefinition(
     throw new Error("invalid auth");
   }
 
-  const requestTimeoutMs = r.requestTimeoutMs ?? 120000;
-  const healthTimeoutMs = r.healthTimeoutMs ?? 5000;
-  if (!Number.isFinite(requestTimeoutMs) || requestTimeoutMs < 1000 || requestTimeoutMs > 600000) {
+  // Chantier 8 (connections.requestTimeoutMs/healthTimeoutMs) : ne jamais figer un
+  // défaut littéral ici — un service sans valeur explicite reste `undefined` et retombe
+  // dynamiquement sur config.connections.* au point d'usage (ServiceAdapter), pour que le
+  // réglage global reste réellement effectif y compris à chaud, sans dépendre de l'ordre
+  // entre la construction du ServiceRegistry et l'application des settings au démarrage.
+  const requestTimeoutMs = r.requestTimeoutMs;
+  const healthTimeoutMs = r.healthTimeoutMs;
+  if (requestTimeoutMs !== undefined && (!Number.isFinite(requestTimeoutMs) || requestTimeoutMs < 1000 || requestTimeoutMs > 600000)) {
     throw new Error("invalid requestTimeoutMs");
   }
-  if (!Number.isFinite(healthTimeoutMs) || healthTimeoutMs < 500 || healthTimeoutMs > 60000) {
+  if (healthTimeoutMs !== undefined && (!Number.isFinite(healthTimeoutMs) || healthTimeoutMs < 500 || healthTimeoutMs > 60000)) {
     throw new Error("invalid healthTimeoutMs");
   }
 
@@ -216,8 +234,9 @@ export class ServiceRegistry {
       const authChanged = JSON.stringify(existing.auth) !== JSON.stringify(s.auth);
       const capsChanged = JSON.stringify(existing.capabilities) !== JSON.stringify(s.capabilities);
       const risksChanged = JSON.stringify(existing.riskByCapability ?? {}) !== JSON.stringify(s.riskByCapability ?? {});
+      const permissionsChanged = JSON.stringify(existing.permissionByCapability ?? {}) !== JSON.stringify(s.permissionByCapability ?? {});
 
-      if (endpointChanged || transportChanged || priorityChanged || authChanged || capsChanged || risksChanged) {
+      if (endpointChanged || transportChanged || priorityChanged || authChanged || capsChanged || risksChanged || permissionsChanged) {
         const activeOps = this.connectionStore.checkActiveOperations(s.id);
         if (activeOps.length > 0) {
           const err = new Error("SERVICE_CONNECTION_IN_USE");
@@ -246,6 +265,7 @@ export class ServiceRegistry {
       capabilitiesJson: JSON.stringify(s.capabilities),
       parallelSafeCapabilitiesJson: JSON.stringify(s.parallelSafeCapabilities ?? []),
       riskByCapabilityJson: JSON.stringify(s.riskByCapability ?? {}),
+      permissionByCapabilityJson: JSON.stringify(s.permissionByCapability ?? {}),
       updatedAt: Date.now(),
     });
   }
@@ -355,14 +375,25 @@ export class ServiceRegistry {
       }
     }
 
+    if (patch.permissionByCapability !== undefined) {
+      const targetCaps = patch.capabilities ?? existing.capabilities;
+      if (
+        typeof patch.permissionByCapability !== "object" ||
+        Object.entries(patch.permissionByCapability).some(([cap, val]) => !permissions.has(val as string) || !targetCaps.includes(cap))
+      ) {
+        throw new Error("invalid permissionByCapability");
+      }
+    }
+
     const endpointChanged = patch.endpoint !== undefined && patch.endpoint !== existing.endpoint;
     const transportChanged = patch.transport !== undefined && patch.transport !== existing.transport;
     const priorityChanged = patch.priority !== undefined && patch.priority !== existing.priority;
     const authChanged = patch.auth !== undefined && JSON.stringify(patch.auth) !== JSON.stringify(existing.auth);
     const capsChanged = patch.capabilities !== undefined && JSON.stringify(patch.capabilities) !== JSON.stringify(existing.capabilities);
     const risksChanged = patch.riskByCapability !== undefined && JSON.stringify(patch.riskByCapability) !== JSON.stringify(existing.riskByCapability);
+    const permissionsChanged = patch.permissionByCapability !== undefined && JSON.stringify(patch.permissionByCapability) !== JSON.stringify(existing.permissionByCapability);
 
-    if (endpointChanged || transportChanged || priorityChanged || authChanged || capsChanged || risksChanged) {
+    if (endpointChanged || transportChanged || priorityChanged || authChanged || capsChanged || risksChanged || permissionsChanged) {
       const activeOps = this.connectionStore.checkActiveOperations(id);
       if (activeOps.length > 0) {
         const err = new Error("SERVICE_CONNECTION_IN_USE");
@@ -391,6 +422,7 @@ export class ServiceRegistry {
     if (patch.capabilities !== undefined) patchRecord.capabilitiesJson = JSON.stringify(patch.capabilities);
     if (patch.parallelSafeCapabilities !== undefined) patchRecord.parallelSafeCapabilitiesJson = JSON.stringify(patch.parallelSafeCapabilities);
     if (patch.riskByCapability !== undefined) patchRecord.riskByCapabilityJson = JSON.stringify(patch.riskByCapability);
+    if (patch.permissionByCapability !== undefined) patchRecord.permissionByCapabilityJson = JSON.stringify(patch.permissionByCapability);
 
     this.connectionStore.patchOverride(id, patchRecord);
   }
@@ -465,8 +497,8 @@ export class ServiceRegistry {
           healthPath: ov.healthPath || factoryDef.healthPath || "/health",
           taskPath: ov.taskPath || factoryDef.taskPath || "/tasks",
           priority: ov.priorityOverride !== undefined ? ov.priorityOverride : factoryDef.priority,
-          requestTimeoutMs: ov.requestTimeoutMs ?? factoryDef.requestTimeoutMs ?? 120000,
-          healthTimeoutMs: ov.healthTimeoutMs ?? factoryDef.healthTimeoutMs ?? 5000,
+          requestTimeoutMs: ov.requestTimeoutMs ?? factoryDef.requestTimeoutMs ?? config.connections.requestTimeoutMs,
+          healthTimeoutMs: ov.healthTimeoutMs ?? factoryDef.healthTimeoutMs ?? config.connections.healthTimeoutMs,
           auth:
             ov.authTypeOverride === "bearer_env"
               ? { type: "bearer_env", envVar: ov.authEnvVar || (factoryDef.auth.type === "bearer_env" ? factoryDef.auth.envVar : "API_TOKEN") }
@@ -476,6 +508,7 @@ export class ServiceRegistry {
           capabilities: ov.capabilitiesJson ? JSON.parse(ov.capabilitiesJson) : factoryDef.capabilities,
           parallelSafeCapabilities: ov.parallelSafeCapabilitiesJson ? JSON.parse(ov.parallelSafeCapabilitiesJson) : factoryDef.parallelSafeCapabilities,
           riskByCapability: ov.riskByCapabilityJson ? JSON.parse(ov.riskByCapabilityJson) : factoryDef.riskByCapability,
+          permissionByCapability: ov.permissionByCapabilityJson ? JSON.parse(ov.permissionByCapabilityJson) : factoryDef.permissionByCapability,
           source: hasDbOverride ? "DATABASE" : factoryDef.source ?? "FACTORY",
         };
         result.push(resolveServiceEndpoint(merged));
@@ -495,12 +528,13 @@ export class ServiceRegistry {
         healthPath: ov.healthPath ?? "/health",
         taskPath: ov.taskPath ?? "/tasks",
         priority: ov.priorityOverride ?? 10,
-        requestTimeoutMs: ov.requestTimeoutMs ?? 120000,
-        healthTimeoutMs: ov.healthTimeoutMs ?? 5000,
+        requestTimeoutMs: ov.requestTimeoutMs ?? config.connections.requestTimeoutMs,
+        healthTimeoutMs: ov.healthTimeoutMs ?? config.connections.healthTimeoutMs,
         auth: ov.authTypeOverride === "bearer_env" ? { type: "bearer_env", envVar: ov.authEnvVar || "API_TOKEN" } : { type: "none" },
         capabilities: ov.capabilitiesJson ? JSON.parse(ov.capabilitiesJson) : [],
         parallelSafeCapabilities: ov.parallelSafeCapabilitiesJson ? JSON.parse(ov.parallelSafeCapabilitiesJson) : [],
         riskByCapability: ov.riskByCapabilityJson ? JSON.parse(ov.riskByCapabilityJson) : {},
+        permissionByCapability: ov.permissionByCapabilityJson ? JSON.parse(ov.permissionByCapabilityJson) : {},
         source: "DATABASE",
       };
       result.push(resolveServiceEndpoint(userDef));

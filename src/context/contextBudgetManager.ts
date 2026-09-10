@@ -29,12 +29,17 @@ export class ContextBudgetManager {
     return Math.ceil(text.length / 4);
   }
 
-  assemble(pieces: ContextPiece[]): string {
+  /**
+   * `budgetOverride` permet à l'appelant (boucle agent) de plafonner ponctuellement le
+   * budget en fonction de la fenêtre de contexte réelle du modèle actif (entrée + sortie
+   * ne doit jamais dépasser cette fenêtre) sans modifier le budget configuré par défaut.
+   */
+  assemble(pieces: ContextPiece[], budgetOverride?: number): string {
     const sorted = [...pieces]
       .filter((p) => p.content.trim().length > 0)
       .sort((a, b) => b.priority - a.priority);
 
-    let remaining = this.tokenBudget;
+    let remaining = budgetOverride ?? this.tokenBudget;
     const kept: string[] = [];
 
     for (const piece of sorted) {

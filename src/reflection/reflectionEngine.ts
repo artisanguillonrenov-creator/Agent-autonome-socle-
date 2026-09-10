@@ -1,5 +1,7 @@
 import type { LLMProvider } from "../llm/provider.js";
 import type { MemoryManager } from "../memory/memoryManager.js";
+import { withGenerationDefaults } from "../llm/generationDefaults.js";
+import { providerForRole } from "../llm/modelRouter.js";
 
 /**
  * Brique 3 : à intervalles réguliers, relit les événements récents et en extrait
@@ -46,17 +48,21 @@ export class ReflectionEngine {
     }
 
     const transcript = recent.map((m) => `${m.role}: ${m.content}`).join("\n");
-    const rawInsight = await this.llm.complete([
-      {
-        role: "system",
-        content:
-          "Tu es le module de réflexion d'un agent autonome. Relis cet extrait d'échanges récents " +
-          "et résume en 1 à 3 phrases les enseignements de haut niveau à retenir durablement " +
-          "(préférences révélées, décisions prises, erreurs à ne pas répéter). " +
-          "Sois concis, factuel, à la troisième personne.",
-      },
-      { role: "user", content: transcript },
-    ]);
+    // intelligence.utilityModel : modèle rapide dédié au résumé, si configuré.
+    const rawInsight = await providerForRole("utility", this.llm).complete(
+      [
+        {
+          role: "system",
+          content:
+            "Tu es le module de réflexion d'un agent autonome. Relis cet extrait d'échanges récents " +
+            "et résume en 1 à 3 phrases les enseignements de haut niveau à retenir durablement " +
+            "(préférences révélées, décisions prises, erreurs à ne pas répéter). " +
+            "Sois concis, factuel, à la troisième personne.",
+        },
+        { role: "user", content: transcript },
+      ],
+      withGenerationDefaults({}),
+    );
 
     const insight = typeof rawInsight === "string" ? rawInsight : rawInsight.content ?? "";
 

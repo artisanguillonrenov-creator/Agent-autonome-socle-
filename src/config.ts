@@ -24,6 +24,21 @@ export const config = {
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL || "http://localhost:11434",
     infermaticApiKey: process.env.INFERMATIC_API_KEY || "",
     infermaticBaseUrl: stripTrailingSlash(process.env.INFERMATIC_BASE_URL || "https://api.totalgpt.ai/v1"),
+    /**
+     * Overrides de génération pilotés par settings.intelligence.* (Chantier 8).
+     * `undefined` = pas d'override explicite (le provider applique son propre défaut).
+     * maxOutputTokens par défaut 20000 — ne jamais réintroduire l'ancien plafond 4000.
+     */
+    temperature: 0.7 as number | undefined,
+    topP: 1.0 as number | undefined,
+    maxOutputTokens: 20000,
+    contextWindowOverride: 128000,
+    fallbackModel1: "",
+    fallbackModel2: "",
+    visionModel: "",
+    codingModel: "",
+    researchModel: "",
+    utilityModel: "",
   },
   embeddings: {
     provider: (process.env.EMBEDDING_PROVIDER as EmbeddingProviderName) || "local",
@@ -86,5 +101,29 @@ export const config = {
   },
   context: {
     tokenBudget: int(process.env.CONTEXT_TOKEN_BUDGET, 4000),
+  },
+  locale: {
+    language: "fr" as "fr" | "en",
+    responseLength: "NORMAL" as "SHORT" | "NORMAL" | "DETAILED",
+  },
+  autonomy: {
+    /** Niveau de risque maximal exécuté sans approbation — "MEDIUM" reproduit le comportement historique (LOW/MEDIUM auto, HIGH/CRITICAL approuvés). */
+    globalRiskLevel: "MEDIUM" as "LOW" | "MEDIUM" | "HIGH" | "CRITICAL",
+    /** Permission maximale accordée sans intervention — "EXECUTE" couvre toutes les capacités existantes (READ/WRITE/DELETE/EXECUTE), SEND/PURCHASE/COMPUTER_CONTROL restent bloquées par défaut. */
+    permissionMatrix: "EXECUTE" as "READ" | "WRITE" | "DELETE" | "EXECUTE" | "SEND" | "PURCHASE" | "COMPUTER_CONTROL",
+  },
+  connections: {
+    autoTestOnStartup: true,
+    healthTimeoutMs: int(process.env.CONNECTIONS_HEALTH_TIMEOUT_MS, 5000),
+    requestTimeoutMs: int(process.env.CONNECTIONS_REQUEST_TIMEOUT_MS, 120000),
+  },
+  projects: {
+    projectIsolation: false,
+    knowledgeRag: false,
+    autoIndexing: false,
+    memoryRetentionDays: 30,
+  },
+  activity: {
+    logLevel: "NORMAL" as "NORMAL" | "DETAILED" | "DEBUG",
   },
 };
