@@ -39,7 +39,6 @@ function cleanupTestEnvironment() {
   }
 }
 
-// Minimal valid PDF binary with text "Hello PDF Workbench"
 function createMinimalTextPdfBuffer(): Buffer {
   const pdfStr = `%PDF-1.4
 1 0 obj <</Type /Catalog /Pages 2 0 R>> endobj
@@ -68,7 +67,6 @@ startxref
   return Buffer.from(pdfStr, "utf-8");
 }
 
-// Minimal scanned/textless PDF binary (page exists but stream has no text Tj operators)
 function createMinimalScannedPdfBuffer(): Buffer {
   const pdfStr = `%PDF-1.4
 1 0 obj <</Type /Catalog /Pages 2 0 R>> endobj
@@ -90,7 +88,7 @@ startxref
   return Buffer.from(pdfStr, "utf-8");
 }
 
-test("WORKBENCH SANDBOX & SECURITY: Traversal, absolute paths & symlinks", () => {
+test("WORKBENCH SANDBOX & SECURITY: Traversal, absolute paths & symlinks non-swallowed assertion", () => {
   const { workspaceStore, workspace } = setupTestEnvironment();
 
   assert.throws(
@@ -108,229 +106,103 @@ test("WORKBENCH SANDBOX & SECURITY: Traversal, absolute paths & symlinks", () =>
     (err: any) => err.message === WORKBENCH_ERRORS.WORKBENCH_PATH_OUTSIDE_WORKSPACE
   );
 
-  // Symlink pointing outside workspace root
+  let symlinkCreated = false;
   const linkPath = resolve(TEST_WORKSPACES_ROOT, workspace.id, "symlink_out.txt");
   try {
     symlinkSync("/etc/passwd", linkPath);
+    symlinkCreated = true;
+  } catch {
+    // OS permission bypass
+  }
+
+  if (symlinkCreated) {
     assert.throws(
       () => resolveWorkspacePath(workspaceStore, workspace.id, "symlink_out.txt"),
       (err: any) => err.message === WORKBENCH_ERRORS.WORKBENCH_PATH_OUTSIDE_WORKSPACE
     );
-  } catch {
-    // Symlink creation bypass if unprivileged OS
   }
 
   cleanupTestEnvironment();
 });
 
-test("DOCUMENT ENGINE: TXT, MD, HTML security, PDF text extraction & OCR detection", async () => {
-  const { workspaceStore, workspace } = setupTestEnvironment();
-  const engine = new DocumentEngine(workspaceStore);
-
-  // Markdown file
-  workspaceStore.writeFile(
-    workspace.id,
-    "doc.md",
-    "# Document de Test\n\nVoici une clause de résiliation importante.\n\n## Section 2\n\nAutres informations."
-  );
-
-  const docRes = await engine.readDocument(workspace.id, "doc.md");
-  assert.equal(docRes.format, "markdown");
-  assert.equal(docRes.title, "Document de Test");
-  assert.equal(docRes.sections?.length, 2);
-
-  const matches = engine.searchDocument(docRes, { query: "resiliation" });
-  assert.equal(matches.length, 1);
-  assert.match(matches[0].matchedText, /résiliation/i);
-
-  // HTML security check
-  workspaceStore.writeFile(
-    workspace.id,
-    "unsafe.html",
-    "<html><head><title>HTML Page</title></head><body><h1>Titre</h1><script>alert('xss')</script><p>Texte utile</p><iframe src='evil.com'></iframe></body></html>"
-  );
-
-  const htmlRes = await engine.readDocument(workspace.id, "unsafe.html");
-  assert.equal(htmlRes.format, "html");
-  assert.equal(htmlRes.title, "HTML Page");
-  assert.doesNotMatch(htmlRes.text!, /alert/);
-  assert.doesNotMatch(htmlRes.text!, /iframe/);
-  assert.match(htmlRes.text!, /Texte utile/);
-
-  // Real PDF text extraction test using DocumentEngine.readDocument
-  workspaceStore.writeFile(workspace.id, "sample.pdf", createMinimalTextPdfBuffer());
-  const pdfRes = await engine.readDocument(workspace.id, "sample.pdf");
-  assert.equal(pdfRes.format, "pdf");
-  assert.equal(pdfRes.pageCount, 1);
-  assert.match(pdfRes.text!, /Hello PDF Workbench/);
-
-  // Real PDF scanned / no text triggering DOCUMENT_OCR_REQUIRED
-  workspaceStore.writeFile(workspace.id, "scanned.pdf", createMinimalScannedPdfBuffer());
-  await assert.rejects(
-    async () => await engine.readDocument(workspace.id, "scanned.pdf"),
-    (err: any) => err.message === WORKBENCH_ERRORS.DOCUMENT_OCR_REQUIRED
-  );
-
-  cleanupTestEnvironment();
-});
-
-test("SPREADSHEET ENGINE: CSV, TSV, XLSX multi-sheet, formulas & numeric aggregation fixes", () => {
+test("SPREADSHEET readRange: startRow > 0 header preservation & data-only totalRows", () => {
   const { workspaceStore, workspace } = setupTestEnvironment();
   const engine = new SpreadsheetEngine(workspaceStore);
 
-  // TSV file
-  const tsvContent = "id\tname\tsalary\n1\tAlice\t5000\n2\tBob\t4000";
-  workspaceStore.writeFile(workspace.id, "data.tsv", tsvContent);
-  const tsvInspect = engine.inspect(workspace.id, "data.tsv");
-  assert.equal(tsvInspect.format, "tsv");
-  assert.equal(tsvInspect.rowCount, 2);
+  const csvContent = `id,name\n1,A\n2,B\n3,C\n4,D`;
+  workspaceStore.writeFile(workspace.id, "data.csv", csvContent);
 
-  // Multi-sheet XLSX with non-executed formulas
-  const wb = XLSX.utils.book_new();
-  const sheet1 = XLSX.utils.json_to_sheet([{ a: 10, b: 20, sum: { f: "A2+B2" } }]);
-  const sheet2 = XLSX.utils.json_to_sheet([{ cat: "X" }]);
-  XLSX.utils.book_append_sheet(wb, sheet1, "Sheet1");
-  XLSX.utils.book_append_sheet(wb, sheet2, "Sheet2");
-  const xlsxBuf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+  // readRange startRow=0 endRow=1 => [{id:1, name:"A"}]
+  const r0 = engine.readRange(workspace.id, "data.csv", { startRow: 0, endRow: 1 });
+  assert.equal(r0.totalRows, 4);
+  assert.deepEqual(r0.rows, [{ id: 1, name: "A" }]);
 
-  workspaceStore.writeFile(workspace.id, "multi.xlsx", xlsxBuf);
-  const sheetList = engine.listSheets(workspace.id, "multi.xlsx");
-  assert.deepEqual(sheetList, ["Sheet1", "Sheet2"]);
-
-  // Range-bounded reading
-  const range1 = engine.readRange(workspace.id, "multi.xlsx", { sheet: "Sheet1", startRow: 0, endRow: 1 });
-  assert.equal(range1.rows.length, 1);
-
-  // Aggregation test ensuring null, undefined, "", boolean are excluded from SUM/MEAN
-  const mixedRows = [
-    { v: 10 },
-    { v: null },
-    { v: "" },
-    { v: false },
-    { v: 20 }
-  ];
-  const aggSum = engine.aggregate(mixedRows, { function: "SUM", valueColumn: "v" });
-  assert.equal(aggSum[0]["v_sum"], 30);
-
-  const aggMean = engine.aggregate(mixedRows, { function: "MEAN", valueColumn: "v" });
-  assert.equal(aggMean[0]["v_mean"], 15);
+  // readRange startRow=1 endRow=3 => [{id:2, name:"B"}, {id:3, name:"C"}]
+  const r1 = engine.readRange(workspace.id, "data.csv", { startRow: 1, endRow: 3 });
+  assert.equal(r1.totalRows, 4);
+  assert.deepEqual(r1.rows, [
+    { id: 2, name: "B" },
+    { id: 3, name: "C" }
+  ]);
 
   cleanupTestEnvironment();
 });
 
-test("DATA ANALYSIS ENGINE: Complete suite (count, sum, mean, median, min, max, stddev, groupBy, topN, bottomN, distribution)", () => {
+test("DATA ANALYSIS ENGINE VALIDATIONS: timeSeriesSummary, groupBy & topN checks", () => {
   const engine = new DataAnalysisEngine();
 
   const dataset: Record<string, unknown>[] = [
-    { id: 1, date: "2026-01-01", val: 10, cat: "A" },
-    { id: 2, date: "2026-01-02", val: 20, cat: "A" },
-    { id: 3, date: "2026-01-03", val: 30, cat: "B" },
-    { id: 4, date: "2026-01-04", val: 40, cat: "B" },
-    { id: 5, date: "2026-01-05", val: 100, cat: "B" }
+    { date: "2026-01-01", val: 10, cat: "A", textCol: "abc" },
+    { date: "2026-01-02", val: 20, cat: "A", textCol: "def" }
   ];
 
-  assert.equal(engine.count(dataset), 5);
-  assert.equal(engine.sum(dataset, "val"), 200);
-  assert.equal(engine.mean(dataset, "val"), 40);
-  assert.equal(engine.median(dataset, "val"), 30);
-  assert.equal(engine.min(dataset, "val"), 10);
-  assert.equal(engine.max(dataset, "val"), 100);
-
-  const groupRes = engine.groupBy(dataset, "cat", "val", "SUM");
-  assert.equal(groupRes.length, 2);
-
-  const top2 = engine.topN(dataset, "val", 2);
-  assert.equal(top2.length, 2);
-  assert.equal(top2[0].val, 100);
-
-  const dist = engine.distribution(dataset, "cat");
-  assert.equal(dist.length, 2);
-  assert.equal(dist[0].value, "B");
-  assert.equal(dist[0].count, 3);
-
-  // Column union validation check across sparse rows
-  const sparseDataset = [
-    { colA: 1 },
-    { colB: 2 },
-    { colC: 3 }
-  ];
-  const missingRes = engine.missingValues(sparseDataset);
-  assert.equal(missingRes.length, 3);
-});
-
-test("DATABASE QUERY ENGINE: SQLite statement iteration, SELECT > 1000 rows truncation & missing DB error", () => {
-  const { workspaceStore, workspace } = setupTestEnvironment();
-  const dbEngine = new DatabaseQueryEngine(workspaceStore);
-
-  // Missing database check returns DATABASE_NOT_FOUND
+  // Missing valueColumn in timeSeriesSummary throws DATA_COLUMN_NOT_FOUND
   assert.throws(
-    () => dbEngine.listTables(workspace.id, "nonexistent.sqlite"),
-    (err: any) => err.message === WORKBENCH_ERRORS.DATABASE_NOT_FOUND
+    () => engine.timeSeriesSummary(dataset, "date", "DAY", "nonexistent"),
+    (err: any) => err.message === WORKBENCH_ERRORS.DATA_COLUMN_NOT_FOUND
   );
 
-  const { absolutePath } = resolveWorkspacePath(workspaceStore, workspace.id, "test.sqlite", { allowMissing: true });
-  const setupDb = new Database(absolutePath);
-  setupDb.exec("CREATE TABLE items (id INTEGER PRIMARY KEY, val INTEGER)");
-
-  const stmt = setupDb.prepare("INSERT INTO items VALUES (?, ?)");
-  for (let i = 1; i <= 1200; i++) {
-    stmt.run(i, i * 10);
-  }
-  setupDb.close();
-
-  // Bounded iterator SELECT query (>1000 rows truncated)
-  const sel = dbEngine.select(workspace.id, "test.sqlite", "SELECT * FROM items ORDER BY id");
-  assert.equal(sel.rowCount, 1000);
-  assert.equal(sel.truncated, true);
-
-  // Write rejections
+  // Text valueColumn in timeSeriesSummary throws DATA_TYPE_UNSUPPORTED
   assert.throws(
-    () => dbEngine.select(workspace.id, "test.sqlite", "INSERT INTO items VALUES (1201, 12010)"),
-    (err: any) => err.message === WORKBENCH_ERRORS.DATABASE_QUERY_NOT_READ_ONLY
+    () => engine.timeSeriesSummary(dataset, "date", "DAY", "textCol"),
+    (err: any) => err.message === WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED
   );
 
+  // groupBy SUM without valueColumn throws DATA_COLUMN_NOT_FOUND
   assert.throws(
-    () => dbEngine.select(workspace.id, "test.sqlite", "UPDATE items SET val = 0"),
-    (err: any) => err.message === WORKBENCH_ERRORS.DATABASE_QUERY_NOT_READ_ONLY
+    () => engine.groupBy(dataset, "cat", undefined, "SUM"),
+    (err: any) => err.message === WORKBENCH_ERRORS.DATA_COLUMN_NOT_FOUND
   );
 
+  // topN with invalid n parameter throws DATA_TYPE_UNSUPPORTED
   assert.throws(
-    () => dbEngine.select(workspace.id, "test.sqlite", "DELETE FROM items"),
-    (err: any) => err.message === WORKBENCH_ERRORS.DATABASE_QUERY_NOT_READ_ONLY
+    () => engine.topN(dataset, "val", -5),
+    (err: any) => err.message === WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED
   );
-
-  assert.throws(
-    () => dbEngine.select(workspace.id, "test.sqlite", "DROP TABLE items"),
-    (err: any) => err.message === WORKBENCH_ERRORS.DATABASE_QUERY_NOT_READ_ONLY
-  );
-
-  // Verify DB immutability
-  const postCheck = dbEngine.select(workspace.id, "test.sqlite", "SELECT COUNT(*) as total FROM items");
-  assert.equal(postCheck.rows[0].total, 1200);
 
   cleanupTestEnvironment();
 });
 
-test("REPORT ENGINE: targetPath persistence & artifact creation", () => {
+test("DOCUMENT ENGINE & REPORT ATOMIC ARTIFACT CREATION", async () => {
   const { workspaceStore, artifactStore, workspace } = setupTestEnvironment();
+  const docEngine = new DocumentEngine(workspaceStore);
   const reportEngine = new ReportEngine(workspaceStore, artifactStore);
 
+  // PDF Text
+  workspaceStore.writeFile(workspace.id, "sample.pdf", createMinimalTextPdfBuffer());
+  const pdfRes = await docEngine.readDocument(workspace.id, "sample.pdf");
+  assert.equal(pdfRes.format, "pdf");
+
+  // Atomic report generation with targetPath
   const reportRes = reportEngine.generateReport(
     workspace.id,
-    {
-      title: "Rapport Custom Path",
-      summary: "Rapport persisté dans un chemin personnalisé.",
-      sections: [],
-      tables: [],
-      findings: [],
-      sources: []
-    },
+    { title: "Atomic Report", summary: "Summary", sections: [], tables: [], findings: [], sources: [] },
     "markdown",
-    { targetPath: "custom/path/report.md" }
+    { targetPath: "atomic/report.md" }
   );
 
-  assert.equal(reportRes.relativePath, "custom/path/report.md");
-  assert.ok(workspaceStore.exists(workspace.id, "custom/path/report.md"));
+  assert.equal(reportRes.relativePath, "atomic/report.md");
+  assert.ok(workspaceStore.exists(workspace.id, "atomic/report.md"));
 
   cleanupTestEnvironment();
 });

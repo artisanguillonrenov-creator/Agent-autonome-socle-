@@ -127,7 +127,6 @@ export class DocumentEngine {
           }
         }
 
-        // Check if OCR is required (pages exist but virtually no extractable text)
         if ((pageCount ?? 0) > 0 && fullText.trim().replace(/\s+/g, "").length < 10) {
           throw new Error(WORKBENCH_ERRORS.DOCUMENT_OCR_REQUIRED);
         }
@@ -179,11 +178,30 @@ export class DocumentEngine {
       warnings.push(`Document text truncated to ${DOCUMENT_LIMITS.maxExtractedCharacters} characters.`);
     }
 
-    const sections = format === "pdf" && pdfPageSections.length > 0
+    let sections = format === "pdf" && pdfPageSections.length > 0
       ? pdfPageSections
       : this.extractSections(fullText, format);
 
+    // Filter and clamp sections to strictly stay within fullText.length
+    sections = sections
+      .filter((s) => s.startOffset === undefined || s.startOffset < fullText.length)
+      .map((s) => {
+        let text = s.text;
+        let endOffset = s.endOffset;
+        if (s.startOffset !== undefined && endOffset !== undefined && endOffset > fullText.length) {
+          endOffset = fullText.length;
+          text = fullText.slice(s.startOffset, endOffset);
+          truncated = true;
+        }
+        return {
+          ...s,
+          endOffset,
+          text
+        };
+      });
+
     if (sections.length >= DOCUMENT_LIMITS.maxSections) {
+      truncated = true;
       warnings.push(`Sections capped at ${DOCUMENT_LIMITS.maxSections}.`);
     }
 

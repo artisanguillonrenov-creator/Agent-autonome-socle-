@@ -26,7 +26,6 @@ export class DataAnalysisEngine {
       throw new Error(WORKBENCH_ERRORS.DATASET_LIMIT_EXCEEDED);
     }
 
-    // Build union of all keys across all rows to accurately count columns and total cells
     const columnSet = new Set<string>();
     for (const row of rows) {
       if (row && typeof row === "object") {
@@ -156,7 +155,6 @@ export class DataAnalysisEngine {
     };
   }
 
-  // Individual statistical helper methods
   count(rows: Record<string, unknown>[], mode: "COUNT_ROWS" | "COUNT_NON_NULL" = "COUNT_ROWS", column?: string): number {
     this.validateDataset(rows);
     if (mode === "COUNT_ROWS") return rows.length;
@@ -176,6 +174,7 @@ export class DataAnalysisEngine {
       if (v !== null && v !== undefined && v !== "" && typeof v !== "boolean") {
         const n = Number(v);
         if (!isNaN(n)) nums.push(n);
+        else throw new Error(WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED);
       }
     }
     return nums;
@@ -230,6 +229,12 @@ export class DataAnalysisEngine {
       throw new Error(WORKBENCH_ERRORS.DATA_COLUMN_NOT_FOUND);
     }
 
+    if (["SUM", "MEAN", "MIN", "MAX"].includes(fn)) {
+      if (!valueColumn || !columns.includes(valueColumn)) {
+        throw new Error(WORKBENCH_ERRORS.DATA_COLUMN_NOT_FOUND);
+      }
+    }
+
     const groups = new Map<string, Record<string, unknown>[]>();
     for (const r of rows) {
       const key = String(r[groupColumn] ?? "null");
@@ -266,12 +271,26 @@ export class DataAnalysisEngine {
       throw new Error(WORKBENCH_ERRORS.DATA_COLUMN_NOT_FOUND);
     }
 
+    if (typeof n !== "number" || isNaN(n) || n <= 0 || !Number.isInteger(n)) {
+      throw new Error(WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED);
+    }
+
     const cap = Math.min(n, DATASET_LIMITS.maxResultRows);
     const sorted = [...rows].sort((a, b) => {
-      const valA = Number(a[column]);
-      const valB = Number(b[column]);
+      const rawA = a[column];
+      const rawB = b[column];
+
+      const isAValid = rawA !== null && rawA !== undefined && rawA !== "" && typeof rawA !== "boolean";
+      const isBValid = rawB !== null && rawB !== undefined && rawB !== "" && typeof rawB !== "boolean";
+
+      if (!isAValid && !isBValid) return 0;
+      if (!isAValid) return 1;
+      if (!isBValid) return -1;
+
+      const valA = Number(rawA);
+      const valB = Number(rawB);
       if (!isNaN(valA) && !isNaN(valB)) return valB - valA;
-      return String(b[column] ?? "").localeCompare(String(a[column] ?? ""));
+      return String(rawB).localeCompare(String(rawA));
     });
 
     return sorted.slice(0, cap);
@@ -283,12 +302,26 @@ export class DataAnalysisEngine {
       throw new Error(WORKBENCH_ERRORS.DATA_COLUMN_NOT_FOUND);
     }
 
+    if (typeof n !== "number" || isNaN(n) || n <= 0 || !Number.isInteger(n)) {
+      throw new Error(WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED);
+    }
+
     const cap = Math.min(n, DATASET_LIMITS.maxResultRows);
     const sorted = [...rows].sort((a, b) => {
-      const valA = Number(a[column]);
-      const valB = Number(b[column]);
+      const rawA = a[column];
+      const rawB = b[column];
+
+      const isAValid = rawA !== null && rawA !== undefined && rawA !== "" && typeof rawA !== "boolean";
+      const isBValid = rawB !== null && rawB !== undefined && rawB !== "" && typeof rawB !== "boolean";
+
+      if (!isAValid && !isBValid) return 0;
+      if (!isAValid) return 1;
+      if (!isBValid) return -1;
+
+      const valA = Number(rawA);
+      const valB = Number(rawB);
       if (!isNaN(valA) && !isNaN(valB)) return valA - valB;
-      return String(a[column] ?? "").localeCompare(String(b[column] ?? ""));
+      return String(rawA).localeCompare(String(rawB));
     });
 
     return sorted.slice(0, cap);
@@ -511,11 +544,15 @@ export class DataAnalysisEngine {
       throw new Error(WORKBENCH_ERRORS.DATA_COLUMN_NOT_FOUND);
     }
 
+    if (valueColumn && !columns.includes(valueColumn)) {
+      throw new Error(WORKBENCH_ERRORS.DATA_COLUMN_NOT_FOUND);
+    }
+
     const groups = new Map<string, number[]>();
 
     for (const r of rows) {
       const rawDate = r[dateColumn];
-      if (!rawDate) continue;
+      if (rawDate === null || rawDate === undefined || rawDate === "") continue;
 
       const dateObj = rawDate instanceof Date ? rawDate : new Date(String(rawDate));
       if (isNaN(dateObj.getTime())) continue;
@@ -541,9 +578,14 @@ export class DataAnalysisEngine {
       if (!groups.has(key)) groups.set(key, []);
 
       if (valueColumn) {
-        const val = Number(r[valueColumn]);
-        if (!isNaN(val)) {
-          groups.get(key)!.push(val);
+        const rawVal = r[valueColumn];
+        if (rawVal !== null && rawVal !== undefined && rawVal !== "" && typeof rawVal !== "boolean") {
+          const val = Number(rawVal);
+          if (!isNaN(val) && isFinite(val)) {
+            groups.get(key)!.push(val);
+          } else {
+            throw new Error(WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED);
+          }
         }
       } else {
         groups.get(key)!.push(1);
@@ -558,12 +600,16 @@ export class DataAnalysisEngine {
       const count = vals.length;
 
       if (valueColumn) {
-        const sum = vals.reduce((a, b) => a + b, 0);
-        const mean = count > 0 ? sum / count : 0;
-        const min = Math.min(...vals);
-        const max = Math.max(...vals);
+        if (count > 0) {
+          const sum = vals.reduce((a, b) => a + b, 0);
+          const mean = sum / count;
+          const min = Math.min(...vals);
+          const max = Math.max(...vals);
 
-        points.push({ period, count, sum, mean, min, max });
+          points.push({ period, count, sum, mean, min, max });
+        } else {
+          points.push({ period, count: 0 });
+        }
       } else {
         points.push({ period, count });
       }

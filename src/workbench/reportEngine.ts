@@ -55,8 +55,7 @@ export class ReportEngine {
         // Ensure path stays safely in workspace
         const { relativePath: cleanRel } = resolveWorkspacePath(this.workspaceStore, workspaceId, workingPath, { allowMissing: true });
 
-        this.workspaceStore.writeFile(workspaceId, cleanRel, content);
-
+        // Atomic file and DB record creation via ArtifactStore.createBatch
         const artifacts = this.artifactStore.createBatch([
           {
             workspaceId,

@@ -205,7 +205,8 @@ export class SpreadsheetEngine {
 
     // Decode range to determine total rows
     const range = sheet["!ref"] ? XLSX.utils.decode_range(sheet["!ref"]) : { s: { r: 0, c: 0 }, e: { r: 0, c: 0 } };
-    const totalRows = range.e.r >= range.s.r ? range.e.r - range.s.r + 1 : 0;
+    const sheetRows = range.e.r >= range.s.r ? range.e.r - range.s.r + 1 : 0;
+    const totalRows = Math.max(0, sheetRows - 1); // Exclude header row
 
     let startRow = options.startRow ?? 0;
     let endRow = options.endRow ?? totalRows;
@@ -214,32 +215,50 @@ export class SpreadsheetEngine {
       throw new Error(WORKBENCH_ERRORS.SPREADSHEET_RANGE_INVALID);
     }
 
-    // Materialize ONLY the bounded row slice using XLSX range
-    const maxBoundedEnd = Math.min(endRow, startRow + SPREADSHEET_LIMITS.maxRowsPerRead);
-    const optionsSlice: XLSX.Sheet2JSONOpts = {
-      defval: null,
-      raw: true,
+    // Always extract real header row from top row (r: range.s.r)
+    const headerRowRows = XLSX.utils.sheet_to_json<string[]>(sheet, {
+      header: 1,
       range: {
-        s: { r: range.s.r + (startRow > 0 ? startRow + 1 : 0), c: range.s.c },
-        e: { r: Math.min(range.e.r, range.s.r + maxBoundedEnd), c: range.e.c }
+        s: { r: range.s.r, c: range.s.c },
+        e: { r: range.s.r, c: range.e.c }
       }
-    };
+    });
 
-    let rawRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, optionsSlice);
-    let sliced = rawRows.slice(0, endRow - startRow);
+    const headers: string[] = headerRowRows.length > 0 && Array.isArray(headerRowRows[0])
+      ? headerRowRows[0].map((h, i) => (h !== null && h !== undefined && String(h).trim() !== "" ? String(h) : `col_${i + 1}`))
+      : [];
 
-    const warnings: string[] = [];
+    const requestedRowCount = endRow - startRow;
     let truncated = false;
+    const warnings: string[] = [];
 
-    if (sliced.length > SPREADSHEET_LIMITS.maxRowsPerRead) {
-      sliced = sliced.slice(0, SPREADSHEET_LIMITS.maxRowsPerRead);
+    if (requestedRowCount > SPREADSHEET_LIMITS.maxRowsPerRead) {
       truncated = true;
       warnings.push(`Rows capped at ${SPREADSHEET_LIMITS.maxRowsPerRead}.`);
     }
 
+    // Materialize ONLY requested slice using headers
+    const fetchStart = range.s.r + 1 + startRow; // Skip header row
+    const fetchEnd = Math.min(range.e.r, range.s.r + 1 + Math.min(endRow, startRow + SPREADSHEET_LIMITS.maxRowsPerRead) - 1);
+
+    let rawDataRows: Record<string, unknown>[] = [];
+    if (fetchStart <= range.e.r && fetchStart <= fetchEnd) {
+      rawDataRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, {
+        header: headers,
+        defval: null,
+        raw: true,
+        range: {
+          s: { r: fetchStart, c: range.s.c },
+          e: { r: fetchEnd, c: range.e.c }
+        }
+      });
+    }
+
+    let sliced = rawDataRows;
+
     let columns = options.columns;
     if (!columns || columns.length === 0) {
-      columns = sliced.length > 0 ? Object.keys(sliced[0]) : [];
+      columns = headers.length > 0 ? headers : (sliced.length > 0 ? Object.keys(sliced[0]) : []);
     }
 
     if (columns.length > SPREADSHEET_LIMITS.maxColumnsPerRead) {
