@@ -309,6 +309,31 @@ export function getDb(): Database.Database {
   }
   db.exec(`UPDATE tasks SET next_run_at = due_at WHERE next_run_at IS NULL AND due_at IS NOT NULL AND status = 'pending'`);
 
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS applied_migrations (
+      name TEXT PRIMARY KEY,
+      applied_at INTEGER NOT NULL
+    );
+  `);
+
+  // One-time cleanup: Software Factory V1 now runs in-process (transport "local") instead of
+  // over HTTP. Older installations may have a persisted DB override pointing at a retired
+  // HTTP address (e.g. http://localhost:10000 or :4000) which would otherwise keep shadowing
+  // the local transport forever. Mock Software Factory Service is also retired entirely.
+  const softwareFactoryMigration = "software_factory_local_transport_v1";
+  if (!db.prepare("SELECT 1 FROM applied_migrations WHERE name = ?").get(softwareFactoryMigration)) {
+    db.transaction(() => {
+      db.exec(`DELETE FROM service_connections WHERE service_id = 'mock_software_factory'`);
+      db.prepare(`
+        UPDATE service_connections
+        SET transport_override = NULL, endpoint_override = NULL, health_path = NULL, task_path = NULL,
+            auth_type_override = NULL, auth_env_var = NULL
+        WHERE service_id = 'software_factory'
+      `).run();
+      db.prepare("INSERT INTO applied_migrations (name, applied_at) VALUES (?, ?)").run(softwareFactoryMigration, Date.now());
+    })();
+  }
+
   sqliteInstance = db;
   return db;
 }
