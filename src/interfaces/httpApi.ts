@@ -20,7 +20,7 @@ import { SettingsStore, SettingScopeType } from "../settings/store.js";
 import { applyAllEffectiveRuntimeSettings } from "../settings/applier.js";
 import { getDb } from "../persistence/db.js";
 import type { ChatMessage } from "../types.js";
-import type { LLMProvider } from "../llm/provider.js";
+import type { LLMProvider, ToolDefinition } from "../llm/provider.js";
 
 const taskStore = new TaskStore();
 const notificationStore = new NotificationStore();
@@ -179,9 +179,96 @@ const JARVIS_COMPATIBILITY_MESSAGES: ChatMessage[] = [
   { role: "user", content: "Reply only with OK." },
 ];
 
-async function testJarvisCompatibility(provider: LLMProvider): Promise<string> {
-  const result = await provider.complete(JARVIS_COMPATIBILITY_MESSAGES, { maxTokens: 5 });
-  return typeof result === "string" ? result : result.content ?? "";
+/**
+ * Tool factice, purement protocolaire : jamais exécuté, il sert uniquement à vérifier
+ * qu'un modèle sait déclencher un appel d'outil structuré — condition nécessaire pour
+ * devenir le cerveau principal de Jarvis, qui fonctionne avec du tool calling natif.
+ */
+const JARVIS_TOOL_PROBE: ToolDefinition = {
+  type: "function",
+  function: {
+    name: "jarvis_compatibility_probe",
+    description: "Internal Jarvis compatibility probe. Always call it immediately, never explain it in plain text.",
+    parameters: {
+      type: "object",
+      properties: { value: { type: "string" } },
+      required: ["value"],
+    },
+  },
+};
+
+type JarvisCompatibilityLevel = "CHAT_COMPATIBLE" | "JARVIS_TOOL_COMPATIBLE";
+
+interface CompatibilityProbeResult {
+  level: JarvisCompatibilityLevel;
+  responsePreview: string;
+}
+
+/**
+ * Validation représentative de l'usage réel de Jarvis. Un simple échange conversationnel
+ * (CHAT_COMPATIBLE) ne suffit pas pour Infermatic : Jarvis fonctionne avec du tool calling
+ * natif, donc un modèle Infermatic doit en plus prouver qu'il sait déclencher un appel
+ * d'outil structuré (JARVIS_TOOL_COMPATIBLE) AVANT de pouvoir devenir actif.
+ */
+async function testJarvisCompatibility(provider: LLMProvider, providerName: LLMProviderName): Promise<CompatibilityProbeResult> {
+  const chatResult = await provider.complete(JARVIS_COMPATIBILITY_MESSAGES, { maxTokens: 5 });
+  const chatText = typeof chatResult === "string" ? chatResult : chatResult.content ?? "";
+
+  if (providerName !== "infermatic") {
+    return { level: "CHAT_COMPATIBLE", responsePreview: chatText.slice(0, 100) };
+  }
+
+  if (!provider.supportsNativeTools || !provider.supportsNativeTools()) {
+    throw new Error("INFERMATIC_NATIVE_TOOLS_UNSUPPORTED");
+  }
+
+  const probeResult = await provider.complete(
+    [
+      { role: "system", content: "You are Jarvis. Follow the user's instruction." },
+      { role: "user", content: 'Call the jarvis_compatibility_probe tool with value set to exactly "OK". Do not reply in plain text.' },
+    ],
+    {
+      maxTokens: 64,
+      tools: [JARVIS_TOOL_PROBE],
+      toolChoice: { type: "function", function: { name: "jarvis_compatibility_probe" } },
+    },
+  );
+
+  const toolCall = (typeof probeResult === "string" ? undefined : probeResult.toolCalls)?.[0];
+  if (!toolCall || toolCall.function.name !== "jarvis_compatibility_probe") {
+    throw new Error("INFERMATIC_NATIVE_TOOLS_UNSUPPORTED");
+  }
+
+  let parsedArgs: { value?: unknown };
+  try {
+    parsedArgs = JSON.parse(toolCall.function.arguments);
+  } catch {
+    throw new Error("INFERMATIC_NATIVE_TOOLS_UNSUPPORTED");
+  }
+
+  if (parsedArgs.value !== "OK") {
+    throw new Error("INFERMATIC_NATIVE_TOOLS_UNSUPPORTED");
+  }
+
+  return { level: "JARVIS_TOOL_COMPATIBLE", responsePreview: chatText.slice(0, 100) };
+}
+
+/**
+ * Ne jamais exposer un message d'erreur brut au frontend : on retire toute clé API
+ * configurée et tout header Authorization/Bearer résiduel, et on tronque la longueur.
+ */
+function redactSecrets(message: string): string {
+  let redacted = message;
+  for (const secret of [
+    config.llm.infermaticApiKey,
+    config.llm.anthropicApiKey,
+    config.llm.openaiApiKey,
+    config.llm.openrouterApiKey,
+  ]) {
+    if (secret) redacted = redacted.split(secret).join("[REDACTED]");
+  }
+  redacted = redacted.replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]");
+  return redacted.length > 500 ? `${redacted.slice(0, 500)}…` : redacted;
 }
 
 function applyRuntimeSettingEffect(key: string, value: unknown, agent: Agent): void {
@@ -1579,20 +1666,24 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         // n'écrit dans config.llm, dans llmConfigStore, ni dans l'agent (voir point 9).
         try {
           const testProviderInstance = createLLMProvider({ provider: body.provider, model: body.model });
-          const responseText = await testJarvisCompatibility(testProviderInstance);
+          const probe = await testJarvisCompatibility(testProviderInstance, body.provider);
           sendJson(res, 200, {
             ok: true,
             provider: body.provider,
             model: body.model,
-            responsePreview: responseText.slice(0, 100),
-            message: "Modèle accessible et fonctionnel !",
+            compatibility: probe.level,
+            responsePreview: probe.responsePreview,
+            message:
+              probe.level === "JARVIS_TOOL_COMPATIBLE"
+                ? "Modèle compatible avec le fonctionnement agentique de Jarvis (tool calling natif validé) !"
+                : "Modèle accessible et fonctionnel !",
           });
         } catch (err) {
           sendJson(res, 200, {
             ok: false,
             provider: body.provider,
             model: body.model,
-            error: (err as Error).message,
+            error: redactSecrets((err as Error).message),
           });
         }
         return;
@@ -1608,22 +1699,27 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         const currentProv = config.llm.provider;
         const currentModel = config.llm.model;
 
-        // Application atomique : on valide d'abord le candidat sans toucher à quoi que ce
-        // soit ; seule une validation réussie déclenche l'écriture (agent + config + store).
-        // En cas d'échec, l'ancien provider/modèle reste intégralement en place (point 10).
+        // Application atomique : on valide le candidat, puis on PERSISTE en premier —
+        // c'est la seule étape qui peut réellement échouer (I/O). Les mutations en
+        // mémoire (agent + config) n'interviennent qu'une fois la persistance réussie,
+        // donc si n'importe quelle étape lève une exception, rien n'a encore été modifié
+        // et l'ancien provider/modèle reste intégralement actif — pas de rollback à
+        // effectuer, et jamais d'annonce d'un rollback qui n'aurait pas réellement eu lieu.
         try {
           const newProviderInstance = createLLMProvider({ provider: body.provider, model: body.model });
-          await testJarvisCompatibility(newProviderInstance);
+          const probe = await testJarvisCompatibility(newProviderInstance, body.provider);
+
+          saveLLMConfig(body.provider, body.model);
 
           agent.setLLMProvider(newProviderInstance);
           config.llm.provider = body.provider;
           config.llm.model = body.model;
-          saveLLMConfig(body.provider, body.model);
 
           sendJson(res, 200, {
             ok: true,
             activeProvider: body.provider,
             activeModel: body.model,
+            compatibility: probe.level,
             message: `Modèle actif mis à jour : ${body.model}`,
           });
         } catch (err) {
@@ -1631,7 +1727,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
             ok: false,
             activeProvider: currentProv,
             activeModel: currentModel,
-            error: `Le modèle sélectionné n'est pas disponible (${(err as Error).message}). ${currentModel} reste actif.`,
+            error: `Le modèle sélectionné n'est pas disponible (${redactSecrets((err as Error).message)}). ${currentModel} reste actif.`,
           });
         }
         return;

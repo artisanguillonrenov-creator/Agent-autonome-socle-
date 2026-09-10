@@ -136,3 +136,133 @@ test("InfermaticProvider signale proprement une réponse sans choix (modèle inc
     globalThis.fetch = originalFetch;
   }
 });
+
+test("InfermaticProvider.supportsNativeTools() est vrai (tool calling natif disponible)", () => {
+  const provider = new InfermaticProvider({ apiKey: "k", baseUrl: "https://api.totalgpt.ai/v1", model: "m" });
+  assert.equal(provider.supportsNativeTools(), true);
+});
+
+test("InfermaticProvider envoie tools + tool_choice quand des tools sont fournis, sans imposer parallel_tool_calls", async () => {
+  const originalFetch = globalThis.fetch;
+  let sentBody: any = null;
+  try {
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      sentBody = JSON.parse(init?.body as string);
+      return new Response(JSON.stringify({ choices: [{ message: { content: "réponse naturelle" } }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const provider = new InfermaticProvider({ apiKey: "k", baseUrl: "https://api.totalgpt.ai/v1", model: "m" });
+    const tools = [
+      {
+        type: "function" as const,
+        function: { name: "web_search", description: "search", parameters: { type: "object" as const, properties: {} } },
+      },
+    ];
+
+    await provider.complete([{ role: "user", content: "cherche" }], { tools });
+    assert.deepEqual(sentBody.tools, tools);
+    assert.equal(sentBody.tool_choice, "auto");
+    assert.equal("parallel_tool_calls" in sentBody, false, "parallel_tool_calls ne doit jamais être imposé sans validation Infermatic");
+
+    await provider.complete([{ role: "user", content: "cherche" }], {
+      tools,
+      toolChoice: { type: "function", function: { name: "web_search" } },
+    });
+    assert.deepEqual(sentBody.tool_choice, { type: "function", function: { name: "web_search" } });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("InfermaticProvider formate un message assistant avec tool_calls et un résultat tool avec tool_call_id/name conservés", async () => {
+  const originalFetch = globalThis.fetch;
+  let sentBody: any = null;
+  try {
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      sentBody = JSON.parse(init?.body as string);
+      return new Response(JSON.stringify({ choices: [{ message: { content: "suite" } }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const provider = new InfermaticProvider({ apiKey: "k", baseUrl: "https://api.totalgpt.ai/v1", model: "m" });
+    await provider.complete([
+      { role: "user", content: "recherche" },
+      {
+        role: "assistant",
+        content: null,
+        toolCalls: [{ id: "call_1", type: "function", function: { name: "web_search", arguments: '{"query":"test"}' } }],
+      },
+      { role: "tool", toolCallId: "call_1", name: "web_search", content: "résultat web" },
+    ]);
+
+    assert.equal(sentBody.messages[1].role, "assistant");
+    assert.equal(sentBody.messages[1].content, null);
+    assert.deepEqual(sentBody.messages[1].tool_calls, [
+      { id: "call_1", type: "function", function: { name: "web_search", arguments: '{"query":"test"}' } },
+    ]);
+
+    assert.equal(sentBody.messages[2].role, "tool");
+    assert.equal(sentBody.messages[2].tool_call_id, "call_1");
+    assert.equal(sentBody.messages[2].name, "web_search");
+    assert.equal(sentBody.messages[2].content, "résultat web");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("InfermaticProvider restitue les tool_calls (id, name, arguments) exactement tels que renvoyés, y compris s'il y en a plusieurs", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: null,
+                tool_calls: [
+                  { id: "call_a", type: "function", function: { name: "tool_a", arguments: '{"x":1}' } },
+                  { id: "call_b", type: "function", function: { name: "tool_b", arguments: '{"y":"z"}' } },
+                ],
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+
+    const provider = new InfermaticProvider({ apiKey: "k", baseUrl: "https://api.totalgpt.ai/v1", model: "m" });
+    const result = await provider.complete([{ role: "user", content: "fais deux choses" }]);
+
+    assert.equal(result.content, null);
+    assert.equal(result.toolCalls?.length, 2);
+    assert.deepEqual(result.toolCalls?.[0], { id: "call_a", type: "function", function: { name: "tool_a", arguments: '{"x":1}' } });
+    assert.deepEqual(result.toolCalls?.[1], { id: "call_b", type: "function", function: { name: "tool_b", arguments: '{"y":"z"}' } });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("InfermaticProvider renvoie une réponse naturelle sans tool_calls quand le modèle répond en texte", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ choices: [{ message: { content: "Bonjour, comment puis-je aider ?" } }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+
+    const provider = new InfermaticProvider({ apiKey: "k", baseUrl: "https://api.totalgpt.ai/v1", model: "m" });
+    const result = await provider.complete([{ role: "user", content: "salut" }]);
+
+    assert.equal(result.content, "Bonjour, comment puis-je aider ?");
+    assert.equal(result.toolCalls, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

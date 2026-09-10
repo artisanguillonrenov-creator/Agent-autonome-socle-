@@ -359,3 +359,38 @@ test("Native Tool Calling : dispatch_capability natif vers ServiceOrchestrator (
   assert.equal(result.response.includes("DISPATCH_CAPABILITY"), false);
   assert.equal(result.response.includes("{"), false);
 });
+
+test("Agent.setLLMProvider() est le point d'entrée unique : la boucle principale ET la réflexion automatique basculent vers le nouveau provider (point 3 de l'audit)", async () => {
+  const calls = { a: 0, b: 0 };
+  const providerA: LLMProvider = {
+    name: "provider-a",
+    async complete() {
+      calls.a += 1;
+      return { content: "[A] ok", toolCalls: undefined };
+    },
+  };
+  const providerB: LLMProvider = {
+    name: "provider-b",
+    async complete() {
+      calls.b += 1;
+      return { content: "[B] ok", toolCalls: undefined };
+    },
+  };
+
+  const agent = new Agent({
+    llm: providerA,
+    embeddings: new LocalHashingEmbeddingProvider(),
+    reflectionEveryNSteps: 1,
+  });
+
+  await agent.step("Premier message, avant bascule.");
+  assert.ok(calls.a >= 1, "la boucle principale doit utiliser l'ancien provider avant setLLMProvider");
+  assert.equal(calls.b, 0);
+  const aCallsBeforeSwitch = calls.a;
+
+  agent.setLLMProvider(providerB);
+
+  await agent.step("Second message, après bascule vers le nouveau provider.");
+  assert.equal(calls.a, aCallsBeforeSwitch, "l'ancien provider ne doit plus jamais être sollicité après setLLMProvider");
+  assert.ok(calls.b >= 1, "la boucle principale ET la réflexion automatique doivent utiliser le nouveau provider");
+});

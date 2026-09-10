@@ -5,6 +5,7 @@ import { MockProvider } from "../llm/providers/mock.js";
 import { LocalHashingEmbeddingProvider } from "../llm/embeddings.js";
 import { startHttpApi } from "./httpApi.js";
 import { loadLLMConfig } from "../persistence/llmConfigStore.js";
+import { getDb } from "../persistence/db.js";
 import { config } from "../config.js";
 import { NotificationStore } from "../autonomy/notificationStore.js";
 
@@ -604,6 +605,37 @@ test("Infermatic : base URL par défaut, catalogue dynamique, jamais de faux rep
     }) as typeof fetch;
   }
 
+  // Modèle pleinement compatible Jarvis : répond "OK" au test conversationnel simple,
+  // ET sait déclencher jarvis_compatibility_probe(value="OK") quand des tools sont fournis.
+  function fullyCompatibleResponder(_urlStr: string, init?: RequestInit): Response {
+    const requestBody = init?.body ? JSON.parse(init.body as string) : {};
+    if (Array.isArray(requestBody.tools) && requestBody.tools.length > 0) {
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call_probe",
+                    type: "function",
+                    function: { name: "jarvis_compatibility_probe", arguments: JSON.stringify({ value: "OK" }) },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: "OK" } }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
   try {
     // Base URL par défaut = https://api.totalgpt.ai/v1 (point 15)
     assert.equal(previousInfermaticBaseUrl, "https://api.totalgpt.ai/v1");
@@ -681,8 +713,9 @@ test("Infermatic : base URL par défaut, catalogue dynamique, jamais de faux rep
     let persisted = loadLLMConfig();
     assert.ok(!persisted || persisted.provider !== "infermatic", "un test raté ne doit rien écrire dans llmConfigStore");
 
-    // /api/models/test : un test RÉUSSI non plus ne doit pas changer le fournisseur/modèle actif tant que /select n'est pas appelé
-    mockUpstream(() => new Response(JSON.stringify({ choices: [{ message: { content: "OK" } }] }), { status: 200 }));
+    // /api/models/test : un test RÉUSSI non plus ne doit pas changer le fournisseur/modèle actif tant que /select n'est pas appelé.
+    // Un modèle pleinement compatible (chat + tool calling natif) doit atteindre JARVIS_TOOL_COMPATIBLE.
+    mockUpstream(fullyCompatibleResponder);
     testRes = await fetch(`${baseUrl}/api/models/test`, {
       method: "POST",
       headers: { ...auth, "content-type": "application/json" },
@@ -690,9 +723,39 @@ test("Infermatic : base URL par défaut, catalogue dynamique, jamais de faux rep
     });
     testJson = await testRes.json();
     assert.equal(testJson.ok, true);
+    assert.equal(testJson.compatibility, "JARVIS_TOOL_COMPATIBLE");
     assert.ok(!JSON.stringify(testJson).includes(fakeKey));
     assert.equal(config.llm.provider, "mock");
     assert.equal(config.llm.model, "active-mock-model");
+
+    // /api/models/test : le chat simple réussit mais le modèle ne sait pas déclencher de tool_call
+    // => JARVIS_TOOL_COMPATIBLE est refusé, erreur explicite, jamais un simple succès CHAT_COMPATIBLE
+    // silencieux (Jarvis fonctionne avec du tool calling natif).
+    mockUpstream((urlStr, init) => {
+      const requestBody = init?.body ? JSON.parse(init.body as string) : {};
+      if (Array.isArray(requestBody.tools) && requestBody.tools.length > 0) {
+        return new Response(JSON.stringify({ choices: [{ message: { content: "Je ne peux pas appeler d'outil." } }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ choices: [{ message: { content: "OK" } }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    testRes = await fetch(`${baseUrl}/api/models/test`, {
+      method: "POST",
+      headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify({ provider: "infermatic", model: "Qwen-Qwen3.6-35B-A3B" }),
+    });
+    testJson = await testRes.json();
+    assert.equal(testJson.ok, false);
+    assert.match(testJson.error, /INFERMATIC_NATIVE_TOOLS_UNSUPPORTED/);
+    assert.equal(config.llm.provider, "mock", "un modèle non tool-compatible ne doit jamais devenir actif");
+    assert.equal(config.llm.model, "active-mock-model");
+    persisted = loadLLMConfig();
+    assert.ok(!persisted || persisted.provider !== "infermatic");
 
     // /api/models/select : échec => ancien fournisseur/modèle intégralement conservé, rien persisté
     mockUpstream(() => new Response(JSON.stringify({ error: { message: "model does not support chat" } }), { status: 400 }));
@@ -712,7 +775,7 @@ test("Infermatic : base URL par défaut, catalogue dynamique, jamais de faux rep
     assert.ok(!persisted || persisted.provider !== "infermatic");
 
     // /api/models/select : succès => appliqué et persisté seulement après validation réussie (atomique)
-    mockUpstream(() => new Response(JSON.stringify({ choices: [{ message: { content: "OK" } }] }), { status: 200 }));
+    mockUpstream(fullyCompatibleResponder);
     selectRes = await (
       await fetch(`${baseUrl}/api/models/select`, {
         method: "POST",
@@ -723,11 +786,46 @@ test("Infermatic : base URL par défaut, catalogue dynamique, jamais de faux rep
     assert.equal(selectRes.ok, true);
     assert.equal(selectRes.activeProvider, "infermatic");
     assert.equal(selectRes.activeModel, "Qwen-Qwen3.6-35B-A3B");
+    assert.equal(selectRes.compatibility, "JARVIS_TOOL_COMPATIBLE");
     assert.equal(config.llm.provider, "infermatic");
     assert.equal(config.llm.model, "Qwen-Qwen3.6-35B-A3B");
     persisted = loadLLMConfig();
     assert.equal(persisted?.provider, "infermatic");
     assert.equal(persisted?.model, "Qwen-Qwen3.6-35B-A3B");
+
+    // /api/models/select : la validation réussit mais la PERSISTANCE échoue (panne DB artificielle) =>
+    // aucun état partiellement appliqué. saveLLMConfig() est appelée AVANT toute mutation en mémoire
+    // (agent + config), donc un échec ici ne doit rien avoir changé : ni l'agent, ni config.llm, ni
+    // le store persistant, qui doit rester sur l'état d'avant la tentative.
+    {
+      const activeProviderBeforeOutage = config.llm.provider;
+      const activeModelBeforeOutage = config.llm.model;
+      const db = getDb();
+      db.exec("ALTER TABLE user_preferences RENAME TO user_preferences_test_backup");
+      try {
+        const persistFailRes: any = await (
+          await fetch(`${baseUrl}/api/models/select`, {
+            method: "POST",
+            headers: { ...auth, "content-type": "application/json" },
+            body: JSON.stringify({ provider: "mock", model: "other-mock-model" }),
+          })
+        ).json();
+        assert.equal(persistFailRes.ok, false);
+        assert.equal(persistFailRes.activeProvider, activeProviderBeforeOutage);
+        assert.equal(persistFailRes.activeModel, activeModelBeforeOutage);
+        assert.equal(
+          config.llm.provider,
+          activeProviderBeforeOutage,
+          "une panne de persistance ne doit jamais laisser un état partiellement appliqué",
+        );
+        assert.equal(config.llm.model, activeModelBeforeOutage);
+      } finally {
+        db.exec("ALTER TABLE user_preferences_test_backup RENAME TO user_preferences");
+      }
+      const persistedAfterOutage = loadLLMConfig();
+      assert.equal(persistedAfterOutage?.provider, activeProviderBeforeOutage, "la persistance doit rester sur l'ancien état après une panne");
+      assert.equal(persistedAfterOutage?.model, activeModelBeforeOutage);
+    }
 
     // Aucune fuite de clé dans GET /api/models
     const modelsJson = await (await fetch(`${baseUrl}/api/models`, { headers: auth })).json();

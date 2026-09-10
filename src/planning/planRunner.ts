@@ -5,6 +5,7 @@ import type { ServiceOrchestrator } from "../orchestration/serviceOrchestrator.j
 import { savePlanCheckpoint } from "../persistence/checkpoint.js";
 import { Planner, type ExecutionPlanNode, type PlanRun } from "./planner.js";
 import type { ReplanningEngine } from "./replanningEngine.js";
+import type { LLMProvider } from "../llm/provider.js";
 import { SpecialistCoordinator,SpecialistRegistry } from "../orchestration/specialistRegistry.js";
 import { MissionConsolidator } from "./missionConsolidator.js";
 import { ActivityStore } from "../observability/activityStore.js";
@@ -13,6 +14,8 @@ const LIVE=new Set(["QUEUED","DISPATCHING","RUNNING"]);
 export class PlanRunner {
  private timer?:NodeJS.Timeout; private ticking=false; readonly specialists:SpecialistRegistry; private coordinator:SpecialistCoordinator; private consolidator:MissionConsolidator; private activity=new ActivityStore();
  constructor(readonly orchestrator:ServiceOrchestrator,readonly planner=new Planner(),private replanning?:ReplanningEngine,private intervalMs=500,specialists?:SpecialistRegistry){this.specialists=specialists??new SpecialistRegistry(undefined,orchestrator.registry);this.coordinator=new SpecialistCoordinator(this.specialists);this.consolidator=new MissionConsolidator(orchestrator.artifacts);}
+ /** Permet à Agent.setLLMProvider() de propager le nouveau fournisseur jusqu'au ReplanningEngine. */
+ setLLMProvider(llm:LLMProvider){this.replanning?.setLLMProvider(llm);}
  start(){this.recover();this.timer=setInterval(()=>void this.tick(),this.intervalMs);this.timer.unref?.();}
  stop(){if(this.timer)clearInterval(this.timer);}
  recover(){getDb().prepare(`UPDATE plan_nodes SET claimed_at=NULL WHERE plan_run_id IS NOT NULL AND status='in_progress' AND operation_task_id IS NULL`).run();}

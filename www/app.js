@@ -1310,7 +1310,10 @@ async function testSelectedModel() {
 
     if (statusBox) {
       if (res.ok) {
-        statusBox.innerHTML = `<div style="padding: 10px; background: rgba(16,185,129,0.15); border: 1px solid var(--accent-success); border-radius: 8px; color: var(--accent-success);">✅ ${res.message}</div>`;
+        const badge = res.compatibility === 'JARVIS_TOOL_COMPATIBLE'
+          ? '🛠️ Compatible tool calling Jarvis'
+          : '💬 Compatible conversationnel uniquement';
+        statusBox.innerHTML = `<div style="padding: 10px; background: rgba(16,185,129,0.15); border: 1px solid var(--accent-success); border-radius: 8px; color: var(--accent-success);">✅ ${res.message}<br/><span style="font-size: 0.8rem; opacity: 0.85;">${badge}</span></div>`;
       } else {
         statusBox.innerHTML = `<div style="padding: 10px; background: rgba(239,68,68,0.15); border: 1px solid var(--accent-danger); border-radius: 8px; color: var(--accent-danger);">❌ Modèle inaccessible : ${res.error}</div>`;
       }
