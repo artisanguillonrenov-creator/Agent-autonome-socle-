@@ -3,7 +3,7 @@ import { config } from "../config.js";
 import { SkillRegistry } from "./registry.js";
 
 const boosts:Array<[RegExp,string[]]> = [
-  [/\b(recherch|actualit|nouvelle|prix|web|news)\w*/i,["web_search","deep_research"]],
+  [/\b(recherch|actualit|nouvelle|prix|web|news|internet)\w*/i,["web_search","deep_research"]],
   [/\b(code|application|github|modifi|développ)\w*/i,["software_development"]],
   [/\b(fichier|workspace|dossier)\w*/i,["file_management"]],
   [/\b(rappel|programm|planifi)\w*/i,["schedule_task"]],
