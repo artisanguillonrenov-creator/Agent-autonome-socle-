@@ -129,9 +129,18 @@ export class ServiceAdapter {
         };
       }
       try {
+        if (s.id === "software_factory") {
+          console.log(`[JARVIS-FLOW] SERVICE=software_factory taskId=${r.task_id} traceId=${r.trace_id}`);
+          console.log(`[JARVIS-FLOW] TRANSPORT=local taskId=${r.task_id} traceId=${r.trace_id}`);
+          console.log(`[JARVIS-FLOW] FACTORY_RECEIVED taskId=${r.task_id} traceId=${r.trace_id}`);
+        }
+        const events = await target.handleTaskRequest(r);
+        if (s.id === "software_factory" && events.some((event) => event.type === "TASK_COMPLETED")) {
+          console.log(`[JARVIS-FLOW] PR_CREATED taskId=${r.task_id} traceId=${r.trace_id}`);
+        }
         return {
           success: true,
-          events: await target.handleTaskRequest(r),
+          events,
           transportDurationMs: Date.now() - started,
         };
       } catch (e) {

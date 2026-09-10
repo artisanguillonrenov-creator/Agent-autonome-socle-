@@ -96,11 +96,15 @@ export class SkillRegistry {
     if (!skill) {
       return `Erreur: compétence "${name}" introuvable.`;
     }
+    console.log(`[JARVIS-FLOW] TOOL=${name}`);
     try {
       if(skill.kind==="INTERNAL"||skill.kind==="FUTURE"||skill.availability!=="AVAILABLE"||!this.isEnabled(skill)||!skill.handler)throw new Error("SKILL_NOT_EXECUTABLE");
       validateInput(skill.parameters,input);
-      return await skill.handler(input, ctx);
+      const result=await skill.handler(input, ctx);
+      console.log(`[JARVIS-FLOW] TOOL_RESULT=${name}`);
+      return result;
     } catch (err) {
+      console.log(`[JARVIS-FLOW] TOOL_RESULT=${name}`);
       return `Erreur lors de l'exécution de "${name}": ${(err as Error).message}`;
     }
   }
