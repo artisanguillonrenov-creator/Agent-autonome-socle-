@@ -21,23 +21,35 @@ export const DATASET_LIMITS = {
 };
 
 export class DataAnalysisEngine {
-  private validateDataset(rows: Record<string, unknown>[]): void {
+  private validateDataset(rows: Record<string, unknown>[]): string[] {
     if (rows.length > DATASET_LIMITS.maxRowsInMemory) {
       throw new Error(WORKBENCH_ERRORS.DATASET_LIMIT_EXCEEDED);
     }
-    if (rows.length > 0) {
-      const colCount = Object.keys(rows[0]).length;
-      if (colCount > DATASET_LIMITS.maxColumns) {
-        throw new Error(WORKBENCH_ERRORS.DATASET_LIMIT_EXCEEDED);
-      }
-      if (rows.length * colCount > DATASET_LIMITS.maxCells) {
-        throw new Error(WORKBENCH_ERRORS.DATASET_LIMIT_EXCEEDED);
+
+    // Build union of all keys across all rows to accurately count columns and total cells
+    const columnSet = new Set<string>();
+    for (const row of rows) {
+      if (row && typeof row === "object") {
+        for (const k of Object.keys(row)) {
+          columnSet.add(k);
+        }
       }
     }
+
+    const columns = Array.from(columnSet);
+    if (columns.length > DATASET_LIMITS.maxColumns) {
+      throw new Error(WORKBENCH_ERRORS.DATASET_LIMIT_EXCEEDED);
+    }
+
+    if (rows.length * columns.length > DATASET_LIMITS.maxCells) {
+      throw new Error(WORKBENCH_ERRORS.DATASET_LIMIT_EXCEEDED);
+    }
+
+    return columns;
   }
 
   describe(rows: Record<string, unknown>[]): DescribeResult {
-    this.validateDataset(rows);
+    const columns = this.validateDataset(rows);
     const numericColumns: Record<string, NumericDescribe> = {};
     const stringColumns: Record<string, StringDescribe> = {};
     const dateColumns: Record<string, DateDescribe> = {};
@@ -46,14 +58,11 @@ export class DataAnalysisEngine {
       return { numericColumns, stringColumns, dateColumns, totalRows: 0 };
     }
 
-    const columns = Object.keys(rows[0]);
-
     for (const col of columns) {
       const rawVals = rows.map((r) => r[col]);
       const nonNullVals = rawVals.filter((v) => v !== null && v !== undefined && v !== "");
       const missingCount = rawVals.length - nonNullVals.length;
 
-      // Classify column type based on non-null values
       const numericVals: number[] = [];
       const dateVals: Date[] = [];
       const strVals: string[] = [];
@@ -147,18 +156,178 @@ export class DataAnalysisEngine {
     };
   }
 
-  missingValues(rows: Record<string, unknown>[]): MissingValueResult[] {
+  // Individual statistical helper methods
+  count(rows: Record<string, unknown>[], mode: "COUNT_ROWS" | "COUNT_NON_NULL" = "COUNT_ROWS", column?: string): number {
     this.validateDataset(rows);
+    if (mode === "COUNT_ROWS") return rows.length;
+    if (!column) return rows.length;
+    return rows.filter((r) => r[column] !== null && r[column] !== undefined && r[column] !== "").length;
+  }
+
+  private getNumericValues(rows: Record<string, unknown>[], column: string): number[] {
+    const columns = this.validateDataset(rows);
+    if (!columns.includes(column)) {
+      throw new Error(WORKBENCH_ERRORS.DATA_COLUMN_NOT_FOUND);
+    }
+
+    const nums: number[] = [];
+    for (const r of rows) {
+      const v = r[column];
+      if (v !== null && v !== undefined && v !== "" && typeof v !== "boolean") {
+        const n = Number(v);
+        if (!isNaN(n)) nums.push(n);
+      }
+    }
+    return nums;
+  }
+
+  sum(rows: Record<string, unknown>[], column: string): number {
+    const nums = this.getNumericValues(rows, column);
+    return nums.reduce((a, b) => a + b, 0);
+  }
+
+  mean(rows: Record<string, unknown>[], column: string): number {
+    const nums = this.getNumericValues(rows, column);
+    if (nums.length === 0) return 0;
+    return nums.reduce((a, b) => a + b, 0) / nums.length;
+  }
+
+  median(rows: Record<string, unknown>[], column: string): number {
+    const nums = this.getNumericValues(rows, column).sort((a, b) => a - b);
+    if (nums.length === 0) return 0;
+    const mid = Math.floor(nums.length / 2);
+    return nums.length % 2 !== 0 ? nums[mid] : (nums[mid - 1] + nums[mid]) / 2;
+  }
+
+  min(rows: Record<string, unknown>[], column: string): number {
+    const nums = this.getNumericValues(rows, column);
+    if (nums.length === 0) return 0;
+    return Math.min(...nums);
+  }
+
+  max(rows: Record<string, unknown>[], column: string): number {
+    const nums = this.getNumericValues(rows, column);
+    if (nums.length === 0) return 0;
+    return Math.max(...nums);
+  }
+
+  stddev(rows: Record<string, unknown>[], column: string): number {
+    const nums = this.getNumericValues(rows, column);
+    if (nums.length <= 1) return 0;
+    const avg = nums.reduce((a, b) => a + b, 0) / nums.length;
+    const variance = nums.reduce((a, b) => a + Math.pow(b - avg, 2), 0) / (nums.length - 1);
+    return Math.sqrt(variance);
+  }
+
+  groupBy(
+    rows: Record<string, unknown>[],
+    groupColumn: string,
+    valueColumn?: string,
+    fn: "COUNT" | "SUM" | "MEAN" | "MIN" | "MAX" = "COUNT"
+  ): Record<string, unknown>[] {
+    const columns = this.validateDataset(rows);
+    if (!columns.includes(groupColumn)) {
+      throw new Error(WORKBENCH_ERRORS.DATA_COLUMN_NOT_FOUND);
+    }
+
+    const groups = new Map<string, Record<string, unknown>[]>();
+    for (const r of rows) {
+      const key = String(r[groupColumn] ?? "null");
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(r);
+    }
+
+    const results: Record<string, unknown>[] = [];
+    for (const [key, groupRows] of groups.entries()) {
+      if (results.length >= DATASET_LIMITS.maxResultRows) break;
+
+      let val: number = 0;
+      if (fn === "COUNT") {
+        val = groupRows.length;
+      } else if (valueColumn) {
+        if (fn === "SUM") val = this.sum(groupRows, valueColumn);
+        else if (fn === "MEAN") val = this.mean(groupRows, valueColumn);
+        else if (fn === "MIN") val = this.min(groupRows, valueColumn);
+        else if (fn === "MAX") val = this.max(groupRows, valueColumn);
+      }
+
+      results.push({
+        [groupColumn]: key,
+        [valueColumn ? `${valueColumn}_${fn.toLowerCase()}` : fn.toLowerCase()]: val
+      });
+    }
+
+    return results;
+  }
+
+  topN(rows: Record<string, unknown>[], column: string, n = 10): Record<string, unknown>[] {
+    const columns = this.validateDataset(rows);
+    if (!columns.includes(column)) {
+      throw new Error(WORKBENCH_ERRORS.DATA_COLUMN_NOT_FOUND);
+    }
+
+    const cap = Math.min(n, DATASET_LIMITS.maxResultRows);
+    const sorted = [...rows].sort((a, b) => {
+      const valA = Number(a[column]);
+      const valB = Number(b[column]);
+      if (!isNaN(valA) && !isNaN(valB)) return valB - valA;
+      return String(b[column] ?? "").localeCompare(String(a[column] ?? ""));
+    });
+
+    return sorted.slice(0, cap);
+  }
+
+  bottomN(rows: Record<string, unknown>[], column: string, n = 10): Record<string, unknown>[] {
+    const columns = this.validateDataset(rows);
+    if (!columns.includes(column)) {
+      throw new Error(WORKBENCH_ERRORS.DATA_COLUMN_NOT_FOUND);
+    }
+
+    const cap = Math.min(n, DATASET_LIMITS.maxResultRows);
+    const sorted = [...rows].sort((a, b) => {
+      const valA = Number(a[column]);
+      const valB = Number(b[column]);
+      if (!isNaN(valA) && !isNaN(valB)) return valA - valB;
+      return String(a[column] ?? "").localeCompare(String(b[column] ?? ""));
+    });
+
+    return sorted.slice(0, cap);
+  }
+
+  distribution(rows: Record<string, unknown>[], column: string): { value: string; count: number; percentage: number }[] {
+    const columns = this.validateDataset(rows);
+    if (!columns.includes(column)) {
+      throw new Error(WORKBENCH_ERRORS.DATA_COLUMN_NOT_FOUND);
+    }
+
+    const counts = new Map<string, number>();
+    for (const r of rows) {
+      const k = String(r[column] ?? "null");
+      counts.set(k, (counts.get(k) ?? 0) + 1);
+    }
+
+    const total = rows.length;
+    const sorted = Array.from(counts.entries())
+      .map(([value, cnt]) => ({
+        value,
+        count: cnt,
+        percentage: total > 0 ? Number(((cnt / total) * 100).toFixed(2)) : 0
+      }))
+      .sort((a, b) => b.count - a.count);
+
+    return sorted.slice(0, DATASET_LIMITS.maxResultRows);
+  }
+
+  missingValues(rows: Record<string, unknown>[]): MissingValueResult[] {
+    const columns = this.validateDataset(rows);
     if (rows.length === 0) return [];
 
-    const columns = Object.keys(rows[0]);
     const results: MissingValueResult[] = [];
 
     for (const col of columns) {
       let missingCount = 0;
       for (const row of rows) {
         const val = row[col];
-        // Strictly distinguish 0, false, "" from null / undefined
         if (val === null || val === undefined) {
           missingCount++;
         }
@@ -210,15 +379,15 @@ export class DataAnalysisEngine {
   }
 
   outliers(rows: Record<string, unknown>[], column: string): OutlierResult {
-    this.validateDataset(rows);
-    if (rows.length === 0 || !(column in (rows[0] ?? {}))) {
+    const columns = this.validateDataset(rows);
+    if (!columns.includes(column)) {
       throw new Error(WORKBENCH_ERRORS.DATA_COLUMN_NOT_FOUND);
     }
 
     const numericVals: number[] = [];
     for (const r of rows) {
       const val = r[column];
-      if (val !== null && val !== undefined && val !== "") {
+      if (val !== null && val !== undefined && val !== "" && typeof val !== "boolean") {
         const num = Number(val);
         if (!isNaN(num)) {
           numericVals.push(num);
@@ -269,8 +438,8 @@ export class DataAnalysisEngine {
     columnA: string,
     columnB: string
   ): CorrelationResult {
-    this.validateDataset(rows);
-    if (rows.length === 0 || !(columnA in (rows[0] ?? {})) || !(columnB in (rows[0] ?? {}))) {
+    const columns = this.validateDataset(rows);
+    if (!columns.includes(columnA) || !columns.includes(columnB)) {
       throw new Error(WORKBENCH_ERRORS.DATA_COLUMN_NOT_FOUND);
     }
 
@@ -283,9 +452,11 @@ export class DataAnalysisEngine {
         valA !== null &&
         valA !== undefined &&
         valA !== "" &&
+        typeof valA !== "boolean" &&
         valB !== null &&
         valB !== undefined &&
-        valB !== ""
+        valB !== "" &&
+        typeof valB !== "boolean"
       ) {
         const numA = Number(valA);
         const numB = Number(valB);
@@ -335,8 +506,8 @@ export class DataAnalysisEngine {
     granularity: TimeSeriesGranularity,
     valueColumn?: string
   ): TimeSeriesResult {
-    this.validateDataset(rows);
-    if (rows.length === 0 || !(dateColumn in (rows[0] ?? {}))) {
+    const columns = this.validateDataset(rows);
+    if (!columns.includes(dateColumn)) {
       throw new Error(WORKBENCH_ERRORS.DATA_COLUMN_NOT_FOUND);
     }
 
@@ -361,7 +532,6 @@ export class DataAnalysisEngine {
       } else if (granularity === "YEAR") {
         key = `${year}`;
       } else if (granularity === "WEEK") {
-        // Simple ISO week key calculation
         const firstDayOfYear = new Date(Date.UTC(year, 0, 1));
         const pastDaysOfYear = (dateObj.getTime() - firstDayOfYear.getTime()) / 86400000;
         const weekNum = Math.ceil((pastDaysOfYear + firstDayOfYear.getUTCDay() + 1) / 7);

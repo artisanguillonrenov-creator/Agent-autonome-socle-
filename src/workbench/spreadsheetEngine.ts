@@ -15,6 +15,7 @@ import {
 } from "./workbenchTypes.js";
 
 export const SPREADSHEET_LIMITS = {
+  maxInputBytes: 25 * 1024 * 1024, // 25 MB max input file size
   maxRowsPerRead: 10_000,
   maxColumnsPerRead: 200,
   maxCellsPerRead: 250_000
@@ -49,6 +50,11 @@ export class SpreadsheetEngine {
       relativePath
     );
 
+    const stats = statSync(absolutePath);
+    if (stats.size > SPREADSHEET_LIMITS.maxInputBytes) {
+      throw new Error(WORKBENCH_ERRORS.SPREADSHEET_LIMIT_EXCEEDED);
+    }
+
     const format = this.detectFormat(cleanRel);
     let workbook: XLSX.WorkBook;
 
@@ -61,10 +67,10 @@ export class SpreadsheetEngine {
         workbook = XLSX.read(content, { type: "string", FS: "\t", raw: false });
       } else {
         const buffer = readFileSync(absolutePath);
-        // Formula values are read as raw values or empty strings, never executed
         workbook = XLSX.read(buffer, { type: "buffer", cellFormula: false, cellHTML: false });
       }
-    } catch {
+    } catch (e: any) {
+      if (e?.message === WORKBENCH_ERRORS.SPREADSHEET_LIMIT_EXCEEDED) throw e;
       throw new Error(WORKBENCH_ERRORS.SPREADSHEET_FORMAT_UNSUPPORTED);
     }
 
@@ -196,12 +202,11 @@ export class SpreadsheetEngine {
     }
 
     const sheet = workbook.Sheets[targetSheetName];
-    const rawRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, {
-      defval: null,
-      raw: true
-    });
 
-    const totalRows = rawRows.length;
+    // Decode range to determine total rows
+    const range = sheet["!ref"] ? XLSX.utils.decode_range(sheet["!ref"]) : { s: { r: 0, c: 0 }, e: { r: 0, c: 0 } };
+    const totalRows = range.e.r >= range.s.r ? range.e.r - range.s.r + 1 : 0;
+
     let startRow = options.startRow ?? 0;
     let endRow = options.endRow ?? totalRows;
 
@@ -209,7 +214,20 @@ export class SpreadsheetEngine {
       throw new Error(WORKBENCH_ERRORS.SPREADSHEET_RANGE_INVALID);
     }
 
-    let sliced = rawRows.slice(startRow, endRow);
+    // Materialize ONLY the bounded row slice using XLSX range
+    const maxBoundedEnd = Math.min(endRow, startRow + SPREADSHEET_LIMITS.maxRowsPerRead);
+    const optionsSlice: XLSX.Sheet2JSONOpts = {
+      defval: null,
+      raw: true,
+      range: {
+        s: { r: range.s.r + (startRow > 0 ? startRow + 1 : 0), c: range.s.c },
+        e: { r: Math.min(range.e.r, range.s.r + maxBoundedEnd), c: range.e.c }
+      }
+    };
+
+    let rawRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, optionsSlice);
+    let sliced = rawRows.slice(0, endRow - startRow);
+
     const warnings: string[] = [];
     let truncated = false;
 
@@ -377,21 +395,28 @@ export class SpreadsheetEngine {
   private calcAggregate(vals: unknown[], fn: AggregateFunction): number {
     if (fn === "COUNT") return vals.length;
 
-    const nums = vals
-      .map((v) => Number(v))
-      .filter((n) => !isNaN(n) && n !== null && n !== undefined);
+    const validNums = vals
+      .filter(
+        (v) =>
+          v !== null &&
+          v !== undefined &&
+          v !== "" &&
+          typeof v !== "boolean" &&
+          !isNaN(Number(v))
+      )
+      .map((v) => Number(v));
 
-    if (nums.length === 0) return 0;
+    if (validNums.length === 0) return 0;
 
     switch (fn) {
       case "SUM":
-        return nums.reduce((a, b) => a + b, 0);
+        return validNums.reduce((a, b) => a + b, 0);
       case "MEAN":
-        return nums.reduce((a, b) => a + b, 0) / nums.length;
+        return validNums.reduce((a, b) => a + b, 0) / validNums.length;
       case "MIN":
-        return Math.min(...nums);
+        return Math.min(...validNums);
       case "MAX":
-        return Math.max(...nums);
+        return Math.max(...validNums);
       default:
         return 0;
     }

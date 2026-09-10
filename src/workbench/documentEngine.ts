@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { statSync, readFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import { PDFParse } from "pdf-parse";
 import { WorkspaceStore } from "../workspaces/workspaceStore.js";
 import {
   DocumentFormat,
@@ -11,9 +11,6 @@ import {
   resolveWorkspacePath,
   WORKBENCH_ERRORS
 } from "./workbenchTypes.js";
-
-const require = createRequire(import.meta.url);
-const pdfParse = require("pdf-parse");
 
 export const DOCUMENT_LIMITS = {
   maxInputBytes: 25 * 1024 * 1024, // 25 MB
@@ -48,18 +45,14 @@ export class DocumentEngine {
   }
 
   private cleanHtml(htmlContent: string): string {
-    // Strip scripts, styles, iframes, and comments
     let text = htmlContent
       .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, " ")
       .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, " ")
       .replace(/<iframe\b[^<]*(?:(?!<\/iframe>)<[^<]*)*<\/iframe>/gi, " ")
       .replace(/<!--[\s\S]*?-->/g, " ");
 
-    // Replace line break elements with newlines
     text = text.replace(/<(?:br|h[1-6]|p|div|li|tr)[^>]*>/gi, "\n");
-    // Strip remaining tags
     text = text.replace(/<[^>]+>/g, " ");
-    // Unescape basic HTML entities
     text = text
       .replace(/&nbsp;/gi, " ")
       .replace(/&amp;/gi, "&")
@@ -68,7 +61,6 @@ export class DocumentEngine {
       .replace(/&quot;/gi, '"')
       .replace(/&#39;/gi, "'");
 
-    // Clean up excessive whitespace per line
     return text
       .split("\n")
       .map((line) => line.trim())
@@ -95,23 +87,47 @@ export class DocumentEngine {
     let pageCount: number | undefined;
     let metadata: Record<string, unknown> = {};
     let title: string | undefined;
+    let pdfPageSections: DocumentSection[] = [];
 
     if (format === "pdf") {
       const buffer = readFileSync(absolutePath);
+      const parser = new PDFParse({ data: buffer });
       try {
-        const data = await pdfParse(buffer);
-        pageCount = data.numpages;
-        metadata = {
-          info: data.info ?? {},
-          metadata: data.metadata ?? null,
-          version: data.version ?? null
-        };
-        if (data.info?.Title && typeof data.info.Title === "string" && data.info.Title.trim()) {
-          title = data.info.Title.trim();
-        }
-        fullText = data.text ?? "";
+        const textResult = await parser.getText();
+        fullText = textResult?.text ?? "";
+        pageCount = textResult?.pages?.length ?? 0;
 
-        // OCR Required check if PDF has pages but virtually no extractable text
+        try {
+          const infoResult = await parser.getInfo();
+          if (infoResult) {
+            metadata = { info: infoResult.info ?? {}, metadata: infoResult.metadata ?? null };
+            if (infoResult.info?.Title && typeof infoResult.info.Title === "string") {
+              title = infoResult.info.Title.trim();
+            }
+          }
+        } catch {
+          // Info extraction fallback
+        }
+
+        if (textResult?.pages && textResult.pages.length > 0) {
+          let currentOffset = 0;
+          for (let i = 0; i < textResult.pages.length; i++) {
+            if (pdfPageSections.length >= DOCUMENT_LIMITS.maxSections) break;
+            const pText = textResult.pages[i].text?.trim() ?? "";
+            if (pText) {
+              pdfPageSections.push({
+                index: i,
+                page: i + 1,
+                startOffset: currentOffset,
+                endOffset: currentOffset + pText.length,
+                text: pText
+              });
+            }
+            currentOffset += pText.length + 1;
+          }
+        }
+
+        // Check if OCR is required (pages exist but virtually no extractable text)
         if ((pageCount ?? 0) > 0 && fullText.trim().replace(/\s+/g, "").length < 10) {
           throw new Error(WORKBENCH_ERRORS.DOCUMENT_OCR_REQUIRED);
         }
@@ -120,6 +136,12 @@ export class DocumentEngine {
           throw err;
         }
         throw new Error(WORKBENCH_ERRORS.DOCUMENT_PARSE_FAILED);
+      } finally {
+        try {
+          await parser.destroy();
+        } catch {
+          // Ignore destroy errors
+        }
       }
     } else {
       const rawContent = readFileSync(absolutePath, "utf-8");
@@ -151,15 +173,16 @@ export class DocumentEngine {
       }
     }
 
-    // Enforce character limit
     if (fullText.length > DOCUMENT_LIMITS.maxExtractedCharacters) {
       fullText = fullText.slice(0, DOCUMENT_LIMITS.maxExtractedCharacters);
       truncated = true;
       warnings.push(`Document text truncated to ${DOCUMENT_LIMITS.maxExtractedCharacters} characters.`);
     }
 
-    // Split sections
-    const sections = this.extractSections(fullText, format);
+    const sections = format === "pdf" && pdfPageSections.length > 0
+      ? pdfPageSections
+      : this.extractSections(fullText, format);
+
     if (sections.length >= DOCUMENT_LIMITS.maxSections) {
       warnings.push(`Sections capped at ${DOCUMENT_LIMITS.maxSections}.`);
     }
@@ -211,7 +234,6 @@ export class DocumentEngine {
         }
       }
     } else {
-      // Split by double newlines or logical paragraphs
       const paragraphs = fullText.split(/\n\s*\n/);
       let cursor = 0;
       for (let i = 0; i < paragraphs.length; i++) {
@@ -254,8 +276,9 @@ export class DocumentEngine {
       const endExcerpt = Math.min(document.text.length, foundIdx + normQuery.length + contextChars);
       const excerpt = document.text.substring(startExcerpt, endExcerpt).replace(/\n/g, " ");
 
-      // Find corresponding section
       let matchingSectionIdx: number | undefined;
+      let matchingPage: number | undefined;
+
       if (document.sections) {
         const sec = document.sections.find(
           (s) =>
@@ -264,10 +287,14 @@ export class DocumentEngine {
             foundIdx >= s.startOffset &&
             foundIdx < s.endOffset
         );
-        if (sec) matchingSectionIdx = sec.index;
+        if (sec) {
+          matchingSectionIdx = sec.index;
+          matchingPage = sec.page;
+        }
       }
 
       matches.push({
+        page: matchingPage,
         section: matchingSectionIdx,
         offset: foundIdx,
         matchedText: rawMatchedText,

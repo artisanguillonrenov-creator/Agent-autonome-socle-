@@ -47,26 +47,34 @@ export class ReportEngine {
     let relativePath: string | undefined;
     let artifactId: string | undefined;
 
-    if (options.persistArtifact) {
+    if (options.persistArtifact || options.targetPath) {
       try {
         const safeTitle = structure.title.replace(/[^a-zA-Z0-9._-]/g, "_") || "report";
-        const fileName = options.targetPath ?? `reports/${safeTitle}_${reportId.slice(0, 8)}.${format === "markdown" ? "md" : format}`;
+        const workingPath = options.targetPath ?? `reports/${safeTitle}_${reportId.slice(0, 8)}.${format === "markdown" ? "md" : format}`;
 
-        const artifact = this.artifactStore.createTextArtifact({
-          workspaceId,
-          kind: "REPORT",
-          name: structure.title,
-          mimeType,
-          content,
-          metadata: {
-            reportId,
-            format,
-            sources: structure.sources
+        // Ensure path stays safely in workspace
+        const { relativePath: cleanRel } = resolveWorkspacePath(this.workspaceStore, workspaceId, workingPath, { allowMissing: true });
+
+        this.workspaceStore.writeFile(workspaceId, cleanRel, content);
+
+        const artifacts = this.artifactStore.createBatch([
+          {
+            workspaceId,
+            kind: "REPORT",
+            name: structure.title,
+            mimeType,
+            content: contentBuffer,
+            workingPath: cleanRel,
+            metadata: {
+              reportId,
+              format,
+              sources: structure.sources
+            }
           }
-        });
+        ]);
 
-        artifactId = artifact.id;
-        relativePath = artifact.relativePath;
+        artifactId = artifacts[0]?.id;
+        relativePath = cleanRel;
       } catch (err) {
         throw new Error(WORKBENCH_ERRORS.REPORT_GENERATION_FAILED);
       }
@@ -112,7 +120,7 @@ export class ReportEngine {
         lines.push(sec.content);
         if (sec.provenance && sec.provenance.length > 0) {
           lines.push("");
-          lines.push("*Sources de la section :* " + sec.provenance.map(this.formatProvenance).join(", "));
+          lines.push("*Sources de la section :* " + sec.provenance.map((p) => this.formatProvenance(p)).join(", "));
         }
         lines.push("");
       }
@@ -147,7 +155,7 @@ export class ReportEngine {
     if (report.tables && report.tables.length > 0) {
       const tbl = report.tables[0];
       const lines: string[] = [];
-      lines.push(tbl.columns.map(this.escapeCsvCell).join(","));
+      lines.push(tbl.columns.map((c) => this.escapeCsvCell(c)).join(","));
       for (const row of tbl.rows) {
         lines.push(row.map((cell) => this.escapeCsvCell(String(cell ?? ""))).join(","));
       }

@@ -10,8 +10,7 @@ import {
 } from "./workbenchTypes.js";
 
 export const DATABASE_LIMITS = {
-  maxRows: 1000,
-  timeoutMs: 5000
+  maxRows: 1000
 };
 
 const FORBIDDEN_KEYWORDS = [
@@ -51,7 +50,6 @@ export class DatabaseQueryEngine {
       throw new Error(WORKBENCH_ERRORS.DATABASE_QUERY_INVALID);
     }
 
-    // Check for multiple SQL statements (semicolon in middle)
     const statements = cleaned
       .split(";")
       .map((s) => s.trim())
@@ -61,13 +59,11 @@ export class DatabaseQueryEngine {
       throw new Error(WORKBENCH_ERRORS.DATABASE_QUERY_NOT_READ_ONLY);
     }
 
-    // Must start with SELECT or WITH (for CTE read-only queries)
     const upper = statements[0].toUpperCase();
     if (!upper.startsWith("SELECT") && !upper.startsWith("WITH")) {
       throw new Error(WORKBENCH_ERRORS.DATABASE_QUERY_NOT_READ_ONLY);
     }
 
-    // Scan for forbidden mutation keywords as whole words
     for (const kw of FORBIDDEN_KEYWORDS) {
       const regex = new RegExp(`\\b${kw}\\b`, "i");
       if (regex.test(statements[0])) {
@@ -77,11 +73,16 @@ export class DatabaseQueryEngine {
   }
 
   private openDb(workspaceId: string, relativePath: string): { db: Database.Database; cleanRel: string } {
-    const { relativePath: cleanRel, absolutePath } = resolveWorkspacePath(
-      this.workspaceStore,
-      workspaceId,
-      relativePath
-    );
+    let cleanRel = "";
+    let absolutePath = "";
+
+    try {
+      const res = resolveWorkspacePath(this.workspaceStore, workspaceId, relativePath, { allowMissing: true });
+      cleanRel = res.relativePath;
+      absolutePath = res.absolutePath;
+    } catch {
+      throw new Error(WORKBENCH_ERRORS.WORKBENCH_PATH_OUTSIDE_WORKSPACE);
+    }
 
     try {
       const stats = statSync(absolutePath);
@@ -93,8 +94,7 @@ export class DatabaseQueryEngine {
     }
 
     try {
-      // Open connection strictly in read-only mode
-      const db = new Database(absolutePath, { readonly: true, fileMustExist: true, timeout: DATABASE_LIMITS.timeoutMs });
+      const db = new Database(absolutePath, { readonly: true, fileMustExist: true });
       return { db, cleanRel };
     } catch {
       throw new Error(WORKBENCH_ERRORS.DATABASE_NOT_FOUND);
@@ -156,23 +156,24 @@ export class DatabaseQueryEngine {
         throw new Error(WORKBENCH_ERRORS.DATABASE_QUERY_NOT_READ_ONLY);
       }
 
-      const rows = stmt.all() as Record<string, unknown>[];
-      const executionMs = Date.now() - startMs;
-
+      const rows: Record<string, unknown>[] = [];
       let truncated = false;
-      let finalRows = rows;
 
-      if (rows.length > DATABASE_LIMITS.maxRows) {
-        finalRows = rows.slice(0, DATABASE_LIMITS.maxRows);
-        truncated = true;
+      for (const row of stmt.iterate()) {
+        if (rows.length >= DATABASE_LIMITS.maxRows) {
+          truncated = true;
+          break;
+        }
+        rows.push(row as Record<string, unknown>);
       }
 
-      const columns = finalRows.length > 0 ? Object.keys(finalRows[0]) : [];
+      const executionMs = Date.now() - startMs;
+      const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
 
       return {
         columns,
-        rows: finalRows,
-        rowCount: finalRows.length,
+        rows,
+        rowCount: rows.length,
         truncated,
         executionMs,
         source: cleanRel
