@@ -90,6 +90,52 @@ function serveStaticFile(res: ServerResponse, filePath: string): boolean {
   return false;
 }
 
+const OTA_BUNDLE_FILES = ["index.html", "style.css", "app.js"];
+
+function computeOtaBundle(): { bundleString: string; sha256: string } {
+  const filesMap: Record<string, string> = {};
+  for (const file of OTA_BUNDLE_FILES) {
+    const filePath = join(process.cwd(), "www", file);
+    if (existsSync(filePath)) {
+      filesMap[file] = readFileSync(filePath, "utf-8");
+    }
+  }
+  const bundleString = JSON.stringify({ files: filesMap }, null, 2);
+  const sha256 = crypto.createHash("sha256").update(bundleString).digest("hex");
+  return { bundleString, sha256 };
+}
+
+/**
+ * www/ota-manifest.json et www/ota-bundle.json sont régénérés à chaque `npm run build`
+ * (donc à chaque déploiement Render) par scripts/build-ota.mjs : ils correspondent
+ * toujours au code Web effectivement déployé. S'ils sont absents (dev local sans build
+ * préalable), on calcule un manifeste équivalent à la volée à partir des mêmes fichiers
+ * www/ que /api/ota/bundle, pour ne jamais servir un SHA-256 qui ne correspondrait pas
+ * au bundle réellement téléchargeable.
+ */
+function readOtaManifest(): Record<string, unknown> {
+  const manifestPath = join(process.cwd(), "www", "ota-manifest.json");
+  if (existsSync(manifestPath)) {
+    try {
+      return JSON.parse(readFileSync(manifestPath, "utf-8"));
+    } catch {
+      // Fichier corrompu : on retombe sur le calcul dynamique ci-dessous.
+    }
+  }
+
+  const { sha256 } = computeOtaBundle();
+  return {
+    version: "0.0.0-dev",
+    buildId: sha256.slice(0, 12),
+    build: Date.now(),
+    minimumNativeVersion: "1.0.0",
+    bundleUrl: "/api/ota/bundle",
+    sha256,
+    releaseNotes: "Build de développement local (fichiers OTA non pré-générés).",
+    updatedAt: new Date().toISOString(),
+  };
+}
+
 const DEFAULT_PRESET_MODELS: Record<string, Array<{ id: string; name: string; isFree?: boolean }>> = {
   anthropic: [
     { id: "claude-sonnet-5", name: "Claude Sonnet 5" },
@@ -1002,20 +1048,16 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         const services = agent.serviceOrchestrator.registry.listServices();
         const ops = agent.serviceOrchestrator.store.listOperations();
 
-        let otaVersion = "1.0.0";
-        try {
-          const manifestPath = join(process.cwd(), "www", "ota-manifest.json");
-          if (existsSync(manifestPath)) {
-            const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
-            otaVersion = manifest.version || "1.0.0";
-          }
-        } catch {}
+        const otaManifest = readOtaManifest();
+        const otaVersion = (otaManifest.version as string) || "1.0.0";
+        const otaBuildId = (otaManifest.buildId as string) || undefined;
 
         const statusData = {
           status: "online",
           version: "0.1.0",
           nativeVersion: "1.0.0",
           otaVersion,
+          otaBuildId,
           llmProvider: config.llm.provider,
           llmModel: config.llm.model,
           memory: {
@@ -1530,29 +1572,10 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         return;
       }
 
-      // 11. OTA Endpoints
+      // 11. OTA Endpoints — le manifeste et le bundle doivent toujours correspondre au
+      // même code Web (voir computeOtaBundle/readOtaManifest ci-dessus).
       if (req.method === "GET" && pathname === "/api/ota/manifest") {
-        const manifestPath = join(process.cwd(), "www", "ota-manifest.json");
-        if (existsSync(manifestPath)) {
-          const content = readFileSync(manifestPath, "utf-8");
-          res.writeHead(200, {
-            "content-type": "application/json; charset=utf-8",
-            "access-control-allow-origin": "*",
-          });
-          res.end(content);
-          return;
-        }
-
-        // Fallback default manifest
-        sendJson(res, 200, {
-          version: "1.0.0",
-          build: 1,
-          minimumNativeVersion: "1.0.0",
-          bundleUrl: "/api/ota/bundle",
-          sha256: "",
-          releaseNotes: "Version initiale Command Center",
-          updatedAt: new Date().toISOString(),
-        });
+        sendJson(res, 200, readOtaManifest());
         return;
       }
 
@@ -1568,16 +1591,12 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
           return;
         }
 
-        // Dynamic fallback bundle creation
-        const filesToBundle = ["index.html", "style.css", "app.js"];
-        const filesMap: Record<string, string> = {};
-        for (const file of filesToBundle) {
-          const filePath = join(process.cwd(), "www", file);
-          if (existsSync(filePath)) {
-            filesMap[file] = readFileSync(filePath, "utf-8");
-          }
-        }
-        sendJson(res, 200, { files: filesMap });
+        const { bundleString } = computeOtaBundle();
+        res.writeHead(200, {
+          "content-type": "application/json; charset=utf-8",
+          "access-control-allow-origin": "*",
+        });
+        res.end(bundleString);
         return;
       }
 

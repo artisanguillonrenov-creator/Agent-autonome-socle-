@@ -1,5 +1,9 @@
 name: Build Web OTA Bundle
 
+# Vérification CI uniquement : le bundle produit ici n'est PAS ce qui est servi en
+# production. Sur Render, `npm run build` (build command du service) exécute
+# scripts/build-ota.mjs directement, donc www/ota-manifest.json et www/ota-bundle.json
+# sont régénérés à chaque déploiement à partir du code Web réellement déployé.
 on:
   push:
     branches: [ main, master ]

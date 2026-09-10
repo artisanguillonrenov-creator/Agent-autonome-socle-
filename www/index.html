@@ -125,44 +125,83 @@
   <!-- EXECUTABLE OTA BOOTLOADER -->
   <script>
     (function() {
-      try {
-        var activeBundleStr = localStorage.getItem('jarvis_ota_active_bundle');
-        if (activeBundleStr) {
-          var bundle = JSON.parse(activeBundleStr);
-          if (bundle && bundle.files) {
-            // Inject dynamic style
-            if (bundle.files['style.css']) {
-              var styleEl = document.createElement('style');
-              styleEl.id = 'ota-injected-style';
-              styleEl.textContent = bundle.files['style.css'];
-              document.head.appendChild(styleEl);
-            }
-
-            // Inject dynamic script execution
-            if (bundle.files['app.js']) {
-              window.__JARVIS_OTA_BOOTSTRAPPED__ = true;
-              var scriptEl = document.createElement('script');
-              scriptEl.id = 'ota-injected-app';
-              scriptEl.textContent = bundle.files['app.js'];
-              document.body.appendChild(scriptEl);
-            }
-          }
-        }
-      } catch (err) {
-        console.error('[OTA Bootloader] Error loading OTA bundle. Rolling back to base app:', err);
-        localStorage.removeItem('jarvis_ota_active_bundle');
-        localStorage.removeItem('jarvis_ota_active_version');
+      function computeSha256(text) {
+        var msgUint8 = new TextEncoder().encode(text);
+        return crypto.subtle.digest('SHA-256', msgUint8).then(function (hashBuffer) {
+          return Array.from(new Uint8Array(hashBuffer)).map(function (b) {
+            return b.toString(16).padStart(2, '0');
+          }).join('');
+        });
       }
-    })();
-  </script>
 
-  <!-- FALLBACK BASE APPLICATION LOADER -->
-  <script>
-    if (!window.__JARVIS_OTA_BOOTSTRAPPED__) {
-      var defaultScript = document.createElement('script');
-      defaultScript.src = 'app.js';
-      document.body.appendChild(defaultScript);
-    }
+      // Bundle actif corrompu ou altéré : on revient au dernier bundle connu bon
+      // (ou, à défaut, à l'application native embarquée dans l'APK).
+      function rollbackToPreviousOrBase() {
+        var prevBundle = localStorage.getItem('jarvis_ota_previous_bundle');
+        var prevVersion = localStorage.getItem('jarvis_ota_previous_version');
+        if (prevBundle && prevVersion) {
+          localStorage.setItem('jarvis_ota_active_bundle', prevBundle);
+          localStorage.setItem('jarvis_ota_active_version', prevVersion);
+          localStorage.setItem('jarvis_ota_active_build_id', localStorage.getItem('jarvis_ota_previous_build_id') || '');
+          localStorage.setItem('jarvis_ota_active_sha256', localStorage.getItem('jarvis_ota_previous_sha256') || '');
+        } else {
+          localStorage.removeItem('jarvis_ota_active_bundle');
+          localStorage.removeItem('jarvis_ota_active_version');
+          localStorage.removeItem('jarvis_ota_active_build_id');
+          localStorage.removeItem('jarvis_ota_active_sha256');
+        }
+      }
+
+      function injectBundle(bundle) {
+        if (bundle.files['style.css']) {
+          var styleEl = document.createElement('style');
+          styleEl.id = 'ota-injected-style';
+          styleEl.textContent = bundle.files['style.css'];
+          document.head.appendChild(styleEl);
+        }
+        if (bundle.files['app.js']) {
+          window.__JARVIS_OTA_BOOTSTRAPPED__ = true;
+          var scriptEl = document.createElement('script');
+          scriptEl.id = 'ota-injected-app';
+          scriptEl.textContent = bundle.files['app.js'];
+          document.body.appendChild(scriptEl);
+        }
+      }
+
+      function loadBaseApp() {
+        if (window.__JARVIS_OTA_BOOTSTRAPPED__) return;
+        var defaultScript = document.createElement('script');
+        defaultScript.src = 'app.js';
+        document.body.appendChild(defaultScript);
+      }
+
+      var activeBundleStr = localStorage.getItem('jarvis_ota_active_bundle');
+      if (!activeBundleStr) {
+        loadBaseApp();
+        return;
+      }
+
+      var expectedHash = localStorage.getItem('jarvis_ota_active_sha256');
+      var verify = expectedHash ? computeSha256(activeBundleStr) : Promise.resolve(null);
+
+      verify.then(function (computedHash) {
+        if (expectedHash && computedHash !== expectedHash) {
+          console.error('[OTA Bootloader] SHA-256 du bundle actif invalide, rollback.');
+          rollbackToPreviousOrBase();
+          loadBaseApp();
+          return;
+        }
+        var bundle = JSON.parse(activeBundleStr);
+        if (bundle && bundle.files) {
+          injectBundle(bundle);
+        }
+        loadBaseApp();
+      }).catch(function (err) {
+        console.error('[OTA Bootloader] Error loading OTA bundle. Rolling back to base app:', err);
+        rollbackToPreviousOrBase();
+        loadBaseApp();
+      });
+    })();
   </script>
 </body>
 </html>

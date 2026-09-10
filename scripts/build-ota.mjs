@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { execSync } from "node:child_process";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -24,16 +25,46 @@ const bundlePayload = JSON.stringify({ files: bundleFilesMap }, null, 2);
 const bundlePath = join(wwwDir, "ota-bundle.json");
 writeFileSync(bundlePath, bundlePayload, "utf-8");
 
-// 3. Calculate SHA-256
+// 3. Calculate SHA-256 — c'est cet identifiant, pas un numéro de version saisi à la
+// main, qui fait foi pour savoir si un bundle a réellement changé.
 const sha256 = createHash("sha256").update(bundlePayload).digest("hex");
+
+/**
+ * Identifiant de build unique : dérivé du commit réellement déployé quand la
+ * plateforme d'hébergement (Render) ou la CI (GitHub Actions) l'expose, sinon dérivé
+ * du contenu du bundle lui-même. Jamais une valeur fixe : chaque changement de code
+ * Web produit un buildId différent, ce qui permet au client de détecter une nouvelle
+ * mise à jour sans dépendre d'un numéro de version bumpé manuellement.
+ */
+function resolveBuildId() {
+  const fromEnv =
+    process.env.OTA_BUILD_ID ||
+    process.env.RENDER_GIT_COMMIT ||
+    process.env.GITHUB_SHA ||
+    process.env.SOURCE_VERSION ||
+    null;
+  if (fromEnv) return fromEnv.slice(0, 12);
+
+  try {
+    const gitSha = execSync("git rev-parse HEAD", { cwd: rootDir }).toString().trim();
+    if (gitSha) return gitSha.slice(0, 12);
+  } catch {
+    // Pas de dépôt git disponible (ex: build depuis un tarball) : on retombe sur le hash.
+  }
+
+  return sha256.slice(0, 12);
+}
+
+const buildId = resolveBuildId();
 
 // 4. Create Manifest
 const packageJson = JSON.parse(readFileSync(join(rootDir, "package.json"), "utf-8"));
-const otaVersion = process.env.OTA_VERSION || "1.1.0";
+const otaVersion = process.env.OTA_VERSION || packageJson.version;
 const minNativeVersion = process.env.MIN_NATIVE_VERSION || "1.0.0";
 
 const manifest = {
   version: otaVersion,
+  buildId,
   build: Date.now(),
   minimumNativeVersion: minNativeVersion,
   bundleUrl: "/api/ota/bundle",
@@ -46,4 +77,4 @@ const manifestPath = join(wwwDir, "ota-manifest.json");
 writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf-8");
 
 console.log(`[OTA Build] Succès ! Manifeste généré à : ${manifestPath}`);
-console.log(`[OTA Build] Version: ${manifest.version} | SHA256: ${sha256.slice(0, 12)}...`);
+console.log(`[OTA Build] Version: ${manifest.version} | BuildId: ${buildId} | SHA256: ${sha256.slice(0, 12)}...`);
