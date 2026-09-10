@@ -298,8 +298,16 @@ export class Agent {
     return listCheckpoints();
   }
 
+  /**
+   * Point d'entrée unique pour changer le fournisseur LLM principal : propage vers
+   * tous les composants qui en conservaient une référence propre (ReflectionEngine,
+   * ReplanningEngine via PlanRunner), pour qu'une sélection depuis le panneau
+   * Modèles IA soit réellement globale et non limitée à la boucle agent principale.
+   */
   setLLMProvider(llm: LLMProvider): void {
     this.llm = llm;
+    this.reflection.setLLMProvider(llm);
+    this.planRunner.setLLMProvider(llm);
   }
 
   getLLMProvider(): LLMProvider {
