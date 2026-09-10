@@ -156,17 +156,18 @@ export function resolveServiceEndpoint(s: ServiceDefinition): ServiceDefinition 
   let endpoint = s.endpoint;
   let source: "FACTORY" | "DATABASE" | "ENVIRONMENT" = s.source ?? "FACTORY";
 
-  if (s.id === "software_factory") {
-    if (process.env.SOFTWARE_FACTORY_URL) {
-      endpoint = process.env.SOFTWARE_FACTORY_URL;
-      source = "ENVIRONMENT";
-    } else if (endpoint === "http://localhost:4000" && (process.env.PORT || process.env.API_PORT)) {
-      endpoint = `http://localhost:${process.env.PORT || process.env.API_PORT}`;
-    }
+  if (s.id === "software_factory" && process.env.SOFTWARE_FACTORY_URL) {
+    endpoint = process.env.SOFTWARE_FACTORY_URL;
+    source = "ENVIRONMENT";
   }
 
   if (process.env.PORT) endpoint = endpoint.replace("${PORT}", process.env.PORT);
-  const transport = s.id === "software_factory" && ["local", "direct", "in-process"].includes(endpoint) ? "local" : s.transport;
+
+  // Software Factory runs in-process by default (the existing SoftwareFactoryService
+  // instance registered locally on the ServiceAdapter). It only switches to task_http
+  // when explicitly pointed at a real URL (SOFTWARE_FACTORY_URL or an endpoint override).
+  const isLocalMarker = ["local", "direct", "in-process"].includes(endpoint) || endpoint === s.id;
+  const transport = s.id === "software_factory" ? (isLocalMarker ? "local" : "task_http") : s.transport;
 
   return { ...s, endpoint, transport, source };
 }

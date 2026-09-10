@@ -369,11 +369,12 @@ test("CONNECTIONS PATCH VALIDATION & SERVER-SIDE USERCREATED DETERMINATION", asy
   const headers = { authorization: "Bearer conn-val-test-token", "content-type": "application/json" };
 
   try {
-    // 1. Invalid PATCH endpoint protocol
+    // 1. Invalid PATCH endpoint protocol (transport: task_http triggers URL validation;
+    // software_factory now defaults to local transport, which does not validate endpoint as a URL)
     const badEndpointRes = await fetch(`http://localhost:${testPort}/api/connections/software_factory`, {
       method: "PATCH",
       headers,
-      body: JSON.stringify({ endpoint: "ftp://invalid-protocol.local" }),
+      body: JSON.stringify({ transport: "task_http", endpoint: "ftp://invalid-protocol.local" }),
     });
     assert.equal(badEndpointRes.status, 400);
 
@@ -650,7 +651,8 @@ test("FACTORY SERVICE OVERRIDES: Export, reset, and import round-trip preserves 
     const reimportedSvc = agent.serviceOrchestrator.registry.getServiceById("software_factory");
     assert.equal(reimportedSvc?.userCreated, false);
     assert.equal(reimportedSvc?.enabled, false);
-    assert.ok(reimportedSvc?.endpoint.startsWith("http://localhost:"));
+    assert.equal(reimportedSvc?.transport, "local");
+    assert.equal(reimportedSvc?.endpoint, "software_factory");
   } finally {
     server.close();
     config.api.token = previousToken;
@@ -779,10 +781,11 @@ test("LEGACY TOGGLE ENV SAFETY: /api/services/:id/toggle uses patchService and d
     assert.equal(dbOverride?.enabledOverride, false);
     assert.equal(dbOverride?.endpointOverride, undefined); // NOT frozen in DB!
 
-    // 3. Remove ENV variable -> endpoint reverts to factory default
+    // 3. Remove ENV variable -> endpoint reverts to factory default (in-process, local transport)
     delete process.env.SOFTWARE_FACTORY_URL;
     const revertedSvc = agent.serviceOrchestrator.registry.getServiceById("software_factory");
-    assert.ok(revertedSvc?.endpoint.startsWith("http://localhost:"));
+    assert.equal(revertedSvc?.transport, "local");
+    assert.equal(revertedSvc?.endpoint, "software_factory");
   } finally {
     server.close();
     config.api.token = previousToken;
