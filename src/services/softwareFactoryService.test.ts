@@ -886,6 +886,11 @@ test("TEST L — TASK_COMPLETED payload contient les métadonnées complètes", 
 });
 
 test("TEST M — Orchestration bout en bout et dispatch_capability", async () => {
+  const { closeDb, getDb } = await import("../persistence/db.js");
+  config.db.path = ":memory:";
+  closeDb();
+  getDb();
+
   const { ServiceRegistry } = await import("../orchestration/serviceRegistry.js");
   const { ServiceOrchestrator } = await import("../orchestration/serviceOrchestrator.js");
   const { dispatchCapabilitySkill } = await import("../skills/builtin/dispatchCapability.js");

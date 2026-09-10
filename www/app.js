@@ -226,6 +226,7 @@ function rollbackOtaUpdate() {
 // --- NAVIGATION LOGIC ---
 function switchView(viewName) {
   state.activeView = viewName;
+  localStorage.setItem('jarvis_last_view', viewName);
 
   elements.navItems.forEach((item) => {
     if (item.getAttribute('data-view') === viewName) {
@@ -550,12 +551,33 @@ function appendApprovalControls(host, operation, onDecision) {
   host.appendChild(panel);
 }
 
+function applyThemeRuntime(themeName) {
+  const root = typeof document !== 'undefined' ? (document.documentElement || document.body) : null;
+  if (!root || !root.classList) return;
+  root.classList.remove('theme-light', 'theme-dark');
+  if (themeName === 'LIGHT') {
+    root.classList.add('theme-light');
+  } else if (themeName === 'DARK') {
+    root.classList.add('theme-dark');
+  }
+}
+
 function renderTimelineCard(view, operation, events) {
+  const timelineMode = localStorage.getItem('jarvis_timeline_mode') || 'AUTO';
+  const expandCompleted = localStorage.getItem('jarvis_expand_completed_missions') === 'true';
+
   view.status.textContent = operation.status === 'COMPLETED'
     ? `✓ Mission terminée · ${events.length} étape${events.length > 1 ? 's' : ''}`
     : operation.status;
   view.status.dataset.status = operation.status;
   view.card.classList.toggle('terminal', TERMINAL_OPERATION_STATUSES.has(operation.status));
+
+  if (timelineMode === 'ALWAYS' || (operation.status === 'COMPLETED' && expandCompleted)) {
+    view.card.classList.add('expanded');
+  } else if (timelineMode === 'COMPACT') {
+    view.card.classList.remove('expanded');
+  }
+
   const toggle = view.card.querySelector('.chat-timeline-toggle');
   if (toggle) toggle.hidden = !TERMINAL_OPERATION_STATUSES.has(operation.status);
   view.steps.replaceChildren();
@@ -701,7 +723,7 @@ function updateRegenerateAvailability() {
 
 function renderChatView() {
   const container = document.getElementById('view-chat');
-  if (container.children.length > 0) return;
+  if (!container || !container.children || container.children.length > 0) return;
 
   const layout = document.createElement('div'); layout.className = 'chat-layout';
   const messages = document.createElement('div'); messages.id = 'chat-messages'; messages.className = 'chat-messages';
@@ -1376,54 +1398,1009 @@ async function renderSystemView() {
   }
 }
 
-// 11. PARAMÈTRES VIEW
-function renderSettingsView() {
+// 11. PARAMÈTRES VIEW (DOM SAFE, MULTI-LEVEL, SERVICE CONNECTION CENTER)
+let currentDisplayLevel = localStorage.getItem('jarvis_interface_level') || 'SIMPLE';
+let settingsSearchQuery = '';
+
+async function renderSettingsView() {
   const container = document.getElementById('view-settings');
+  container.replaceChildren();
 
-  container.innerHTML = `
-    <h2>Paramètres du Command Center</h2>
+  const title = document.createElement('h2');
+  title.textContent = 'PARAMÈTRES JARVIS';
+  container.appendChild(title);
 
-    <div class="card" style="margin-top: 12px;">
-      <div class="card-title">Connexion Backend (Réseau / Render)</div>
-      <div class="form-group" style="margin-top: 8px;">
-        <label class="form-label">URL du Serveur Jarvis (ex: https://votre-app.onrender.com)</label>
-        <input type="text" id="setting-backend-url" class="input-field" value="${state.backendUrl}" placeholder="Laissez vide pour le même serveur HTTP" />
-      </div>
-      <div class="form-group" style="margin-top: 8px;">
-        <label class="form-label">Token d'Authentification API (Optionnel)</label>
-        <input type="password" id="setting-token" class="input-field" value="${state.token}" placeholder="Token d'accès si configuré" />
-      </div>
-      <div style="margin-top: 12px;">
-        <button class="btn btn-primary" onclick="saveConnectionSettings()">Sauvegarder Connexion</button>
-      </div>
-    </div>
+  // Top header bar with Level Selector & Actions
+  const headerBar = document.createElement('div');
+  headerBar.className = 'settings-header-bar';
 
-    <div class="card" style="margin-top: 12px;">
-      <div class="card-title">Gestion des Mises à jour OTA</div>
-      <div style="font-size: 0.9rem; color: var(--text-muted); line-height: 1.6; margin-top: 8px;">
-        Version native APK : <strong>v${NATIVE_VERSION}</strong><br/>
-        Version OTA active : <strong style="color: var(--accent-primary);">v${state.ota.activeVersion}</strong>
-      </div>
-      <div style="display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap;">
-        <button class="btn btn-primary btn-sm" onclick="checkOtaUpdates(true)">🔍 Rechercher une mise à jour OTA</button>
-        ${state.ota.previousVersion ? `<button class="btn btn-secondary btn-sm" onclick="rollbackOtaUpdate()">↩️ Rollback version précédente</button>` : ''}
-      </div>
-    </div>
-  `;
+  const levelSelector = document.createElement('div');
+  levelSelector.className = 'settings-level-selector';
+
+  ['SIMPLE', 'ADVANCED', 'EXPERT'].forEach((level) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `settings-level-btn ${currentDisplayLevel === level ? 'active' : ''}`;
+    btn.textContent = level === 'SIMPLE' ? 'Simple' : level === 'ADVANCED' ? 'Avancé' : 'Expert';
+    btn.addEventListener('click', async () => {
+      if (currentDisplayLevel === level) return;
+      try {
+        await fetchApi('/api/settings', {
+          method: 'PATCH',
+          body: JSON.stringify({ key: 'settings.interfaceMode', value: level }),
+        });
+        currentDisplayLevel = level;
+        applyLocalSettingCache('settings.interfaceMode', level);
+        void renderSettingsView();
+      } catch (e) {
+        alert(`❌ Erreur lors de la mise à jour du niveau d'interface : ${e.message}`);
+      }
+    });
+    levelSelector.appendChild(btn);
+  });
+
+  headerBar.appendChild(levelSelector);
+
+  // Search input in EXPERT mode
+  if (currentDisplayLevel === 'EXPERT') {
+    const searchInput = document.createElement('input');
+    searchInput.type = 'text';
+    searchInput.className = 'input-field settings-search-input';
+    searchInput.placeholder = 'Rechercher un paramètre...';
+    searchInput.value = settingsSearchQuery;
+    searchInput.addEventListener('input', (e) => {
+      settingsSearchQuery = e.target.value.toLowerCase().trim();
+      renderSettingsSections(sectionsContainer, schema, effectiveSettings, connectionsData);
+    });
+    headerBar.appendChild(searchInput);
+  }
+
+  container.appendChild(headerBar);
+
+  const sectionsContainer = document.createElement('div');
+  sectionsContainer.id = 'settings-sections-container';
+  container.appendChild(sectionsContainer);
+
+  const loadingCard = document.createElement('div');
+  loadingCard.className = 'card';
+  loadingCard.textContent = 'Chargement des paramètres...';
+  sectionsContainer.appendChild(loadingCard);
+
+  try {
+    const schema = await fetchApi('/api/settings/schema');
+    const effectiveSettings = await fetchApi(`/api/settings?level=${currentDisplayLevel}`);
+    const connectionsData = await fetchApi('/api/connections');
+
+    // Synchronize local cache with effective settings from backend
+    if (Array.isArray(effectiveSettings)) {
+      effectiveSettings.forEach((item) => {
+        const key = item.definition.key;
+        const val = item.effectiveValue;
+        if (key === 'settings.interfaceMode' && typeof val === 'string') {
+          currentDisplayLevel = val;
+          localStorage.setItem('jarvis_interface_level', val);
+        } else if (key === 'settings.startupView' && typeof val === 'string') {
+          localStorage.setItem('jarvis_startup_view', val);
+        } else if (key === 'settings.timelineMode' && typeof val === 'string') {
+          localStorage.setItem('jarvis_timeline_mode', val);
+        } else if (key === 'settings.expandCompletedMissions') {
+          localStorage.setItem('jarvis_expand_completed_missions', String(val));
+        } else if (key === 'settings.theme' && typeof val === 'string') {
+          localStorage.setItem('jarvis_theme', val);
+          applyThemeRuntime(val);
+        }
+      });
+    }
+
+    renderSettingsSections(sectionsContainer, schema, effectiveSettings, connectionsData);
+  } catch (err) {
+    sectionsContainer.replaceChildren();
+    const errCard = document.createElement('div');
+    errCard.className = 'card';
+    errCard.style.borderColor = 'var(--accent-danger)';
+
+    const errTitle = document.createElement('div');
+    errTitle.className = 'card-title';
+    errTitle.style.color = 'var(--accent-danger)';
+    errTitle.textContent = 'Erreur lors du chargement des paramètres';
+
+    const errText = document.createElement('div');
+    errText.className = 'card-subtext';
+    errText.textContent = err.message;
+
+    errCard.append(errTitle, errText);
+    sectionsContainer.appendChild(errCard);
+  }
 }
 
-function saveConnectionSettings() {
-  const url = document.getElementById('setting-backend-url').value.trim();
-  const token = document.getElementById('setting-token').value.trim();
+function renderSettingsSections(container, schema, effectiveSettings, connections) {
+  container.replaceChildren();
 
-  state.backendUrl = url;
-  state.token = token;
+  const sections = Array.isArray(schema.sections) ? schema.sections : [];
+  const catalog = Array.isArray(schema.catalog) ? schema.catalog : [];
+  const effectiveList = Array.isArray(effectiveSettings) ? effectiveSettings : [];
+  const connectionList = Array.isArray(connections) ? connections : [];
 
-  localStorage.setItem('jarvis_backend_url', url);
-  localStorage.setItem('jarvis_token', token);
+  sections.forEach((section) => {
+    // Filter settings for this section and current level
+    let sectionSettings = effectiveList.filter((item) => {
+      const def = item.definition;
+      if (def.section !== section.id) return false;
+      if (currentDisplayLevel === 'SIMPLE' && def.level !== 'SIMPLE') return false;
+      if (currentDisplayLevel === 'ADVANCED' && def.level === 'EXPERT') return false;
+      if (settingsSearchQuery && currentDisplayLevel === 'EXPERT') {
+        const matchesLabel = def.label.toLowerCase().includes(settingsSearchQuery);
+        const matchesKey = def.key.toLowerCase().includes(settingsSearchQuery);
+        const matchesDesc = def.description.toLowerCase().includes(settingsSearchQuery);
+        return matchesLabel || matchesKey || matchesDesc;
+      }
+      return true;
+    });
 
-  alert('Paramètres de connexion réseau sauvegardés !');
-  renderAccueilView();
+    const collapsible = document.createElement('div');
+    collapsible.className = 'settings-section-collapsible';
+
+    const header = document.createElement('div');
+    header.className = 'settings-section-header';
+
+    const headerTitle = document.createElement('span');
+    headerTitle.textContent = `${section.label} (${sectionSettings.length})`;
+
+    const toggleIcon = document.createElement('span');
+    toggleIcon.textContent = '▼';
+
+    header.append(headerTitle, toggleIcon);
+
+    const body = document.createElement('div');
+    body.className = 'settings-section-body';
+
+    header.addEventListener('click', () => {
+      const collapsed = body.classList.toggle('collapsed');
+      toggleIcon.textContent = collapsed ? '▲' : '▼';
+    });
+
+    collapsible.append(header, body);
+
+    // Special Section : Connexions & Services
+    if (section.id === 'connections') {
+      const servicesSection = renderServicesConnectionCenter(connectionList);
+      body.appendChild(servicesSection);
+    }
+
+    // Special Section : Système -> Client Connection to Jarvis
+    if (section.id === 'system_maintenance') {
+      const clientConnCard = renderClientJarvisConnectionCard();
+      body.appendChild(clientConnCard);
+    }
+
+    // Render setting cards
+    sectionSettings.forEach((setting) => {
+      const card = renderSettingCard(setting);
+      body.appendChild(card);
+    });
+
+    // Special Section : System -> Export & Import
+    if (section.id === 'system_maintenance') {
+      const exportImportCard = renderExportImportCard();
+      body.appendChild(exportImportCard);
+    }
+
+    container.appendChild(collapsible);
+  });
+
+  // EXPERT MODE: Section "CAPACITÉS À VENIR" (Future Map)
+  if (currentDisplayLevel === 'EXPERT') {
+    const futureMapCard = renderFutureMapCard();
+    container.appendChild(futureMapCard);
+  }
+}
+
+function renderClientJarvisConnectionCard() {
+  const card = document.createElement('div');
+  card.className = 'card';
+
+  const title = document.createElement('div');
+  title.className = 'card-title';
+  title.textContent = 'Connexion Client à Jarvis (localStorage local)';
+
+  const groupUrl = document.createElement('div');
+  groupUrl.className = 'form-group';
+  const labelUrl = document.createElement('label');
+  labelUrl.className = 'form-label';
+  labelUrl.textContent = 'Backend URL';
+  const inputUrl = document.createElement('input');
+  inputUrl.type = 'text';
+  inputUrl.className = 'input-field';
+  inputUrl.value = state.backendUrl;
+  inputUrl.placeholder = 'ex: http://localhost:3000';
+  groupUrl.append(labelUrl, inputUrl);
+
+  const groupToken = document.createElement('div');
+  groupToken.className = 'form-group';
+  const labelToken = document.createElement('label');
+  labelToken.className = 'form-label';
+  labelToken.textContent = 'API Token (jamais affiché en clair)';
+  const inputToken = document.createElement('input');
+  inputToken.type = 'password';
+  inputToken.className = 'input-field';
+  inputToken.value = state.token;
+  inputToken.placeholder = 'Token d\'accès secret';
+  groupToken.append(labelToken, inputToken);
+
+  const buttonRow = document.createElement('div');
+  buttonRow.style.display = 'flex';
+  buttonRow.style.gap = '10px';
+  buttonRow.style.marginTop = '12px';
+
+  const btnTest = document.createElement('button');
+  btnTest.type = 'button';
+  btnTest.className = 'btn btn-secondary';
+  btnTest.textContent = 'Tester la connexion';
+  btnTest.addEventListener('click', async () => {
+    const urlVal = inputUrl.value.trim().replace(/\/+$/, '');
+    const tokenVal = inputToken.value.trim();
+    const testEndpoint = `${urlVal}/api/status`;
+    const headers = { 'Content-Type': 'application/json' };
+    if (tokenVal) headers['Authorization'] = `Bearer ${tokenVal}`;
+
+    try {
+      const res = await fetch(testEndpoint, { headers });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      alert(`✅ Connexion réussie ! Moteur Jarvis v${data.version || '0.1.0'} en ligne.`);
+    } catch (e) {
+      alert(`❌ Échec de connexion : ${e.message}`);
+    }
+  });
+
+  const btnSave = document.createElement('button');
+  btnSave.type = 'button';
+  btnSave.className = 'btn btn-primary';
+  btnSave.textContent = 'Sauvegarder';
+  btnSave.addEventListener('click', () => {
+    state.backendUrl = inputUrl.value.trim();
+    state.token = inputToken.value.trim();
+    localStorage.setItem('jarvis_backend_url', state.backendUrl);
+    localStorage.setItem('jarvis_token', state.token);
+    alert('✅ Paramètres de connexion enregistrés localement !');
+    void renderSettingsView();
+  });
+
+  buttonRow.append(btnTest, btnSave);
+  card.append(title, groupUrl, groupToken, buttonRow);
+  return card;
+}
+
+function showUserServiceModal() {
+  const overlay = document.createElement('div');
+  overlay.className = 'sidebar-overlay active';
+  overlay.style.display = 'flex';
+  overlay.style.alignItems = 'center';
+  overlay.style.justifyContent = 'center';
+  overlay.style.zIndex = '999';
+
+  const modal = document.createElement('div');
+  modal.className = 'card';
+  modal.style.maxWidth = '550px';
+  modal.style.width = '90%';
+  modal.style.maxHeight = '90vh';
+  modal.style.overflowY = 'auto';
+
+  const title = document.createElement('div');
+  title.className = 'card-title';
+  title.textContent = 'Créer un Service Utilisateur (task_http)';
+
+  const createGroup = (label, placeholder, defaultValue = '', type = 'text') => {
+    const group = document.createElement('div');
+    group.className = 'form-group';
+    const lbl = document.createElement('label');
+    lbl.className = 'form-label';
+    lbl.textContent = label;
+    const input = document.createElement('input');
+    input.type = type;
+    input.className = 'input-field';
+    input.placeholder = placeholder;
+    input.value = defaultValue;
+    group.append(lbl, input);
+    return { group, input };
+  };
+
+  const idGroup = createGroup('Service ID', 'ex: my_custom_service', 'my_custom_service');
+  const nameGroup = createGroup('Nom du service', 'ex: My Custom Service', 'Mon Service Personnalisé');
+  const endpointGroup = createGroup('Endpoint HTTP', 'ex: http://localhost:4000', 'http://localhost:4000');
+  const healthPathGroup = createGroup('Health Path', 'ex: /health', '/health');
+  const taskPathGroup = createGroup('Task Path', 'ex: /tasks', '/tasks');
+  const priorityGroup = createGroup('Priorité (0-100)', 'ex: 10', '10', 'number');
+  const reqTimeoutGroup = createGroup('Timeout Tâches HTTP (ms)', 'ex: 120000', '120000', 'number');
+  const hlthTimeoutGroup = createGroup('Timeout Health Check (ms)', 'ex: 5000', '5000', 'number');
+  const capsGroup = createGroup('Capabilities (séparées par des virgules)', 'ex: software_development, code_generation', 'software_development');
+  const parallelCapsGroup = createGroup('Parallel Safe Capabilities (séparées par des virgules)', 'ex: software_development', '');
+  const authEnvGroup = createGroup('Variable d\'Env Auth (Optionnel)', 'ex: MY_SERVICE_TOKEN', '');
+  const risksGroup = createGroup('Risques par Capability (JSON)', 'ex: {"software_development": "MEDIUM"}', '{}');
+
+  const buttonRow = document.createElement('div');
+  buttonRow.style.display = 'flex';
+  buttonRow.style.gap = '10px';
+  buttonRow.style.marginTop = '16px';
+
+  const btnCancel = document.createElement('button');
+  btnCancel.type = 'button';
+  btnCancel.className = 'btn btn-secondary';
+  btnCancel.textContent = 'Annuler';
+  btnCancel.addEventListener('click', () => overlay.remove());
+
+  const btnSubmit = document.createElement('button');
+  btnSubmit.type = 'button';
+  btnSubmit.className = 'btn btn-primary';
+  btnSubmit.textContent = 'Créer le Service';
+  btnSubmit.addEventListener('click', async () => {
+    try {
+      let riskObj = {};
+      if (risksGroup.input.value.trim()) {
+        try {
+          riskObj = JSON.parse(risksGroup.input.value.trim());
+        } catch {
+          throw new Error('Format JSON invalide pour les risques par capability');
+        }
+      }
+
+      const caps = capsGroup.input.value.split(',').map((s) => s.trim()).filter(Boolean);
+      const parallelCaps = parallelCapsGroup.input.value.split(',').map((s) => s.trim()).filter(Boolean);
+      const authEnv = authEnvGroup.input.value.trim();
+      const payload = {
+        id: idGroup.input.value.trim(),
+        name: nameGroup.input.value.trim(),
+        transport: 'task_http',
+        endpoint: endpointGroup.input.value.trim(),
+        healthPath: healthPathGroup.input.value.trim() || '/health',
+        taskPath: taskPathGroup.input.value.trim() || '/tasks',
+        priority: Number(priorityGroup.input.value) || 10,
+        requestTimeoutMs: Number(reqTimeoutGroup.input.value) || 120000,
+        healthTimeoutMs: Number(hlthTimeoutGroup.input.value) || 5000,
+        capabilities: caps,
+        parallelSafeCapabilities: parallelCaps,
+        riskByCapability: riskObj,
+        auth: authEnv ? { type: 'bearer_env', envVar: authEnv } : { type: 'none' },
+      };
+
+      await fetchApi('/api/connections', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+
+      alert('✅ Service utilisateur créé avec succès !');
+      overlay.remove();
+      void renderSettingsView();
+    } catch (e) {
+      alert(`❌ Échec de création : ${e.message}`);
+    }
+  });
+
+  buttonRow.append(btnCancel, btnSubmit);
+  modal.append(
+    title,
+    idGroup.group,
+    nameGroup.group,
+    endpointGroup.group,
+    healthPathGroup.group,
+    taskPathGroup.group,
+    priorityGroup.group,
+    reqTimeoutGroup.group,
+    hlthTimeoutGroup.group,
+    capsGroup.group,
+    parallelCapsGroup.group,
+    authEnvGroup.group,
+    risksGroup.group,
+    buttonRow,
+  );
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+}
+
+function showEditServiceModal(conn) {
+  const overlay = document.createElement('div');
+  overlay.className = 'sidebar-overlay active';
+  overlay.style.display = 'flex';
+  overlay.style.alignItems = 'center';
+  overlay.style.justifyContent = 'center';
+  overlay.style.zIndex = '999';
+
+  const modal = document.createElement('div');
+  modal.className = 'card';
+  modal.style.maxWidth = '550px';
+  modal.style.width = '90%';
+  modal.style.maxHeight = '90vh';
+  modal.style.overflowY = 'auto';
+
+  const title = document.createElement('div');
+  title.className = 'card-title';
+  title.textContent = `Configurer / Modifier Service : ${conn.name} (${conn.id})`;
+
+  const createGroup = (label, placeholder, defaultValue = '', type = 'text') => {
+    const group = document.createElement('div');
+    group.className = 'form-group';
+    const lbl = document.createElement('label');
+    lbl.className = 'form-label';
+    lbl.textContent = label;
+    const input = document.createElement('input');
+    input.type = type;
+    input.className = 'input-field';
+    input.placeholder = placeholder;
+    input.value = defaultValue;
+    group.append(lbl, input);
+    return { group, input };
+  };
+
+  const nameGroup = createGroup('Nom du service', 'ex: My Service', conn.name || conn.id);
+  const endpointGroup = createGroup('Endpoint HTTP', 'ex: http://localhost:4000', conn.endpoint || '');
+  const healthPathGroup = createGroup('Health Path', 'ex: /health', conn.healthPath || '/health');
+  const taskPathGroup = createGroup('Task Path', 'ex: /tasks', conn.taskPath || '/tasks');
+  const prioGroup = createGroup('Priorité (0-100)', 'ex: 10', String(conn.priority ?? 10), 'number');
+  const reqTimeoutGroup = createGroup('Timeout Tâches HTTP (ms)', 'ex: 120000', String(conn.requestTimeoutMs ?? 120000), 'number');
+  const hlthTimeoutGroup = createGroup('Timeout Health Check (ms)', 'ex: 5000', String(conn.healthTimeoutMs ?? 5000), 'number');
+  const authEnvGroup = createGroup('Variable d\'Env Auth', 'ex: API_TOKEN', conn.auth?.envVar || '');
+  const capsGroup = createGroup('Capabilities (séparées par des virgules)', 'ex: software_development, code_generation', Array.isArray(conn.capabilities) ? conn.capabilities.join(', ') : '');
+  const parallelCapsGroup = createGroup('Parallel Safe Capabilities (séparées par des virgules)', 'ex: software_development', Array.isArray(conn.parallelSafeCapabilities) ? conn.parallelSafeCapabilities.join(', ') : '');
+  const risksGroup = createGroup('Risques par Capability (JSON)', 'ex: {"software_development": "MEDIUM"}', JSON.stringify(conn.riskByCapability || {}));
+
+  const enabledGroup = document.createElement('div');
+  enabledGroup.className = 'form-group';
+  const enabledLabel = document.createElement('label');
+  enabledLabel.className = 'form-label';
+  enabledLabel.style.display = 'flex';
+  enabledLabel.style.alignItems = 'center';
+  enabledLabel.style.gap = '8px';
+  const enabledCheck = document.createElement('input');
+  enabledCheck.type = 'checkbox';
+  enabledCheck.checked = Boolean(conn.enabled);
+  const enabledText = document.createElement('span');
+  enabledText.textContent = 'Service Activé';
+  enabledLabel.append(enabledCheck, enabledText);
+  enabledGroup.appendChild(enabledLabel);
+
+  const buttonRow = document.createElement('div');
+  buttonRow.style.display = 'flex';
+  buttonRow.style.gap = '10px';
+  buttonRow.style.marginTop = '16px';
+
+  const btnCancel = document.createElement('button');
+  btnCancel.type = 'button';
+  btnCancel.className = 'btn btn-secondary';
+  btnCancel.textContent = 'Annuler';
+  btnCancel.addEventListener('click', () => overlay.remove());
+
+  const btnSubmit = document.createElement('button');
+  btnSubmit.type = 'button';
+  btnSubmit.className = 'btn btn-primary';
+  btnSubmit.textContent = 'Enregistrer';
+  btnSubmit.addEventListener('click', async () => {
+    try {
+      let riskObj = {};
+      if (risksGroup.input.value.trim()) {
+        try {
+          riskObj = JSON.parse(risksGroup.input.value.trim());
+        } catch {
+          throw new Error('Format JSON invalide pour les risques par capability');
+        }
+      }
+
+      const caps = capsGroup.input.value.split(',').map((s) => s.trim()).filter(Boolean);
+      const parallelCaps = parallelCapsGroup.input.value.split(',').map((s) => s.trim()).filter(Boolean);
+      const authEnv = authEnvGroup.input.value.trim();
+
+      const patchPayload = {
+        name: nameGroup.input.value.trim(),
+        enabled: enabledCheck.checked,
+        endpoint: endpointGroup.input.value.trim(),
+        healthPath: healthPathGroup.input.value.trim() || '/health',
+        taskPath: taskPathGroup.input.value.trim() || '/tasks',
+        priority: Number(prioGroup.input.value) || 10,
+        requestTimeoutMs: Number(reqTimeoutGroup.input.value) || 120000,
+        healthTimeoutMs: Number(hlthTimeoutGroup.input.value) || 5000,
+        auth: authEnv ? { type: 'bearer_env', envVar: authEnv } : { type: 'none' },
+        capabilities: caps,
+        parallelSafeCapabilities: parallelCaps,
+        riskByCapability: riskObj,
+      };
+
+      await fetchApi(`/api/connections/${encodeURIComponent(conn.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patchPayload),
+      });
+
+      alert('✅ Service mis à jour avec succès !');
+      overlay.remove();
+      void renderSettingsView();
+    } catch (e) {
+      alert(`❌ Échec de la mise à jour : ${e.message}`);
+    }
+  });
+
+  buttonRow.append(btnCancel, btnSubmit);
+  modal.append(
+    title,
+    nameGroup.group,
+    enabledGroup,
+    endpointGroup.group,
+    healthPathGroup.group,
+    taskPathGroup.group,
+    prioGroup.group,
+    reqTimeoutGroup.group,
+    hlthTimeoutGroup.group,
+    authEnvGroup.group,
+    capsGroup.group,
+    parallelCapsGroup.group,
+    risksGroup.group,
+    buttonRow,
+  );
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+}
+
+function renderServicesConnectionCenter(connections) {
+  const container = document.createElement('div');
+  container.className = 'card';
+
+  const headerRow = document.createElement('div');
+  headerRow.style.display = 'flex';
+  headerRow.style.justifyContent = 'space-between';
+  headerRow.style.alignItems = 'center';
+  headerRow.style.flexWrap = 'wrap';
+  headerRow.style.gap = '10px';
+
+  const title = document.createElement('div');
+  title.className = 'card-title';
+  title.textContent = 'SERVICES JARVIS (Service Connection Center)';
+
+  const actions = document.createElement('div');
+  actions.style.display = 'flex';
+  actions.style.gap = '8px';
+
+  const btnAddUserSvc = document.createElement('button');
+  btnAddUserSvc.type = 'button';
+  btnAddUserSvc.className = 'btn btn-primary btn-sm';
+  btnAddUserSvc.textContent = '+ Service Utilisateur';
+  btnAddUserSvc.addEventListener('click', () => {
+    showUserServiceModal();
+  });
+
+  const btnTestAll = document.createElement('button');
+  btnTestAll.type = 'button';
+  btnTestAll.className = 'btn btn-secondary btn-sm';
+  btnTestAll.textContent = 'Tester toutes les connexions';
+  btnTestAll.addEventListener('click', async () => {
+    btnTestAll.disabled = true;
+    btnTestAll.textContent = 'Test en cours...';
+    try {
+      await fetchApi('/api/connections/test-all', { method: 'POST' });
+      alert('✅ Health check global terminé.');
+      void renderSettingsView();
+    } catch (e) {
+      alert(`❌ Erreur test global : ${e.message}`);
+    } finally {
+      btnTestAll.disabled = false;
+      btnTestAll.textContent = 'Tester toutes les connexions';
+    }
+  });
+
+  actions.append(btnAddUserSvc, btnTestAll);
+  headerRow.append(title, actions);
+  container.appendChild(headerRow);
+
+  const grid = document.createElement('div');
+  grid.className = 'card-grid';
+  grid.style.marginTop = '12px';
+
+  connections.forEach((conn) => {
+    const card = document.createElement('div');
+    card.className = 'service-connection-card';
+
+    const cardHeader = document.createElement('div');
+    cardHeader.className = 'service-connection-header';
+
+    const connName = document.createElement('span');
+    connName.style.fontWeight = '600';
+    connName.textContent = conn.name;
+
+    const statusPill = document.createElement('span');
+    const isEnabled = conn.enabled;
+    const isReachable = conn.lastError === undefined;
+    const isLocal = conn.transport === 'local';
+    const statusText = isLocal ? 'LOCAL' : !isEnabled ? 'DISABLED' : isReachable ? 'CONNECTED' : 'ERROR';
+    statusPill.className = `service-status-pill ${statusText}`;
+    statusPill.textContent = statusText;
+
+    cardHeader.append(connName, statusPill);
+
+    const details = document.createElement('div');
+    details.className = 'card-subtext';
+    details.style.display = 'flex';
+    details.style.flexDirection = 'column';
+    details.style.gap = '4px';
+
+    const rowId = document.createElement('span'); rowId.textContent = `ID: ${conn.id}`;
+    const rowTransport = document.createElement('span'); rowTransport.textContent = `Transport: ${conn.transport} | Priorité: ${conn.priority}`;
+    const rowEndpoint = document.createElement('span'); rowEndpoint.textContent = `Endpoint: ${conn.endpoint} (${conn.source})`;
+    const rowCaps = document.createElement('span'); rowCaps.textContent = `Capabilities: ${(conn.capabilities || []).join(', ')}`;
+    const rowAuth = document.createElement('span'); rowAuth.textContent = `Auth: ${conn.auth?.type || 'none'} (${conn.secretConfigured ? '✓ Configuré' : '❌ Non configuré'})`;
+    const rowMetrics = document.createElement('span');
+    rowMetrics.textContent = `Latence: ${conn.lastLatencyMs != null ? conn.lastLatencyMs + ' ms' : '—'} | Erreur: ${conn.lastError || 'aucune'}`;
+
+    details.append(rowId, rowTransport, rowEndpoint, rowCaps, rowAuth, rowMetrics);
+
+    const btnRow = document.createElement('div');
+    btnRow.style.display = 'flex';
+    btnRow.style.gap = '8px';
+    btnRow.style.marginTop = '8px';
+
+    const btnTest = document.createElement('button');
+    btnTest.type = 'button';
+    btnTest.className = 'btn btn-secondary btn-sm';
+    btnTest.textContent = 'Tester';
+    btnTest.addEventListener('click', async () => {
+      try {
+        const res = await fetchApi(`/api/connections/${encodeURIComponent(conn.id)}/test`, { method: 'POST' });
+        alert(res.reachable ? `✅ ${conn.name} accessible (${res.latencyMs} ms)` : `❌ ${conn.name} inaccessible (${res.errorCode})`);
+        void renderSettingsView();
+      } catch (e) {
+        alert(`❌ Erreur : ${e.message}`);
+      }
+    });
+
+    const btnToggle = document.createElement('button');
+    btnToggle.type = 'button';
+    btnToggle.className = `btn btn-${conn.enabled ? 'danger' : 'success'} btn-sm`;
+    btnToggle.textContent = conn.enabled ? 'Désactiver' : 'Activer';
+    btnToggle.addEventListener('click', async () => {
+      try {
+        await fetchApi(`/api/connections/${encodeURIComponent(conn.id)}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ enabled: !conn.enabled }),
+        });
+        void renderSettingsView();
+      } catch (e) {
+        alert(`❌ Erreur : ${e.message}`);
+      }
+    });
+
+    const btnEdit = document.createElement('button');
+    btnEdit.type = 'button';
+    btnEdit.className = 'btn btn-secondary btn-sm';
+    btnEdit.textContent = 'Configurer';
+    btnEdit.addEventListener('click', () => {
+      showEditServiceModal(conn);
+    });
+
+    btnRow.append(btnTest, btnToggle, btnEdit);
+
+    if (conn.source === 'DATABASE' && !conn.userCreated) {
+      const btnReset = document.createElement('button');
+      btnReset.type = 'button';
+      btnReset.className = 'btn btn-secondary btn-sm';
+      btnReset.textContent = 'Réinitialiser';
+      btnReset.addEventListener('click', async () => {
+        try {
+          await fetchApi(`/api/connections/${encodeURIComponent(conn.id)}/reset`, { method: 'POST' });
+          alert('✅ Override réinitialisé aux valeurs du dépôt.');
+          void renderSettingsView();
+        } catch (e) {
+          alert(`❌ Erreur : ${e.message}`);
+        }
+      });
+      btnRow.appendChild(btnReset);
+    }
+
+    if (conn.userCreated) {
+      const btnDelete = document.createElement('button');
+      btnDelete.type = 'button';
+      btnDelete.className = 'btn btn-danger btn-sm';
+      btnDelete.textContent = 'Supprimer';
+      btnDelete.addEventListener('click', async () => {
+        if (!confirm(`Supprimer le service ${conn.name} ?`)) return;
+        try {
+          await fetchApi(`/api/connections/${encodeURIComponent(conn.id)}`, { method: 'DELETE' });
+          void renderSettingsView();
+        } catch (e) {
+          alert(`❌ Erreur : ${e.message}`);
+        }
+      });
+      btnRow.appendChild(btnDelete);
+    }
+
+    card.append(cardHeader, details, btnRow);
+    grid.appendChild(card);
+  });
+
+  container.appendChild(grid);
+  return container;
+}
+
+function applyLocalSettingCache(key, value) {
+  if (key === 'settings.interfaceMode' && typeof value === 'string') {
+    currentDisplayLevel = value;
+    localStorage.setItem('jarvis_interface_level', value);
+  } else if (key === 'settings.startupView' && typeof value === 'string') {
+    localStorage.setItem('jarvis_startup_view', value);
+  } else if (key === 'settings.timelineMode' && typeof value === 'string') {
+    localStorage.setItem('jarvis_timeline_mode', value);
+  } else if (key === 'settings.expandCompletedMissions') {
+    localStorage.setItem('jarvis_expand_completed_missions', String(value));
+  } else if (key === 'settings.theme' && typeof value === 'string') {
+    localStorage.setItem('jarvis_theme', value);
+    applyThemeRuntime(value);
+  }
+}
+
+function renderSettingCard(setting) {
+  const def = setting.definition;
+  const card = document.createElement('div');
+  card.className = 'setting-card';
+
+  const header = document.createElement('div');
+  header.className = 'setting-card-header';
+
+  const titleGroup = document.createElement('div');
+  const title = document.createElement('div');
+  title.className = 'setting-card-title';
+  title.textContent = def.label;
+
+  const keyLabel = document.createElement('div');
+  keyLabel.className = 'setting-card-key';
+  keyLabel.textContent = def.key;
+  titleGroup.append(title, keyLabel);
+
+  const badges = document.createElement('div');
+  badges.className = 'setting-badges';
+
+  const badgeLevel = document.createElement('span');
+  badgeLevel.className = 'badge-level';
+  badgeLevel.textContent = def.level;
+
+  const badgeSource = document.createElement('span');
+  badgeSource.className = 'badge-source';
+  badgeSource.textContent = `Source: ${setting.source}`;
+
+  const badgeAvail = document.createElement('span');
+  if (def.availability === 'FUTURE') {
+    badgeAvail.className = 'badge badge-future';
+    badgeAvail.textContent = 'FUTURE';
+  } else if (def.availability === 'SYSTEM_LOCKED') {
+    badgeAvail.className = 'badge badge-locked';
+    badgeAvail.textContent = 'SYSTEM_LOCKED';
+  } else {
+    badgeAvail.className = 'badge badge-success';
+    badgeAvail.textContent = 'AVAILABLE';
+  }
+
+  badges.append(badgeLevel, badgeSource, badgeAvail);
+  header.append(titleGroup, badges);
+
+  const desc = document.createElement('div');
+  desc.className = 'setting-card-desc';
+  desc.textContent = def.description;
+
+  const controlRow = document.createElement('div');
+  controlRow.className = 'setting-card-control';
+
+  if (!def.editable || def.availability !== 'AVAILABLE') {
+    const disabledText = document.createElement('span');
+    disabledText.style.color = 'var(--accent-warning)';
+    disabledText.style.fontSize = '0.85rem';
+    disabledText.textContent = `🔒 ${def.unavailableReason || 'Non modifiable'} ${def.plannedChantier ? `(Chantier ${def.plannedChantier})` : ''}`;
+    controlRow.appendChild(disabledText);
+  } else {
+    if (def.type === 'boolean') {
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = Boolean(setting.effectiveValue);
+      checkbox.addEventListener('change', async () => {
+        try {
+          await fetchApi('/api/settings', {
+            method: 'PATCH',
+            body: JSON.stringify({ key: def.key, value: checkbox.checked }),
+          });
+          applyLocalSettingCache(def.key, checkbox.checked);
+          void renderSettingsView();
+        } catch (e) {
+          alert(`❌ Erreur : ${e.message}`);
+          checkbox.checked = !checkbox.checked;
+        }
+      });
+      const checkLabel = document.createElement('span');
+      checkLabel.textContent = checkbox.checked ? ' Activé' : ' Désactivé';
+      controlRow.append(checkbox, checkLabel);
+    } else if (def.type === 'enum' && def.validation?.enumValues) {
+      const select = document.createElement('select');
+      select.className = 'input-field';
+      select.style.maxWidth = '240px';
+      def.validation.enumValues.forEach((optVal) => {
+        const opt = document.createElement('option');
+        opt.value = optVal;
+        opt.textContent = optVal;
+        if (optVal === String(setting.effectiveValue)) opt.selected = true;
+        select.appendChild(opt);
+      });
+      select.addEventListener('change', async () => {
+        try {
+          await fetchApi('/api/settings', {
+            method: 'PATCH',
+            body: JSON.stringify({ key: def.key, value: select.value }),
+          });
+          applyLocalSettingCache(def.key, select.value);
+          void renderSettingsView();
+        } catch (e) {
+          alert(`❌ Erreur : ${e.message}`);
+        }
+      });
+      controlRow.appendChild(select);
+    } else if (def.type === 'number') {
+      const input = document.createElement('input');
+      input.type = 'number';
+      input.className = 'input-field';
+      input.style.maxWidth = '180px';
+      input.value = String(setting.effectiveValue);
+      if (def.validation?.min !== undefined) input.min = String(def.validation.min);
+      if (def.validation?.max !== undefined) input.max = String(def.validation.max);
+
+      const btnSave = document.createElement('button');
+      btnSave.type = 'button';
+      btnSave.className = 'btn btn-secondary btn-sm';
+      btnSave.textContent = 'Appliquer';
+      btnSave.addEventListener('click', async () => {
+        const val = Number(input.value);
+        try {
+          await fetchApi('/api/settings', {
+            method: 'PATCH',
+            body: JSON.stringify({ key: def.key, value: val }),
+          });
+          void renderSettingsView();
+        } catch (e) {
+          alert(`❌ Erreur : ${e.message}`);
+        }
+      });
+      controlRow.append(input, btnSave);
+    } else {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'input-field';
+      input.style.maxWidth = '280px';
+      input.value = String(setting.effectiveValue || '');
+
+      const btnSave = document.createElement('button');
+      btnSave.type = 'button';
+      btnSave.className = 'btn btn-secondary btn-sm';
+      btnSave.textContent = 'Appliquer';
+      btnSave.addEventListener('click', async () => {
+        try {
+          await fetchApi('/api/settings', {
+            method: 'PATCH',
+            body: JSON.stringify({ key: def.key, value: input.value }),
+          });
+          void renderSettingsView();
+        } catch (e) {
+          alert(`❌ Erreur : ${e.message}`);
+        }
+      });
+      controlRow.append(input, btnSave);
+    }
+  }
+
+  card.append(header, desc, controlRow);
+  return card;
+}
+
+function renderExportImportCard() {
+  const card = document.createElement('div');
+  card.className = 'card';
+
+  const title = document.createElement('div');
+  title.className = 'card-title';
+  title.textContent = 'Export / Import de Configuration';
+
+  const desc = document.createElement('div');
+  desc.className = 'card-subtext';
+  desc.textContent = 'Exporte la configuration courante (sans aucun secret/token) ou importe une configuration JSON atomique.';
+
+  const btnRow = document.createElement('div');
+  btnRow.style.display = 'flex';
+  btnRow.style.gap = '10px';
+  btnRow.style.marginTop = '10px';
+
+  const btnExport = document.createElement('button');
+  btnExport.type = 'button';
+  btnExport.className = 'btn btn-secondary btn-sm';
+  btnExport.textContent = 'Export JSON';
+  btnExport.addEventListener('click', async () => {
+    try {
+      const data = await fetchApi('/api/settings/export');
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `jarvis-settings-export-${Date.now()}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert(`❌ Erreur export : ${e.message}`);
+    }
+  });
+
+  const fileInput = document.createElement('input');
+  fileInput.type = 'file';
+  fileInput.accept = '.json';
+  fileInput.style.display = 'none';
+
+  fileInput.addEventListener('change', async () => {
+    const file = fileInput.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const payload = JSON.parse(text);
+      await fetchApi('/api/settings/import', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      alert('✅ Importation réalisée avec succès !');
+      void renderSettingsView();
+    } catch (e) {
+      alert(`❌ Échec import (SETTINGS_IMPORT_INVALID) : ${e.message}`);
+    }
+  });
+
+  const btnImport = document.createElement('button');
+  btnImport.type = 'button';
+  btnImport.className = 'btn btn-secondary btn-sm';
+  btnImport.textContent = 'Import JSON';
+  btnImport.addEventListener('click', () => fileInput.click());
+
+  btnRow.append(btnExport, btnImport, fileInput);
+  card.append(title, desc, btnRow);
+  return card;
+}
+
+function renderFutureMapCard() {
+  const card = document.createElement('div');
+  card.className = 'future-map-card';
+
+  const title = document.createElement('div');
+  title.className = 'card-title';
+  title.style.color = 'var(--accent-primary)';
+  title.textContent = '🚀 CAPACITÉS À VENIR (FEUILLE DE ROUTE JARVIS)';
+
+  const body = document.createElement('div');
+  body.style.display = 'flex';
+  body.style.flexDirection = 'column';
+  body.style.gap = '12px';
+  body.style.marginTop = '10px';
+  body.style.fontSize = '0.9rem';
+
+  const c8 = document.createElement('div');
+  const c8Title = document.createElement('strong');
+  c8Title.textContent = 'CHANTIER 8 — AUTONOMOUS WORKBENCH';
+  const c8List = document.createElement('div');
+  c8List.className = 'card-subtext';
+  c8List.textContent = 'Repository Inspection, Repository Search, Knowledge Search / RAG, Documents / PDF, Spreadsheets, Data Analysis, Database Query, Reports, Structured Browser Research, Controlled Self-Improvement.';
+  c8.append(c8Title, c8List);
+
+  const c9 = document.createElement('div');
+  const c9Title = document.createElement('strong');
+  c9Title.textContent = 'CHANTIER 9 — JARVIS BUSINESS OS';
+  const c9List = document.createElement('div');
+  c9List.className = 'card-subtext';
+  c9List.textContent = 'Product Studio, Creative Studio, Commercial Office, Marketing Office, Email, Calendar, Contacts, Messaging, CRM.';
+  c9.append(c9Title, c9List);
+
+  const c10 = document.createElement('div');
+  const c10Title = document.createElement('strong');
+  c10Title.textContent = 'CHANTIER 10 — FULL INDEPENDENCE';
+  const c10List = document.createElement('div');
+  c10List.className = 'card-subtext';
+  c10List.textContent = 'Computer Use, Interactive Browser, Voice, Wake Word, Local Models, Offline RAG, Local Software Control.';
+  c10.append(c10Title, c10List);
+
+  body.append(c8, c9, c10);
+  card.append(title, body);
+  return card;
 }
 
 // --- INITIALIZATION ---
@@ -1434,7 +2411,38 @@ function bootstrapJarvis() {
   jarvisInitialized = true;
 
   initNavigation();
-  switchView('accueil');
+
+  // Apply general settings saved in localStorage for instant initial rendering
+  const savedTheme = localStorage.getItem('jarvis_theme') || 'SYSTEM';
+  applyThemeRuntime(savedTheme);
+
+  const startupViewSetting = localStorage.getItem('jarvis_startup_view') || 'CHAT';
+  let initialView = 'chat';
+  if (startupViewSetting === 'COMMAND_CENTER') {
+    initialView = 'accueil';
+  } else if (startupViewSetting === 'LAST_VIEW') {
+    initialView = localStorage.getItem('jarvis_last_view') || 'accueil';
+  }
+
+  switchView(initialView);
+
+  // Asynchronously sync backend authority settings when accessible
+  setTimeout(async () => {
+    try {
+      const effectiveSettings = await fetchApi('/api/settings');
+      if (Array.isArray(effectiveSettings)) {
+        effectiveSettings.forEach((item) => {
+          const key = item.definition?.key;
+          const val = item.effectiveValue;
+          if (key && val !== undefined) {
+            applyLocalSettingCache(key, val);
+          }
+        });
+      }
+    } catch {
+      // Backend offline: retain local cache gracefully
+    }
+  }, 100);
 
   if (state.ota && state.ota.autoCheck) {
     setTimeout(() => checkOtaUpdates(false), 2000);

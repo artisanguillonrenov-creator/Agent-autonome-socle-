@@ -52,6 +52,23 @@ export class SkillRegistry {
   selectable():SkillDefinition[]{return this.list().filter(s=>s.availability==="AVAILABLE"&&s.exposure==="DYNAMIC"&&s.kind!=="INTERNAL"&&s.kind!=="FUTURE"&&this.isEnabled(s)&&!!s.handler);}
   alwaysExposed():SkillDefinition[]{return this.list().filter(s=>s.availability==="AVAILABLE"&&s.exposure==="ALWAYS"&&this.isEnabled(s)&&!!s.handler);}
 
+  refreshServiceAvailability(serviceRegistry: { findServiceForCapability(capability: string): unknown }): void {
+    for (const skill of this.skills.values()) {
+      if (skill.kind === "FUTURE" || skill.kind === "INTERNAL") continue;
+      const capability = skill.serviceCapability;
+      if (!capability) continue;
+
+      const capableService = serviceRegistry.findServiceForCapability(capability);
+      if (capableService) {
+        skill.availability = "AVAILABLE";
+        skill.unavailableReason = undefined;
+      } else {
+        skill.availability = "UNAVAILABLE";
+        skill.unavailableReason = "AUCUN_SERVICE_CAPABLE";
+      }
+    }
+  }
+
   async findRelevant(query: string, topK = 3, source=this.selectable()): Promise<SkillDefinition[]> {
     if (source.length === 0) return [];
     const queryEmbedding = await this.embeddings.embed(query);

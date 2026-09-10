@@ -6,14 +6,23 @@ import type { MemoryManager } from "../memory/memoryManager.js";
  * des enseignements de plus haut niveau — stockés comme mémoire à part entière
  * (kind: "reflection") plutôt que de tout rejouer en brut à chaque cycle.
  */
+import { config } from "../config.js";
+
 export class ReflectionEngine {
   private stepsSinceLastReflection = 0;
+  private customEveryNSteps?: number;
 
   constructor(
     private readonly llm: LLMProvider,
     private readonly memory: MemoryManager,
-    private readonly everyNSteps: number,
-  ) {}
+    everyNSteps?: number,
+  ) {
+    this.customEveryNSteps = everyNSteps;
+  }
+
+  get everyNSteps(): number {
+    return this.customEveryNSteps ?? config.reflection.everyNSteps;
+  }
 
   /** À appeler après chaque tour de la boucle agent. Réfléchit si l'intervalle est atteint. */
   async maybeReflect(): Promise<string | null> {

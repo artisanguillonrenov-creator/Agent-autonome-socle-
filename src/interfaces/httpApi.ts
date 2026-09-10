@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { existsSync, readFileSync } from "node:fs";
 import { join, extname } from "node:path";
+import crypto from "node:crypto";
 import type { Agent } from "../core/agent.js";
 import { config, type LLMProviderName } from "../config.js";
 import { TaskStore } from "../tasks/taskStore.js";
@@ -14,13 +15,19 @@ import { WorkspaceStore } from "../workspaces/workspaceStore.js";
 import { ArtifactStore } from "../workspaces/artifactStore.js";
 import { ObservabilityStore } from "../observability/observabilityStore.js";
 import { ActivityStore } from "../observability/activityStore.js";
+import { SETTINGS_CATALOG, SETTINGS_SECTIONS } from "../settings/catalog.js";
+import { SettingsStore, SettingScopeType } from "../settings/store.js";
+import { applyAllEffectiveRuntimeSettings } from "../settings/applier.js";
+import { getDb } from "../persistence/db.js";
 
 const taskStore = new TaskStore();
 const notificationStore = new NotificationStore();
 const softwareFactoryService = new SoftwareFactoryService();
 const workspaceStore = new WorkspaceStore();
 const artifactStore = new ArtifactStore(workspaceStore);
-const observabilityStore=new ObservabilityStore();const activityStore=new ActivityStore();
+const observabilityStore = new ObservabilityStore();
+const activityStore = new ActivityStore();
+const settingsStore = new SettingsStore();
 let lastServerError: string | null = null;
 
 async function readBody(req: IncomingMessage): Promise<string> {
@@ -33,7 +40,7 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
     "access-control-allow-origin": "*",
-    "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS",
+    "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
     "access-control-allow-headers": "Content-Type, Authorization",
   });
   res.end(JSON.stringify(body));
@@ -108,16 +115,37 @@ const DEFAULT_PRESET_MODELS: Record<string, Array<{ id: string; name: string; is
   mock: [{ id: "mock-model", name: "Mock Model (Offline)" }],
 };
 
+function applyRuntimeSettingEffect(key: string, value: unknown, agent: Agent): void {
+  if (key === "intelligence.skillSelectorMax" && typeof value === "number") {
+    config.skills.selectorMax = value;
+    (agent.skillSelector as any).maxSkills = value;
+  } else if (key === "autonomy.maxIterations" && typeof value === "number") {
+    config.agent.maxIterations = value;
+  } else if (key === "skills.reflectionEveryNSteps" && typeof value === "number") {
+    config.reflection.everyNSteps = value;
+  } else if (key === "automations.backgroundMaxConcurrent" && typeof value === "number") {
+    config.background.maxConcurrent = value;
+  } else if (key === "system.tokenBudget" && typeof value === "number") {
+    config.context.tokenBudget = value;
+  } else if (key === "projects.workspaceMaxFileBytes" && typeof value === "number") {
+    config.workspace.maxFileBytes = value;
+  } else if (key === "projects.workspaceMaxTotalBytes" && typeof value === "number") {
+    config.workspace.maxTotalBytes = value;
+  }
+}
+
 /**
  * Façade HTTP du Jarvis Command Center.
  */
 export function startHttpApi(agent: Agent, port: number): ReturnType<typeof createServer> {
+  // Apply all effective runtime settings at startup
+  applyAllEffectiveRuntimeSettings(agent, settingsStore);
   const server = createServer(async (req, res) => {
     // CORS Preflight
     if (req.method === "OPTIONS") {
       res.writeHead(204, {
         "access-control-allow-origin": "*",
-        "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS",
+        "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
         "access-control-allow-headers": "Content-Type, Authorization",
       });
       res.end();
@@ -140,12 +168,53 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
     }
 
     try {
-      if(req.method==="GET"&&pathname==="/api/specialists"){sendJson(res,200,agent.planRunner.specialists.list().map(({id,name,enabled,allowedCapabilities,maxConcurrency})=>({id,name,enabled,allowedCapabilities,maxConcurrency})));return;}
-      const operationMetrics=pathname.match(/^\/api\/operations\/([^/]+)\/metrics$/);if(req.method==="GET"&&operationMetrics){const value=observabilityStore.operation(decodeURIComponent(operationMetrics[1]));sendJson(res,value?200:404,value??{error:"not_found"});return;}
-      const planMetrics=pathname.match(/^\/api\/plans\/([^/]+)\/metrics$/);if(req.method==="GET"&&planMetrics){const value=observabilityStore.plan(decodeURIComponent(planMetrics[1]));sendJson(res,value?200:404,value??{error:"not_found"});return;}
-      if(req.method==="GET"&&pathname==="/api/activity"){sendJson(res,200,{items:activityStore.list({planRunId:parsedUrl.searchParams.get("planRunId")??undefined,operationTaskId:parsedUrl.searchParams.get("operationTaskId")??undefined,specialistId:parsedUrl.searchParams.get("specialistId")??undefined,eventType:parsedUrl.searchParams.get("eventType")??undefined,level:parsedUrl.searchParams.get("level")??undefined,limit:Number(parsedUrl.searchParams.get("limit"))||100,offset:Number(parsedUrl.searchParams.get("offset"))||0})});return;}
+      if (req.method === "GET" && pathname === "/api/specialists") {
+        sendJson(
+          res,
+          200,
+          agent.planRunner.specialists
+            .list()
+            .map(({ id, name, enabled, allowedCapabilities, maxConcurrency }) => ({
+              id,
+              name,
+              enabled,
+              allowedCapabilities,
+              maxConcurrency,
+            })),
+        );
+        return;
+      }
+
+      const operationMetrics = pathname.match(/^\/api\/operations\/([^/]+)\/metrics$/);
+      if (req.method === "GET" && operationMetrics) {
+        const value = observabilityStore.operation(decodeURIComponent(operationMetrics[1]));
+        sendJson(res, value ? 200 : 404, value ?? { error: "not_found" });
+        return;
+      }
+
+      const planMetrics = pathname.match(/^\/api\/plans\/([^/]+)\/metrics$/);
+      if (req.method === "GET" && planMetrics) {
+        const value = observabilityStore.plan(decodeURIComponent(planMetrics[1]));
+        sendJson(res, value ? 200 : 404, value ?? { error: "not_found" });
+        return;
+      }
+
+      if (req.method === "GET" && pathname === "/api/activity") {
+        sendJson(res, 200, {
+          items: activityStore.list({
+            planRunId: parsedUrl.searchParams.get("planRunId") ?? undefined,
+            operationTaskId: parsedUrl.searchParams.get("operationTaskId") ?? undefined,
+            specialistId: parsedUrl.searchParams.get("specialistId") ?? undefined,
+            eventType: parsedUrl.searchParams.get("eventType") ?? undefined,
+            level: parsedUrl.searchParams.get("level") ?? undefined,
+            limit: Number(parsedUrl.searchParams.get("limit")) || 100,
+            offset: Number(parsedUrl.searchParams.get("offset")) || 0,
+          }),
+        });
+        return;
+      }
+
       // 0a. Software Factory Service Endpoint: POST /tasks
-      // (Traite directement la tâche demandée par ServiceAdapter pour la Software Factory)
       if (req.method === "POST" && pathname === "/tasks") {
         const bodyStr = await readBody(req);
         let taskReq: TaskRequest;
@@ -162,7 +231,6 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
       }
 
       // 0b. Command Center External API Dispatch Endpoint: POST /api/tasks/dispatch
-      // (Passe par le ServiceOrchestrator pour tracer et choisir le service approprié)
       if (req.method === "POST" && pathname === "/api/tasks/dispatch") {
         const bodyStr = await readBody(req);
         let taskReq: TaskRequest;
@@ -184,7 +252,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
           {
             traceId: taskReq.trace_id,
             idempotencyKey: taskReq.idempotency_key,
-            executionMode: (taskReq as TaskRequest & {execution_mode?:string}).execution_mode === "background" ? "background" : "foreground",
+            executionMode: (taskReq as TaskRequest & { execution_mode?: string }).execution_mode === "background" ? "background" : "foreground",
           },
         );
 
@@ -267,7 +335,513 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         return;
       }
 
-      // 3. Status & General Health
+      // 3. Settings Endpoints
+      if (req.method === "GET" && pathname === "/api/settings/schema") {
+        sendJson(res, 200, {
+          sections: SETTINGS_SECTIONS,
+          catalog: SETTINGS_CATALOG,
+        });
+        return;
+      }
+
+      if (req.method === "GET" && pathname === "/api/settings/export") {
+        const settings = settingsStore.getAllEffectiveSettings("GLOBAL", "global");
+        const serviceOverrides = agent.serviceOrchestrator.registry.connectionStore.listOverrides();
+
+        sendJson(res, 200, {
+          schemaVersion: 1,
+          exportedAt: Date.now(),
+          settings: settings.map((s) => ({
+            key: s.definition.key,
+            value: s.value,
+            effectiveValue: s.effectiveValue,
+            source: s.source,
+          })),
+          serviceOverrides: serviceOverrides.map((o) => ({
+            serviceId: o.serviceId,
+            name: o.name,
+            nameOverride: o.nameOverride,
+            userCreated: o.userCreated,
+            enabledOverride: o.enabledOverride,
+            transportOverride: o.transportOverride,
+            endpointOverride: o.endpointOverride,
+            healthPath: o.healthPath,
+            taskPath: o.taskPath,
+            authTypeOverride: o.authTypeOverride,
+            authEnvVar: o.authEnvVar,
+            priorityOverride: o.priorityOverride,
+            requestTimeoutMs: o.requestTimeoutMs,
+            healthTimeoutMs: o.healthTimeoutMs,
+            capabilitiesJson: o.capabilitiesJson,
+            parallelSafeCapabilitiesJson: o.parallelSafeCapabilitiesJson,
+            riskByCapabilityJson: o.riskByCapabilityJson,
+          })),
+        });
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/settings/import") {
+        let body: any;
+        try {
+          body = JSON.parse((await readBody(req)) || "{}");
+        } catch {
+          sendJson(res, 400, { error: "SETTINGS_IMPORT_INVALID", reason: "JSON_INVALID" });
+          return;
+        }
+
+        if (!body || typeof body !== "object" || body.schemaVersion !== 1) {
+          sendJson(res, 400, { error: "SETTINGS_IMPORT_INVALID", reason: "INVALID_SCHEMA_VERSION" });
+          return;
+        }
+
+        // Check forbidden secrets in payload
+        const rawString = JSON.stringify(body);
+        if (
+          rawString.includes("Bearer ") ||
+          rawString.includes("ghp_") ||
+          rawString.includes("sk-") ||
+          /["']?(token|password|secretValue|authorization|api_key)["']?\s*:/i.test(rawString)
+        ) {
+          sendJson(res, 400, { error: "SETTINGS_IMPORT_INVALID", reason: "SECRET_VALUES_FORBIDDEN" });
+          return;
+        }
+
+        const db = getDb();
+        try {
+          db.transaction(() => {
+            // Import settings
+            if (Array.isArray(body.settings)) {
+              for (const s of body.settings) {
+                if (!s || typeof s.key !== "string") throw new Error("INVALID_SETTING_ENTRY");
+                const def = SETTINGS_CATALOG.find((x) => x.key === s.key);
+                if (!def) throw new Error(`UNKNOWN_SETTING: ${s.key}`);
+                const valToSet = s.value !== undefined ? s.value : s.effectiveValue;
+                if (def.availability === "FUTURE") {
+                  if (valToSet !== undefined && valToSet !== null && valToSet !== def.defaultValue && valToSet !== false) {
+                    throw new Error(`FUTURE_SETTING_CANNOT_BE_ENABLED: ${s.key}`);
+                  }
+                  continue;
+                }
+                if (!def.editable) continue; // Skip system-locked / non-editable settings
+                settingsStore.setSetting(s.key, valToSet, "GLOBAL", "global");
+              }
+            }
+
+            // Import service overrides
+            if (Array.isArray(body.serviceOverrides)) {
+              for (const o of body.serviceOverrides) {
+                if (!o || typeof o.serviceId !== "string" || !o.serviceId.trim()) throw new Error("INVALID_SERVICE_OVERRIDE");
+                if (o.transportOverride && !["local", "task_http"].includes(o.transportOverride)) throw new Error("UNKNOWN_TRANSPORT");
+
+                const serviceId = o.serviceId.trim();
+                const isFactory = agent.serviceOrchestrator.registry.isFactoryService(serviceId);
+                const factoryService = isFactory ? agent.serviceOrchestrator.registry.getServiceById(serviceId) : null;
+
+                if (isFactory) {
+                  // Apply ONLY present overrides for factory service without defaulting undefined fields
+                  const patchObj: any = {};
+                  const importedName = o.nameOverride !== undefined ? o.nameOverride : (o.name && factoryService && o.name !== factoryService.name && o.name !== factoryService.id ? o.name : undefined);
+                  if (importedName !== undefined) patchObj.name = importedName;
+                  if (o.enabledOverride !== undefined) patchObj.enabled = o.enabledOverride;
+                  if (o.endpointOverride !== undefined) patchObj.endpoint = o.endpointOverride;
+                  if (o.transportOverride !== undefined) patchObj.transport = o.transportOverride;
+                  if (o.healthPath !== undefined) patchObj.healthPath = o.healthPath;
+                  if (o.taskPath !== undefined) patchObj.taskPath = o.taskPath;
+                  if (o.priorityOverride !== undefined) patchObj.priority = o.priorityOverride;
+                  if (o.requestTimeoutMs !== undefined) patchObj.requestTimeoutMs = o.requestTimeoutMs;
+                  if (o.healthTimeoutMs !== undefined) patchObj.healthTimeoutMs = o.healthTimeoutMs;
+                  if (o.authTypeOverride !== undefined) {
+                    patchObj.auth = o.authTypeOverride === "bearer_env" ? { type: "bearer_env", envVar: o.authEnvVar || "API_TOKEN" } : { type: "none" };
+                  }
+                  if (o.capabilitiesJson) patchObj.capabilities = JSON.parse(o.capabilitiesJson);
+                  if (o.parallelSafeCapabilitiesJson) patchObj.parallelSafeCapabilities = JSON.parse(o.parallelSafeCapabilitiesJson);
+                  if (o.riskByCapabilityJson) patchObj.riskByCapability = JSON.parse(o.riskByCapabilityJson);
+
+                  agent.serviceOrchestrator.registry.patchService(serviceId, patchObj);
+                } else {
+                  if (o.transportOverride && o.transportOverride !== "task_http") {
+                    throw new Error("USER_SERVICE_TRANSPORT_MUST_BE_TASK_HTTP");
+                  }
+                  // User-created service import requires full valid definition
+                  agent.serviceOrchestrator.registry.register({
+                    id: serviceId,
+                    name: o.name || serviceId,
+                    userCreated: true,
+                    enabled: o.enabledOverride ?? true,
+                    transport: o.transportOverride || "task_http",
+                    endpoint: o.endpointOverride || "http://localhost:3000",
+                    healthPath: o.healthPath || "/health",
+                    taskPath: o.taskPath || "/tasks",
+                    auth: o.authTypeOverride === "bearer_env" ? { type: "bearer_env", envVar: o.authEnvVar || "API_TOKEN" } : { type: "none" },
+                    priority: o.priorityOverride ?? 10,
+                    requestTimeoutMs: o.requestTimeoutMs ?? 120000,
+                    healthTimeoutMs: o.healthTimeoutMs ?? 5000,
+                    capabilities: o.capabilitiesJson ? JSON.parse(o.capabilitiesJson) : [],
+                    parallelSafeCapabilities: o.parallelSafeCapabilitiesJson ? JSON.parse(o.parallelSafeCapabilitiesJson) : [],
+                    riskByCapability: o.riskByCapabilityJson ? JSON.parse(o.riskByCapabilityJson) : {},
+                  });
+                }
+              }
+            }
+          })();
+
+          applyAllEffectiveRuntimeSettings(agent, settingsStore);
+          sendJson(res, 200, { ok: true, message: "Import réalisé avec succès" });
+        } catch (e) {
+          sendJson(res, 400, { error: "SETTINGS_IMPORT_INVALID", reason: (e as Error).message });
+        }
+        return;
+      }
+
+      if (req.method === "GET" && pathname === "/api/settings") {
+        const scopeType = (parsedUrl.searchParams.get("scopeType") as SettingScopeType) || "GLOBAL";
+        const scopeId = parsedUrl.searchParams.get("scopeId") || "global";
+        const level = parsedUrl.searchParams.get("level") as any;
+
+        sendJson(res, 200, settingsStore.getAllEffectiveSettings(scopeType, scopeId, level));
+        return;
+      }
+
+      if ((req.method === "PATCH" || req.method === "POST") && pathname === "/api/settings") {
+        let body: any;
+        try {
+          body = JSON.parse((await readBody(req)) || "{}");
+        } catch {
+          sendJson(res, 400, { error: "JSON invalide" });
+          return;
+        }
+
+        const scopeType: SettingScopeType = body.scopeType || "GLOBAL";
+        const scopeId: string = body.scopeId || "global";
+
+        if (scopeType === "PROJECT" || scopeType === "TASK") {
+          sendJson(res, 400, { error: "SETTINGS_SCOPE_NOT_AVAILABLE" });
+          return;
+        }
+
+        try {
+          if (typeof body.key === "string") {
+            settingsStore.setSetting(body.key, body.value, scopeType, scopeId);
+            applyRuntimeSettingEffect(body.key, body.value, agent);
+          } else if (body.settings && typeof body.settings === "object") {
+            for (const [k, v] of Object.entries(body.settings)) {
+              settingsStore.setSetting(k, v, scopeType, scopeId);
+              applyRuntimeSettingEffect(k, v, agent);
+            }
+          } else {
+            // Legacy backwards-compatibility payload { tokenBudget, maxIterations, reflectionEveryNSteps }
+            if (body.tokenBudget && body.tokenBudget > 0) {
+              settingsStore.setSetting("system.tokenBudget", body.tokenBudget, scopeType, scopeId);
+              config.context.tokenBudget = body.tokenBudget;
+            }
+            if (body.maxIterations && body.maxIterations > 0) {
+              settingsStore.setSetting("autonomy.maxIterations", body.maxIterations, scopeType, scopeId);
+              config.agent.maxIterations = body.maxIterations;
+            }
+            if (body.reflectionEveryNSteps && body.reflectionEveryNSteps > 0) {
+              settingsStore.setSetting("skills.reflectionEveryNSteps", body.reflectionEveryNSteps, scopeType, scopeId);
+              config.reflection.everyNSteps = body.reflectionEveryNSteps;
+            }
+          }
+
+          applyAllEffectiveRuntimeSettings(agent, settingsStore);
+          sendJson(res, 200, {
+            ok: true,
+            settings: settingsStore.getAllEffectiveSettings(scopeType, scopeId),
+          });
+        } catch (e) {
+          sendJson(res, 400, { error: (e as Error).message });
+        }
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/settings/reset") {
+        let body: any;
+        try {
+          body = JSON.parse((await readBody(req)) || "{}");
+        } catch {
+          body = {};
+        }
+
+        const scopeType: SettingScopeType = body.scopeType || "GLOBAL";
+        const scopeId: string = body.scopeId || "global";
+
+        if (scopeType === "PROJECT" || scopeType === "TASK") {
+          sendJson(res, 400, { error: "SETTINGS_SCOPE_NOT_AVAILABLE" });
+          return;
+        }
+
+        if (typeof body.key === "string" && body.key.trim()) {
+          settingsStore.resetSetting(body.key.trim(), scopeType, scopeId);
+        } else {
+          settingsStore.resetAll(scopeType, scopeId);
+        }
+
+        applyAllEffectiveRuntimeSettings(agent, settingsStore);
+        sendJson(res, 200, {
+          ok: true,
+          settings: settingsStore.getAllEffectiveSettings(scopeType, scopeId),
+        });
+        return;
+      }
+
+      // 4. Service Connection Center Endpoints
+      if (req.method === "GET" && pathname === "/api/connections") {
+        const services = agent.serviceOrchestrator.registry.listServices();
+        sendJson(
+          res,
+          200,
+          services.map((s) => {
+            const ov = agent.serviceOrchestrator.registry.connectionStore.getOverride(s.id);
+            return {
+              id: s.id,
+              serviceId: s.id,
+              name: s.name,
+              description: s.description,
+              enabled: s.enabled,
+              userCreated: s.userCreated ?? false,
+              transport: s.transport,
+              endpoint: s.endpoint,
+              healthPath: s.healthPath || "/health",
+              taskPath: s.taskPath || "/tasks",
+              priority: s.priority,
+              requestTimeoutMs: s.requestTimeoutMs || 120000,
+              healthTimeoutMs: s.healthTimeoutMs || 5000,
+              capabilities: s.capabilities,
+              parallelSafeCapabilities: s.parallelSafeCapabilities || [],
+              riskByCapability: s.riskByCapability || {},
+              source: s.source || "FACTORY",
+              auth: {
+                type: s.auth.type,
+                envVar: s.auth.type === "bearer_env" ? s.auth.envVar : undefined,
+              },
+              secretConfigured:
+                s.auth.type === "none" ||
+                Boolean(process.env[s.auth.envVar]) ||
+                (s.id === "software_factory" && Boolean(process.env.API_TOKEN)),
+              lastTestAt: ov?.lastTestAt,
+              lastSuccessAt: ov?.lastSuccessAt,
+              lastLatencyMs: ov?.lastLatencyMs,
+              lastError: ov?.lastError,
+            };
+          }),
+        );
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/connections/test-all") {
+        const services = agent.serviceOrchestrator.registry.listServices();
+        const results = await Promise.all(
+          services.map(async (s) => {
+            const healthRes = await agent.serviceOrchestrator.adapter.checkHealth(s);
+            agent.serviceOrchestrator.registry.connectionStore.recordDiagnostic(s.id, healthRes);
+            return healthRes;
+          }),
+        );
+
+        agent.skills.refreshServiceAvailability(agent.serviceOrchestrator.registry);
+        sendJson(res, 200, { ok: true, results });
+        return;
+      }
+
+      const connectionItemMatch = pathname.match(/^\/api\/connections\/([^/]+)$/);
+      if (connectionItemMatch) {
+        const id = decodeURIComponent(connectionItemMatch[1]);
+
+        if (req.method === "GET") {
+          const service = agent.serviceOrchestrator.registry.getServiceById(id);
+          if (!service) {
+            sendJson(res, 404, { error: "CONNECTION_NOT_FOUND" });
+            return;
+          }
+          const ov = agent.serviceOrchestrator.registry.connectionStore.getOverride(id);
+          sendJson(res, 200, {
+            id: service.id,
+            serviceId: service.id,
+            name: service.name,
+            description: service.description,
+            enabled: service.enabled,
+            userCreated: service.userCreated ?? false,
+            transport: service.transport,
+            endpoint: service.endpoint,
+            healthPath: service.healthPath || "/health",
+            taskPath: service.taskPath || "/tasks",
+            priority: service.priority,
+            requestTimeoutMs: service.requestTimeoutMs || 120000,
+            healthTimeoutMs: service.healthTimeoutMs || 5000,
+            capabilities: service.capabilities,
+            parallelSafeCapabilities: service.parallelSafeCapabilities || [],
+            riskByCapability: service.riskByCapability || {},
+            source: service.source || "FACTORY",
+            auth: {
+              type: service.auth.type,
+              envVar: service.auth.type === "bearer_env" ? service.auth.envVar : undefined,
+            },
+            secretConfigured:
+              service.auth.type === "none" ||
+              Boolean(process.env[service.auth.envVar]) ||
+              (service.id === "software_factory" && Boolean(process.env.API_TOKEN)),
+            lastTestAt: ov?.lastTestAt,
+            lastSuccessAt: ov?.lastSuccessAt,
+            lastLatencyMs: ov?.lastLatencyMs,
+            lastError: ov?.lastError,
+          });
+          return;
+        }
+
+        if (req.method === "PATCH") {
+          let body: any;
+          try {
+            body = JSON.parse((await readBody(req)) || "{}");
+          } catch {
+            sendJson(res, 400, { error: "JSON invalide" });
+            return;
+          }
+
+          const existing = agent.serviceOrchestrator.registry.getServiceById(id);
+          if (!existing) {
+            sendJson(res, 404, { error: "CONNECTION_NOT_FOUND" });
+            return;
+          }
+
+          try {
+            agent.serviceOrchestrator.registry.patchService(id, body);
+            agent.skills.refreshServiceAvailability(agent.serviceOrchestrator.registry);
+            sendJson(res, 200, { ok: true, connection: agent.serviceOrchestrator.registry.getServiceById(id) });
+          } catch (e) {
+            const err = e as any;
+            if (err.message === "SERVICE_CONNECTION_IN_USE") {
+              sendJson(res, 409, { error: "SERVICE_CONNECTION_IN_USE", taskIds: err.taskIds || [] });
+              return;
+            }
+            sendJson(res, 400, { error: err.message });
+          }
+          return;
+        }
+
+        if (req.method === "DELETE") {
+          try {
+            agent.serviceOrchestrator.registry.deleteService(id);
+            agent.skills.refreshServiceAvailability(agent.serviceOrchestrator.registry);
+            sendJson(res, 200, { ok: true });
+          } catch (e) {
+            const err = e as any;
+            if (err.message === "FACTORY_SERVICE_CANNOT_BE_DELETED") {
+              sendJson(res, 405, { error: "FACTORY_SERVICE_CANNOT_BE_DELETED" });
+              return;
+            }
+            if (err.message === "SERVICE_CONNECTION_IN_USE") {
+              sendJson(res, 409, { error: "SERVICE_CONNECTION_IN_USE", taskIds: err.taskIds || [] });
+              return;
+            }
+            sendJson(res, 400, { error: err.message });
+          }
+          return;
+        }
+      }
+
+      if (req.method === "POST" && pathname === "/api/connections") {
+        let body: any;
+        try {
+          body = JSON.parse((await readBody(req)) || "{}");
+        } catch {
+          sendJson(res, 400, { error: "JSON invalide" });
+          return;
+        }
+
+        const id = typeof body.id === "string" ? body.id.trim() : body.serviceId?.trim();
+        if (!id) {
+          sendJson(res, 400, { error: "id est requis" });
+          return;
+        }
+
+        if (agent.serviceOrchestrator.registry.getServiceById(id)) {
+          sendJson(res, 409, { error: "CONNECTION_ALREADY_EXISTS" });
+          return;
+        }
+
+        if (body.transport && body.transport !== "task_http") {
+          sendJson(res, 400, { error: "INVALID_TRANSPORT: user services must use task_http" });
+          return;
+        }
+
+        try {
+          const newDef = {
+            id,
+            name: typeof body.name === "string" ? body.name.trim() : id,
+            userCreated: true,
+            enabled: body.enabled ?? true,
+            transport: "task_http" as const,
+            endpoint: body.endpoint,
+            healthPath: body.healthPath || "/health",
+            taskPath: body.taskPath || "/tasks",
+            priority: body.priority ?? 10,
+            requestTimeoutMs: body.requestTimeoutMs ?? 120000,
+            healthTimeoutMs: body.healthTimeoutMs ?? 5000,
+            auth: body.auth || { type: "none" },
+            capabilities: body.capabilities || [],
+            parallelSafeCapabilities: body.parallelSafeCapabilities || [],
+            riskByCapability: body.riskByCapability || {},
+          };
+
+          agent.serviceOrchestrator.registry.register(newDef);
+          agent.skills.refreshServiceAvailability(agent.serviceOrchestrator.registry);
+          sendJson(res, 201, { ok: true, connection: agent.serviceOrchestrator.registry.getServiceById(newDef.id) });
+        } catch (e) {
+          const err = e as any;
+          if (err.message?.startsWith("CONNECTION_CAPABILITY_UNKNOWN")) {
+            sendJson(res, 400, { error: err.message });
+            return;
+          }
+          sendJson(res, 400, { error: err.message });
+        }
+        return;
+      }
+
+      const connectionActionMatch = pathname.match(/^\/api\/connections\/([^/]+)\/(test|reset)$/);
+      if (req.method === "POST" && connectionActionMatch) {
+        const id = decodeURIComponent(connectionActionMatch[1]);
+        const action = connectionActionMatch[2];
+
+        const service = agent.serviceOrchestrator.registry.getServiceById(id);
+        if (!service) {
+          sendJson(res, 404, { error: "CONNECTION_NOT_FOUND" });
+          return;
+        }
+
+        if (action === "test") {
+          const healthRes = await agent.serviceOrchestrator.adapter.checkHealth(service);
+          agent.serviceOrchestrator.registry.connectionStore.recordDiagnostic(id, healthRes);
+          agent.skills.refreshServiceAvailability(agent.serviceOrchestrator.registry);
+          sendJson(res, 200, {
+            id: service.id,
+            reachable: healthRes.reachable,
+            status: healthRes.status,
+            latencyMs: healthRes.latencyMs,
+            authenticated: healthRes.authenticated ?? true,
+            errorCode: healthRes.errorCode,
+          });
+          return;
+        }
+
+        if (action === "reset") {
+          try {
+            const restored = agent.serviceOrchestrator.registry.resetFactoryOverride(id);
+            agent.skills.refreshServiceAvailability(agent.serviceOrchestrator.registry);
+            sendJson(res, 200, { ok: true, connection: restored });
+          } catch (e) {
+            const err = e as any;
+            if (err.message === "SERVICE_CONNECTION_IN_USE") {
+              sendJson(res, 409, { error: "SERVICE_CONNECTION_IN_USE", taskIds: err.taskIds || [] });
+              return;
+            }
+            sendJson(res, 400, { error: err.message });
+          }
+          return;
+        }
+      }
+
+      // 4. Status & General Health
       if (req.method === "GET" && (pathname === "/api/status" || pathname === "/status")) {
         const services = agent.serviceOrchestrator.registry.listServices();
         const ops = agent.serviceOrchestrator.store.listOperations();
@@ -315,28 +889,89 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         return;
       }
 
-      // 4. Operations Endpoints
+      // 5. Operations Endpoints
       if (req.method === "GET" && (pathname === "/operations" || pathname === "/api/operations")) {
         sendJson(res, 200, agent.serviceOrchestrator.store.listOperations());
         return;
       }
 
-      const cancelMatch=pathname.match(/^\/api\/operations\/([^/]+)\/cancel$/);
-      if(req.method==="POST"&&cancelMatch){const result=agent.serviceOrchestrator.store.cancel(cancelMatch[1]);if(!result){sendJson(res,404,{error:"opération non trouvée"});return;}sendJson(res,200,{...result,message:result.cancelled?"Opération annulée avant dispatch.":result.requested?"Annulation demandée, sans garantie pour l’effet externe.":"Opération déjà terminée."});return;}
-
-      if(req.method==="GET"&&pathname==="/api/notifications/unread-count"){sendJson(res,200,{count:notificationStore.unreadCount()});return;}
-      if(req.method==="GET"&&pathname==="/api/notifications"){sendJson(res,200,notificationStore.list(parsedUrl.searchParams.get("unread")==="true"));return;}
-      const readMatch=pathname.match(/^\/api\/notifications\/([^/]+)\/read$/);
-      if(req.method==="POST"&&readMatch){const ok=notificationStore.markRead(readMatch[1]);sendJson(res,ok?200:404,ok?{ok:true}:{error:"notification non trouvée"});return;}
-
-      if(req.method==="GET"&&pathname==="/api/schedules"){sendJson(res,200,taskStore.listSchedules());return;}
-      if(req.method==="POST"&&pathname==="/api/schedules"){
-        let body:any;try{body=JSON.parse((await readBody(req))||"{}");}catch{sendJson(res,400,{error:"JSON invalide"});return;}
-        if(typeof body.title!=="string"||!body.title.trim()||!["REMINDER","DISPATCH","WATCH"].includes(body.taskType)||!Number.isSafeInteger(body.nextRunAt)||body.nextRunAt<0||(body.repeatIntervalMs!==undefined&&(!Number.isSafeInteger(body.repeatIntervalMs)||body.repeatIntervalMs<=0))||((body.taskType==="DISPATCH"||body.taskType==="WATCH")&&(!body.payload||body.payload.action!=="DISPATCH_CAPABILITY"||typeof body.payload.capability!=="string"||typeof body.payload.objective!=="string"))){sendJson(res,400,{error:"INVALID_SCHEDULE"});return;}
-        sendJson(res,201,taskStore.createSchedule({title:body.title.trim(),taskType:body.taskType,nextRunAt:body.nextRunAt,repeatIntervalMs:body.repeatIntervalMs,payload:body.payload}));return;
+      const cancelMatch = pathname.match(/^\/api\/operations\/([^/]+)\/cancel$/);
+      if (req.method === "POST" && cancelMatch) {
+        const result = agent.serviceOrchestrator.store.cancel(cancelMatch[1]);
+        if (!result) {
+          sendJson(res, 404, { error: "opération non trouvée" });
+          return;
+        }
+        sendJson(res, 200, {
+          ...result,
+          message: result.cancelled
+            ? "Opération annulée avant dispatch."
+            : result.requested
+            ? "Annulation demandée, sans garantie pour l’effet externe."
+            : "Opération déjà terminée.",
+        });
+        return;
       }
-      const toggleSchedule=pathname.match(/^\/api\/schedules\/([^/]+)\/(enable|disable)$/);
-      if(req.method==="POST"&&toggleSchedule){const ok=taskStore.setEnabled(toggleSchedule[1],toggleSchedule[2]==="enable");sendJson(res,ok?200:404,ok?{ok:true}:{error:"schedule non trouvé"});return;}
+
+      if (req.method === "GET" && pathname === "/api/notifications/unread-count") {
+        sendJson(res, 200, { count: notificationStore.unreadCount() });
+        return;
+      }
+      if (req.method === "GET" && pathname === "/api/notifications") {
+        sendJson(res, 200, notificationStore.list(parsedUrl.searchParams.get("unread") === "true"));
+        return;
+      }
+      const readMatch = pathname.match(/^\/api\/notifications\/([^/]+)\/read$/);
+      if (req.method === "POST" && readMatch) {
+        const ok = notificationStore.markRead(readMatch[1]);
+        sendJson(res, ok ? 200 : 404, ok ? { ok: true } : { error: "notification non trouvée" });
+        return;
+      }
+
+      if (req.method === "GET" && pathname === "/api/schedules") {
+        sendJson(res, 200, taskStore.listSchedules());
+        return;
+      }
+      if (req.method === "POST" && pathname === "/api/schedules") {
+        let body: any;
+        try {
+          body = JSON.parse((await readBody(req)) || "{}");
+        } catch {
+          sendJson(res, 400, { error: "JSON invalide" });
+          return;
+        }
+        if (
+          typeof body.title !== "string" ||
+          !body.title.trim() ||
+          !["REMINDER", "DISPATCH", "WATCH"].includes(body.taskType) ||
+          !Number.isSafeInteger(body.nextRunAt) ||
+          body.nextRunAt < 0 ||
+          (body.repeatIntervalMs !== undefined && (!Number.isSafeInteger(body.repeatIntervalMs) || body.repeatIntervalMs <= 0)) ||
+          ((body.taskType === "DISPATCH" || body.taskType === "WATCH") &&
+            (!body.payload || body.payload.action !== "DISPATCH_CAPABILITY" || typeof body.payload.capability !== "string" || typeof body.payload.objective !== "string"))
+        ) {
+          sendJson(res, 400, { error: "INVALID_SCHEDULE" });
+          return;
+        }
+        sendJson(
+          res,
+          201,
+          taskStore.createSchedule({
+            title: body.title.trim(),
+            taskType: body.taskType,
+            nextRunAt: body.nextRunAt,
+            repeatIntervalMs: body.repeatIntervalMs,
+            payload: body.payload,
+          }),
+        );
+        return;
+      }
+      const toggleSchedule = pathname.match(/^\/api\/schedules\/([^/]+)\/(enable|disable)$/);
+      if (req.method === "POST" && toggleSchedule) {
+        const ok = taskStore.setEnabled(toggleSchedule[1], toggleSchedule[2] === "enable");
+        sendJson(res, ok ? 200 : 404, ok ? { ok: true } : { error: "schedule non trouvé" });
+        return;
+      }
 
       const operationEventsMatch = pathname.match(/^\/api\/operations\/([^/]+)\/events$/);
       if (req.method === "GET" && operationEventsMatch) {
@@ -365,7 +1000,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         return;
       }
 
-      if (req.method === "POST" && (pathname.includes("/operations/") && pathname.endsWith("/respond"))) {
+      if (req.method === "POST" && pathname.includes("/operations/") && pathname.endsWith("/respond")) {
         const parts = pathname.split("/");
         const taskId = parts[parts.length - 2];
         const body = JSON.parse((await readBody(req)) || "{}") as { action?: string; value?: string };
@@ -409,9 +1044,21 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         return;
       }
 
-      // 5. Services Endpoints
+      // 6. Services Legacy Endpoints
       if (req.method === "GET" && pathname === "/api/services") {
-        sendJson(res, 200, agent.serviceOrchestrator.registry.listServices().map(s=>({...s,auth:undefined,authType:s.auth.type,authConfigured:s.auth.type==="none"||Boolean(process.env[s.auth.envVar])||(s.id==="software_factory"&&Boolean(process.env.API_TOKEN))})));
+        sendJson(
+          res,
+          200,
+          agent.serviceOrchestrator.registry.listServices().map((s) => ({
+            ...s,
+            auth: undefined,
+            authType: s.auth.type,
+            authConfigured:
+              s.auth.type === "none" ||
+              Boolean(process.env[s.auth.envVar]) ||
+              (s.id === "software_factory" && Boolean(process.env.API_TOKEN)),
+          })),
+        );
         return;
       }
 
@@ -426,9 +1073,10 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
           return;
         }
 
-        service.enabled = body.enabled ?? !service.enabled;
-        agent.serviceOrchestrator.registry.register(service);
-        sendJson(res, 200, { ok: true, service });
+        const newEnabled = body.enabled ?? !service.enabled;
+        agent.serviceOrchestrator.registry.patchService(id, { enabled: newEnabled });
+        agent.skills.refreshServiceAvailability(agent.serviceOrchestrator.registry);
+        sendJson(res, 200, { ok: true, service: agent.serviceOrchestrator.registry.getServiceById(id) });
         return;
       }
 
@@ -451,7 +1099,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         return;
       }
 
-      // 6. Tasks Endpoints
+      // 7. Tasks Endpoints
       if (req.method === "GET" && pathname === "/api/tasks") {
         sendJson(res, 200, taskStore.list());
         return;
@@ -476,29 +1124,169 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         return;
       }
 
-      // 7. Planner / Plans Endpoints
-      if(req.method==="GET"&&pathname==="/api/workspaces"){sendJson(res,200,workspaceStore.list());return;}
-      if(req.method==="POST"&&pathname==="/api/workspaces"){let b:any;try{b=JSON.parse((await readBody(req))||"{}");const ownerId=typeof b.ownerId==="string"&&b.ownerId.trim()?b.ownerId:`adhoc-${crypto.randomUUID()}`;const w=workspaceStore.create({name:typeof b.name==="string"?b.name:"Workspace",ownerType:"ADHOC",ownerId});sendJson(res,201,w);}catch(e){sendJson(res,400,{error:(e as Error).message});}return;}
-      const workspaceArtifacts=pathname.match(/^\/api\/workspaces\/([^/]+)\/artifacts$/);if(req.method==="GET"&&workspaceArtifacts){const id=decodeURIComponent(workspaceArtifacts[1]);if(!workspaceStore.get(id)){sendJson(res,404,{error:"WORKSPACE_NOT_FOUND"});return;}sendJson(res,200,artifactStore.listByWorkspace(id));return;}
-      const workspaceContent=pathname.match(/^\/api\/workspaces\/([^/]+)\/files\/content$/);if(req.method==="GET"&&workspaceContent){const id=decodeURIComponent(workspaceContent[1]),path=parsedUrl.searchParams.get("path");if(!workspaceStore.get(id)){sendJson(res,404,{error:"WORKSPACE_NOT_FOUND"});return;}if(!path){sendJson(res,400,{error:"PATH_REQUIRED"});return;}try{const data=workspaceStore.readFile(id,path);res.writeHead(200,{"content-type":"application/octet-stream","content-disposition":`attachment; filename="${path.split("/").pop()!.replace(/[^a-zA-Z0-9._-]/g,"_")}"`});res.end(data);}catch(e){sendJson(res,400,{error:(e as Error).message});}return;}
-      const workspaceFiles=pathname.match(/^\/api\/workspaces\/([^/]+)\/files$/);if(workspaceFiles){const id=decodeURIComponent(workspaceFiles[1]);if(!workspaceStore.get(id)){sendJson(res,404,{error:"WORKSPACE_NOT_FOUND"});return;}try{if(req.method==="GET"){sendJson(res,200,workspaceStore.listFiles(id));return;}if(req.method==="POST"){const b=JSON.parse((await readBody(req))||"{}");if(typeof b.path!=="string"||(!Object.hasOwn(b,"contentBase64")&&!Object.hasOwn(b,"text"))||b.contentBase64!==undefined&&(typeof b.contentBase64!=="string"||b.contentBase64.length%4!==0||!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(b.contentBase64)||Buffer.from(b.contentBase64,"base64").toString("base64")!==b.contentBase64))throw new Error("INVALID_UPLOAD");const data=b.contentBase64!==undefined?Buffer.from(b.contentBase64,"base64"):String(b.text);const file=workspaceStore.writeFile(id,b.path,data);const artifact=artifactStore.createFileArtifact({workspaceId:id,name:file.path,mimeType:typeof b.mimeType==="string"?b.mimeType:undefined,content:Buffer.isBuffer(data)?data:Buffer.from(data)});sendJson(res,201,{file,artifact});return;}if(req.method==="DELETE"){const path=parsedUrl.searchParams.get("path");if(!path)throw new Error("PATH_REQUIRED");workspaceStore.deleteFile(id,path);sendJson(res,200,{ok:true});return;}}catch(e){sendJson(res,400,{error:(e as Error).message});return;}}
-      const workspaceDetail=pathname.match(/^\/api\/workspaces\/([^/]+)$/);if(req.method==="GET"&&workspaceDetail){const w=workspaceStore.get(decodeURIComponent(workspaceDetail[1]));sendJson(res,w?200:404,w??{error:"WORKSPACE_NOT_FOUND"});return;}
-      const artifactDetail=pathname.match(/^\/api\/artifacts\/([^/]+)$/);if(req.method==="GET"&&artifactDetail){const a=artifactStore.get(decodeURIComponent(artifactDetail[1]));if(!a){sendJson(res,404,{error:"ARTIFACT_NOT_FOUND"});return;}if(parsedUrl.searchParams.get("download")==="1"&&a.relativePath){if(a.contentStatus!=="AVAILABLE"){sendJson(res,409,{error:a.contentStatus});return;}const data=workspaceStore.readFile(a.workspaceId,a.relativePath);res.writeHead(200,{"content-type":a.mimeType||"application/octet-stream","content-disposition":`attachment; filename="${a.name.replace(/[^a-zA-Z0-9._-]/g,"_")}"`});res.end(data);return;}sendJson(res,200,a);return;}
+      // 8. Planner / Plans Endpoints
+      if (req.method === "GET" && pathname === "/api/workspaces") {
+        sendJson(res, 200, workspaceStore.list());
+        return;
+      }
+      if (req.method === "POST" && pathname === "/api/workspaces") {
+        let b: any;
+        try {
+          b = JSON.parse((await readBody(req)) || "{}");
+          const ownerId = typeof b.ownerId === "string" && b.ownerId.trim() ? b.ownerId : `adhoc-${crypto.randomUUID()}`;
+          const w = workspaceStore.create({ name: typeof b.name === "string" ? b.name : "Workspace", ownerType: "ADHOC", ownerId });
+          sendJson(res, 201, w);
+        } catch (e) {
+          sendJson(res, 400, { error: (e as Error).message });
+        }
+        return;
+      }
+      const workspaceArtifacts = pathname.match(/^\/api\/workspaces\/([^/]+)\/artifacts$/);
+      if (req.method === "GET" && workspaceArtifacts) {
+        const id = decodeURIComponent(workspaceArtifacts[1]);
+        if (!workspaceStore.get(id)) {
+          sendJson(res, 404, { error: "WORKSPACE_NOT_FOUND" });
+          return;
+        }
+        sendJson(res, 200, artifactStore.listByWorkspace(id));
+        return;
+      }
+      const workspaceContent = pathname.match(/^\/api\/workspaces\/([^/]+)\/files\/content$/);
+      if (req.method === "GET" && workspaceContent) {
+        const id = decodeURIComponent(workspaceContent[1]),
+          path = parsedUrl.searchParams.get("path");
+        if (!workspaceStore.get(id)) {
+          sendJson(res, 404, { error: "WORKSPACE_NOT_FOUND" });
+          return;
+        }
+        if (!path) {
+          sendJson(res, 400, { error: "PATH_REQUIRED" });
+          return;
+        }
+        try {
+          const data = workspaceStore.readFile(id, path);
+          res.writeHead(200, {
+            "content-type": "application/octet-stream",
+            "content-disposition": `attachment; filename="${path.split("/").pop()!.replace(/[^a-zA-Z0-9._-]/g, "_")}"`,
+          });
+          res.end(data);
+        } catch (e) {
+          sendJson(res, 400, { error: (e as Error).message });
+        }
+        return;
+      }
+      const workspaceFiles = pathname.match(/^\/api\/workspaces\/([^/]+)\/files$/);
+      if (workspaceFiles) {
+        const id = decodeURIComponent(workspaceFiles[1]);
+        if (!workspaceStore.get(id)) {
+          sendJson(res, 404, { error: "WORKSPACE_NOT_FOUND" });
+          return;
+        }
+        try {
+          if (req.method === "GET") {
+            sendJson(res, 200, workspaceStore.listFiles(id));
+            return;
+          }
+          if (req.method === "POST") {
+            const b = JSON.parse((await readBody(req)) || "{}");
+            if (
+              typeof b.path !== "string" ||
+              (!Object.hasOwn(b, "contentBase64") && !Object.hasOwn(b, "text")) ||
+              (b.contentBase64 !== undefined &&
+                (typeof b.contentBase64 !== "string" ||
+                  b.contentBase64.length % 4 !== 0 ||
+                  !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(b.contentBase64) ||
+                  Buffer.from(b.contentBase64, "base64").toString("base64") !== b.contentBase64))
+            )
+              throw new Error("INVALID_UPLOAD");
+            const data = b.contentBase64 !== undefined ? Buffer.from(b.contentBase64, "base64") : String(b.text);
+            const file = workspaceStore.writeFile(id, b.path, data);
+            const artifact = artifactStore.createFileArtifact({
+              workspaceId: id,
+              name: file.path,
+              mimeType: typeof b.mimeType === "string" ? b.mimeType : undefined,
+              content: Buffer.isBuffer(data) ? data : Buffer.from(data),
+            });
+            sendJson(res, 201, { file, artifact });
+            return;
+          }
+          if (req.method === "DELETE") {
+            const path = parsedUrl.searchParams.get("path");
+            if (!path) throw new Error("PATH_REQUIRED");
+            workspaceStore.deleteFile(id, path);
+            sendJson(res, 200, { ok: true });
+            return;
+          }
+        } catch (e) {
+          sendJson(res, 400, { error: (e as Error).message });
+          return;
+        }
+      }
+      const workspaceDetail = pathname.match(/^\/api\/workspaces\/([^/]+)$/);
+      if (req.method === "GET" && workspaceDetail) {
+        const w = workspaceStore.get(decodeURIComponent(workspaceDetail[1]));
+        sendJson(res, w ? 200 : 404, w ?? { error: "WORKSPACE_NOT_FOUND" });
+        return;
+      }
+      const artifactDetail = pathname.match(/^\/api\/artifacts\/([^/]+)$/);
+      if (req.method === "GET" && artifactDetail) {
+        const a = artifactStore.get(decodeURIComponent(artifactDetail[1]));
+        if (!a) {
+          sendJson(res, 404, { error: "ARTIFACT_NOT_FOUND" });
+          return;
+        }
+        if (parsedUrl.searchParams.get("download") === "1" && a.relativePath) {
+          if (a.contentStatus !== "AVAILABLE") {
+            sendJson(res, 409, { error: a.contentStatus });
+            return;
+          }
+          const data = workspaceStore.readFile(a.workspaceId, a.relativePath);
+          res.writeHead(200, {
+            "content-type": a.mimeType || "application/octet-stream",
+            "content-disposition": `attachment; filename="${a.name.replace(/[^a-zA-Z0-9._-]/g, "_")}"`,
+          });
+          res.end(data);
+          return;
+        }
+        sendJson(res, 200, a);
+        return;
+      }
       if (req.method === "GET" && (pathname === "/plan" || pathname === "/api/plan")) {
         sendJson(res, 200, agent.planner.all());
         return;
       }
       if (req.method === "GET" && pathname === "/api/plans") {
-        sendJson(res, 200, agent.planner.listRuns()); return;
+        sendJson(res, 200, agent.planner.listRuns());
+        return;
       }
-      const planNodesMatch=pathname.match(/^\/api\/plans\/([^/]+)\/nodes$/);
-      if(req.method==="GET"&&planNodesMatch){const run=agent.planner.getRun(decodeURIComponent(planNodesMatch[1]));if(!run){sendJson(res,404,{error:"PLAN_NOT_FOUND"});return;}sendJson(res,200,agent.planner.nodes(run.id));return;}
-      const planCancelMatch=pathname.match(/^\/api\/plans\/([^/]+)\/cancel$/);
-      if(req.method==="POST"&&planCancelMatch){const run=agent.planRunner.cancel(decodeURIComponent(planCancelMatch[1]));sendJson(res,run?200:404,run??{error:"PLAN_NOT_FOUND"});return;}
-      const planDetailMatch=pathname.match(/^\/api\/plans\/([^/]+)$/);
-      if(req.method==="GET"&&planDetailMatch){const run=agent.planner.getRun(decodeURIComponent(planDetailMatch[1]));if(!run){sendJson(res,404,{error:"PLAN_NOT_FOUND"});return;}sendJson(res,200,{...run,nodes:agent.planner.nodes(run.id)});return;}
+      const planNodesMatch = pathname.match(/^\/api\/plans\/([^/]+)\/nodes$/);
+      if (req.method === "GET" && planNodesMatch) {
+        const run = agent.planner.getRun(decodeURIComponent(planNodesMatch[1]));
+        if (!run) {
+          sendJson(res, 404, { error: "PLAN_NOT_FOUND" });
+          return;
+        }
+        sendJson(res, 200, agent.planner.nodes(run.id));
+        return;
+      }
+      const planCancelMatch = pathname.match(/^\/api\/plans\/([^/]+)\/cancel$/);
+      if (req.method === "POST" && planCancelMatch) {
+        const run = agent.planRunner.cancel(decodeURIComponent(planCancelMatch[1]));
+        sendJson(res, run ? 200 : 404, run ?? { error: "PLAN_NOT_FOUND" });
+        return;
+      }
+      const planDetailMatch = pathname.match(/^\/api\/plans\/([^/]+)$/);
+      if (req.method === "GET" && planDetailMatch) {
+        const run = agent.planner.getRun(decodeURIComponent(planDetailMatch[1]));
+        if (!run) {
+          sendJson(res, 404, { error: "PLAN_NOT_FOUND" });
+          return;
+        }
+        sendJson(res, 200, { ...run, nodes: agent.planner.nodes(run.id) });
+        return;
+      }
 
-      // 8. Memory Endpoints
+      // 9. Memory Endpoints
       if (req.method === "GET" && pathname === "/api/memory") {
         sendJson(res, 200, {
           factsCount: agent.memory.facts.all().length,
@@ -532,7 +1320,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         return;
       }
 
-      // 9. Skills Endpoints
+      // 10. Skills Endpoints
       if (req.method === "GET" && (pathname === "/skills" || pathname === "/api/skills")) {
         sendJson(
           res,
@@ -540,19 +1328,53 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
           agent.skills.list().map((s) => ({
             id: s.id,
             name: s.name,
-            displayName:s.displayName,
+            displayName: s.displayName,
             description: s.description,
-            category:s.category,kind:s.kind,availability:s.availability,enabled:agent.skills.isEnabled(s),exposure:s.exposure,risk:s.risk,executionTarget:s.executionTarget,serviceCapability:s.serviceCapability,unavailableReason:s.unavailableReason,
+            category: s.category,
+            kind: s.kind,
+            availability: s.availability,
+            enabled: agent.skills.isEnabled(s),
+            exposure: s.exposure,
+            risk: s.risk,
+            executionTarget: s.executionTarget,
+            serviceCapability: s.serviceCapability,
+            unavailableReason: s.unavailableReason,
           })),
         );
         return;
       }
-      if(req.method==="GET"&&pathname==="/api/workflows"){sendJson(res,200,agent.workflows.list());return;}
-      const workflowGet=pathname.match(/^\/api\/workflows\/([^/]+)$/);if(req.method==="GET"&&workflowGet){const workflow=agent.workflows.get(decodeURIComponent(workflowGet[1]));sendJson(res,workflow?200:404,workflow??{error:"workflow non trouvé"});return;}
-      const workflowAction=pathname.match(/^\/api\/workflows\/([^/]+)\/(approve|disable|archive)$/);if(req.method==="POST"&&workflowAction){const status=workflowAction[2]==="approve"?"ACTIVE":workflowAction[2]==="disable"?"DISABLED":"ARCHIVED";try{const ok=agent.workflows.setStatus(decodeURIComponent(workflowAction[1]),status,agent.serviceOrchestrator.registry);sendJson(res,ok?200:404,ok?{ok:true,status}:{error:"workflow non trouvé"});}catch(e){sendJson(res,409,{error:(e as Error).message});}return;}
-      const learnWorkflow=pathname.match(/^\/api\/plans\/([^/]+)\/learn-workflow$/);if(req.method==="POST"&&learnWorkflow){try{sendJson(res,201,agent.workflows.learnFromPlan(decodeURIComponent(learnWorkflow[1]),agent.planner));}catch(e){sendJson(res,409,{error:(e as Error).message});}return;}
+      if (req.method === "GET" && pathname === "/api/workflows") {
+        sendJson(res, 200, agent.workflows.list());
+        return;
+      }
+      const workflowGet = pathname.match(/^\/api\/workflows\/([^/]+)$/);
+      if (req.method === "GET" && workflowGet) {
+        const workflow = agent.workflows.get(decodeURIComponent(workflowGet[1]));
+        sendJson(res, workflow ? 200 : 404, workflow ?? { error: "workflow non trouvé" });
+        return;
+      }
+      const workflowAction = pathname.match(/^\/api\/workflows\/([^/]+)\/(approve|disable|archive)$/);
+      if (req.method === "POST" && workflowAction) {
+        const status = workflowAction[2] === "approve" ? "ACTIVE" : workflowAction[2] === "disable" ? "DISABLED" : "ARCHIVED";
+        try {
+          const ok = agent.workflows.setStatus(decodeURIComponent(workflowAction[1]), status, agent.serviceOrchestrator.registry);
+          sendJson(res, ok ? 200 : 404, ok ? { ok: true, status } : { error: "workflow non trouvé" });
+        } catch (e) {
+          sendJson(res, 409, { error: (e as Error).message });
+        }
+        return;
+      }
+      const learnWorkflow = pathname.match(/^\/api\/plans\/([^/]+)\/learn-workflow$/);
+      if (req.method === "POST" && learnWorkflow) {
+        try {
+          sendJson(res, 201, agent.workflows.learnFromPlan(decodeURIComponent(learnWorkflow[1]), agent.planner));
+        } catch (e) {
+          sendJson(res, 409, { error: (e as Error).message });
+        }
+        return;
+      }
 
-      // 10. OTA Endpoints
+      // 11. OTA Endpoints
       if (req.method === "GET" && pathname === "/api/ota/manifest") {
         const manifestPath = join(process.cwd(), "www", "ota-manifest.json");
         if (existsSync(manifestPath)) {
@@ -603,7 +1425,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         return;
       }
 
-      // 10b. AI Models Control Panel Endpoints (No secrets exposed!)
+      // 12. AI Models Control Panel Endpoints (No secrets exposed!)
       if (req.method === "GET" && pathname === "/api/models") {
         const providers = [
           { id: "openrouter", name: "OpenRouter", available: Boolean(config.llm.openrouterApiKey) },
@@ -636,7 +1458,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
             const models = (data.data || []).map((m) => {
               const promptPrice = Number(m.pricing?.prompt || 0);
               const compPrice = Number(m.pricing?.completion || 0);
-              const isFree = promptPrice === 0 && compPrice === 0 || m.id.endsWith(":free");
+              const isFree = (promptPrice === 0 && compPrice === 0) || m.id.endsWith(":free");
               return {
                 id: m.id,
                 name: m.name || m.id,
@@ -650,7 +1472,6 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
           // Fallback if network unavailable
         }
 
-        // Fallback OpenRouter models
         sendJson(res, 200, [
           { id: "anthropic/claude-3.5-sonnet", name: "Claude 3.5 Sonnet", isFree: false },
           { id: "meta-llama/llama-3.3-70b-instruct:free", name: "Llama 3.3 70B Instruct (Free)", isFree: true },
@@ -707,11 +1528,9 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         const currentModel = config.llm.model;
 
         try {
-          // 1. Create & test new provider
           const newProviderInstance = createLLMProvider({ provider: body.provider, model: body.model });
           await newProviderInstance.complete([{ role: "user", content: "Validation du modèle" }]);
 
-          // 2. If test passes, update Agent in-memory & persist
           agent.setLLMProvider(newProviderInstance);
           saveLLMConfig(body.provider, body.model);
 
@@ -725,7 +1544,6 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
             message: `Modèle actif mis à jour : ${body.model}`,
           });
         } catch (err) {
-          // Fallback to previous functional model
           const fallbackInstance = createLLMProvider({ provider: currentProv, model: currentModel });
           agent.setLLMProvider(fallbackInstance);
           config.llm.provider = currentProv;
@@ -741,7 +1559,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         return;
       }
 
-      // 11. Reflection Endpoint
+      // 13. Reflection Endpoint
       if (req.method === "GET" && pathname === "/api/reflection") {
         sendJson(res, 200, {
           enabled: true,
@@ -756,7 +1574,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         return;
       }
 
-      // 12. Checkpoints Endpoints
+      // 14. Checkpoints Endpoints
       if (req.method === "GET" && (pathname === "/checkpoints" || pathname === "/api/checkpoints")) {
         sendJson(res, 200, agent.listCheckpoints());
         return;
@@ -768,7 +1586,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         return;
       }
 
-      if (req.method === "POST" && (pathname.includes("/checkpoints/") && pathname.endsWith("/restore"))) {
+      if (req.method === "POST" && pathname.includes("/checkpoints/") && pathname.endsWith("/restore")) {
         const parts = pathname.split("/");
         const id = parts[parts.length - 2];
         const ok = agent.restoreCheckpoint(id);
@@ -776,7 +1594,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         return;
       }
 
-      // 13. System & Diagnostics
+      // 15. System & Diagnostics
       if (req.method === "GET" && pathname === "/api/system/factory-diagnostics") {
         let toolCalling = false;
         try {
@@ -867,39 +1685,6 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
             { name: "Test Fournisseur IA", status: "ok", detail: config.llm.provider },
             { name: "Test Services", status: services.length > 0 ? "ok" : "warning", detail: `${services.length} service(s)` },
           ],
-        });
-        return;
-      }
-
-      // 14. Settings Endpoints
-      if (req.method === "GET" && pathname === "/api/settings") {
-        sendJson(res, 200, {
-          tokenBudget: config.context.tokenBudget,
-          maxIterations: config.agent.maxIterations,
-          reflectionEveryNSteps: config.reflection.everyNSteps,
-          llmProvider: config.llm.provider,
-          llmModel: config.llm.model,
-        });
-        return;
-      }
-
-      if (req.method === "POST" && pathname === "/api/settings") {
-        const body = JSON.parse((await readBody(req)) || "{}") as {
-          tokenBudget?: number;
-          maxIterations?: number;
-          reflectionEveryNSteps?: number;
-        };
-        if (body.tokenBudget && body.tokenBudget > 0) config.context.tokenBudget = body.tokenBudget;
-        if (body.maxIterations && body.maxIterations > 0) config.agent.maxIterations = body.maxIterations;
-        if (body.reflectionEveryNSteps && body.reflectionEveryNSteps > 0) config.reflection.everyNSteps = body.reflectionEveryNSteps;
-
-        sendJson(res, 200, {
-          ok: true,
-          settings: {
-            tokenBudget: config.context.tokenBudget,
-            maxIterations: config.agent.maxIterations,
-            reflectionEveryNSteps: config.reflection.everyNSteps,
-          },
         });
         return;
       }
