@@ -8,8 +8,11 @@ interface OpenAIOptions {
 
 export class OpenAIProvider implements LLMProvider {
   readonly name = "openai";
+  readonly model: string;
 
-  constructor(private readonly opts: OpenAIOptions) {}
+  constructor(private readonly opts: OpenAIOptions) {
+    this.model = opts.model;
+  }
 
   async complete(messages: ChatMessage[], options: CompletionOptions = {}): Promise<LLMCompletionResult> {
     if (!this.opts.apiKey) {
@@ -30,6 +33,7 @@ export class OpenAIProvider implements LLMProvider {
         })),
         max_tokens: options.maxTokens ?? 1024,
         temperature: options.temperature,
+        top_p: options.topP,
         stop: options.stopSequences,
       }),
     });

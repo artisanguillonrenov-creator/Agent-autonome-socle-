@@ -20,6 +20,7 @@ export interface ServiceConnectionRecord {
   capabilitiesJson?: string;
   parallelSafeCapabilitiesJson?: string;
   riskByCapabilityJson?: string;
+  permissionByCapabilityJson?: string;
   lastTestAt?: number;
   lastSuccessAt?: number;
   lastLatencyMs?: number;
@@ -42,7 +43,8 @@ export function hasConfigOverride(rec: ServiceConnectionRecord): boolean {
     rec.healthTimeoutMs !== undefined ||
     rec.capabilitiesJson !== undefined ||
     rec.parallelSafeCapabilitiesJson !== undefined ||
-    rec.riskByCapabilityJson !== undefined
+    rec.riskByCapabilityJson !== undefined ||
+    rec.permissionByCapabilityJson !== undefined
   );
 }
 
@@ -90,6 +92,7 @@ export class ConnectionStore {
       capabilitiesJson: record.capabilitiesJson ?? existing?.capabilitiesJson,
       parallelSafeCapabilitiesJson: record.parallelSafeCapabilitiesJson ?? existing?.parallelSafeCapabilitiesJson,
       riskByCapabilityJson: record.riskByCapabilityJson ?? existing?.riskByCapabilityJson,
+      permissionByCapabilityJson: record.permissionByCapabilityJson ?? existing?.permissionByCapabilityJson,
       lastTestAt: record.lastTestAt !== undefined ? record.lastTestAt : existing?.lastTestAt,
       lastSuccessAt: record.lastSuccessAt !== undefined ? record.lastSuccessAt : existing?.lastSuccessAt,
       lastLatencyMs: record.lastLatencyMs !== undefined ? record.lastLatencyMs : existing?.lastLatencyMs,
@@ -108,8 +111,8 @@ export class ConnectionStore {
         service_id, name, name_override, user_created, enabled_override, transport_override, endpoint_override,
         health_path, task_path, auth_type_override, auth_env_var, priority_override,
         request_timeout_ms, health_timeout_ms, capabilities_json, parallel_safe_capabilities_json,
-        risk_by_capability_json, last_test_at, last_success_at, last_latency_ms, last_error, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        risk_by_capability_json, permission_by_capability_json, last_test_at, last_success_at, last_latency_ms, last_error, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(service_id) DO UPDATE SET
         name = excluded.name,
         name_override = excluded.name_override,
@@ -127,6 +130,7 @@ export class ConnectionStore {
         capabilities_json = excluded.capabilities_json,
         parallel_safe_capabilities_json = excluded.parallel_safe_capabilities_json,
         risk_by_capability_json = excluded.risk_by_capability_json,
+        permission_by_capability_json = excluded.permission_by_capability_json,
         last_test_at = excluded.last_test_at,
         last_success_at = excluded.last_success_at,
         last_latency_ms = excluded.last_latency_ms,
@@ -150,6 +154,7 @@ export class ConnectionStore {
       merged.capabilitiesJson ?? null,
       merged.parallelSafeCapabilitiesJson ?? null,
       merged.riskByCapabilityJson ?? null,
+      merged.permissionByCapabilityJson ?? null,
       merged.lastTestAt ?? null,
       merged.lastSuccessAt ?? null,
       merged.lastLatencyMs ?? null,
@@ -180,6 +185,7 @@ export class ConnectionStore {
       capabilitiesJson: patch.capabilitiesJson !== undefined ? patch.capabilitiesJson : existing?.capabilitiesJson,
       parallelSafeCapabilitiesJson: patch.parallelSafeCapabilitiesJson !== undefined ? patch.parallelSafeCapabilitiesJson : existing?.parallelSafeCapabilitiesJson,
       riskByCapabilityJson: patch.riskByCapabilityJson !== undefined ? patch.riskByCapabilityJson : existing?.riskByCapabilityJson,
+      permissionByCapabilityJson: patch.permissionByCapabilityJson !== undefined ? patch.permissionByCapabilityJson : existing?.permissionByCapabilityJson,
       lastTestAt: existing?.lastTestAt,
       lastSuccessAt: existing?.lastSuccessAt,
       lastLatencyMs: existing?.lastLatencyMs,
@@ -198,8 +204,8 @@ export class ConnectionStore {
         service_id, name, name_override, user_created, enabled_override, transport_override, endpoint_override,
         health_path, task_path, auth_type_override, auth_env_var, priority_override,
         request_timeout_ms, health_timeout_ms, capabilities_json, parallel_safe_capabilities_json,
-        risk_by_capability_json, last_test_at, last_success_at, last_latency_ms, last_error, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        risk_by_capability_json, permission_by_capability_json, last_test_at, last_success_at, last_latency_ms, last_error, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(service_id) DO UPDATE SET
         name = excluded.name,
         name_override = excluded.name_override,
@@ -217,6 +223,7 @@ export class ConnectionStore {
         capabilities_json = excluded.capabilities_json,
         parallel_safe_capabilities_json = excluded.parallel_safe_capabilities_json,
         risk_by_capability_json = excluded.risk_by_capability_json,
+        permission_by_capability_json = excluded.permission_by_capability_json,
         updated_at = excluded.updated_at
     `).run(
       merged.serviceId,
@@ -236,6 +243,7 @@ export class ConnectionStore {
       merged.capabilitiesJson ?? null,
       merged.parallelSafeCapabilitiesJson ?? null,
       merged.riskByCapabilityJson ?? null,
+      merged.permissionByCapabilityJson ?? null,
       merged.lastTestAt ?? null,
       merged.lastSuccessAt ?? null,
       merged.lastLatencyMs ?? null,
@@ -315,6 +323,7 @@ export class ConnectionStore {
       capabilitiesJson: row.capabilities_json || undefined,
       parallelSafeCapabilitiesJson: row.parallel_safe_capabilities_json || undefined,
       riskByCapabilityJson: row.risk_by_capability_json || undefined,
+      permissionByCapabilityJson: row.permission_by_capability_json || undefined,
       lastTestAt: row.last_test_at !== null ? Number(row.last_test_at) : undefined,
       lastSuccessAt: row.last_success_at !== null ? Number(row.last_success_at) : undefined,
       lastLatencyMs: row.last_latency_ms !== null ? Number(row.last_latency_ms) : undefined,

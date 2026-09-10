@@ -9,8 +9,11 @@ interface OllamaOptions {
 /** Ollama tourne en local (http://localhost:11434) : pas de dépendance à un service externe. */
 export class OllamaProvider implements LLMProvider {
   readonly name = "ollama";
+  readonly model: string;
 
-  constructor(private readonly opts: OllamaOptions) {}
+  constructor(private readonly opts: OllamaOptions) {
+    this.model = opts.model;
+  }
 
   async complete(messages: ChatMessage[], options: CompletionOptions = {}): Promise<LLMCompletionResult> {
     const res = await fetch(`${this.opts.baseUrl}/api/chat`, {
@@ -25,6 +28,7 @@ export class OllamaProvider implements LLMProvider {
         stream: false,
         options: {
           temperature: options.temperature,
+          top_p: options.topP,
           num_predict: options.maxTokens,
           stop: options.stopSequences,
         },

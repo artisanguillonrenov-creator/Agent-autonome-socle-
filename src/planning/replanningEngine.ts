@@ -1,6 +1,8 @@
 import type { LLMProvider } from "../llm/provider.js";
 import type { ServiceRegistry } from "../orchestration/serviceRegistry.js";
 import { validatePlanSteps, type ExecutionPlanNode, type PlanStepSpec } from "./planner.js";
+import { withGenerationDefaults } from "../llm/generationDefaults.js";
+import { providerForRole } from "../llm/modelRouter.js";
 
 export interface ReplanningFacts {
   objective: string;
@@ -28,10 +30,14 @@ export class ReplanningEngine {
       preservedPending: facts.preservedPending.map((node) => ({ title: node.title, capability: node.capability, objective: node.objective })),
       capabilities: facts.capabilities,
     };
-    const result = await this.llm.complete([
-      { role: "system", content: "Return only a JSON array of replacement PlanStepSpec objects. Return replacement steps ONLY for the affected branch. Preserved pending steps already exist and MUST NOT be recreated. No reasoning or prose." },
-      { role: "user", content: JSON.stringify(payload) },
-    ], { temperature: 0 });
+    // intelligence.utilityModel : modèle rapide dédié au routage/replanning, si configuré.
+    const result = await providerForRole("utility", this.llm).complete(
+      [
+        { role: "system", content: "Return only a JSON array of replacement PlanStepSpec objects. Return replacement steps ONLY for the affected branch. Preserved pending steps already exist and MUST NOT be recreated. No reasoning or prose." },
+        { role: "user", content: JSON.stringify(payload) },
+      ],
+      withGenerationDefaults({ temperature: 0 }),
+    );
     let parsed: unknown;
     try { parsed = JSON.parse(result.content ?? ""); } catch { throw new Error("INVALID_REPLAN_PROPOSAL"); }
     return validatePlanSteps(parsed, this.registry);

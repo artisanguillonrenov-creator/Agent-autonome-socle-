@@ -1,6 +1,7 @@
 import type { TaskRequest, ServiceEvent } from "./contract.js";
 import type { ServiceDefinition } from "./serviceRegistry.js";
 import { SoftwareFactoryService } from "../services/softwareFactoryService.js";
+import { config } from "../config.js";
 
 export interface LocalTaskService {
   handleTaskRequest(r: TaskRequest): Promise<ServiceEvent[]>;
@@ -57,7 +58,7 @@ export class ServiceAdapter {
 
   async checkHealth(value: ServiceDefinition | string, timeoutMsOverride?: number) {
     const s = this.definition(value);
-    const timeoutMs = timeoutMsOverride ?? s.healthTimeoutMs ?? 5000;
+    const timeoutMs = timeoutMsOverride ?? s.healthTimeoutMs ?? config.connections.healthTimeoutMs;
     const startedAt = Date.now();
 
     if (s.transport === "local") {
@@ -115,7 +116,7 @@ export class ServiceAdapter {
   ): Promise<ServiceAdapterResponse> {
     const started = Date.now();
     const s = this.definition(value);
-    const timeoutMs = timeoutMsOverride ?? s.requestTimeoutMs ?? 120000;
+    const timeoutMs = timeoutMsOverride ?? s.requestTimeoutMs ?? config.connections.requestTimeoutMs;
 
     if (s.transport === "local") {
       const target = s.id === "software_factory" ? this.localSoftwareFactory : this.local.get(s.id);

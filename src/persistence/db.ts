@@ -37,7 +37,9 @@ export function getDb(): Database.Database {
       text TEXT NOT NULL,
       kind TEXT NOT NULL,
       created_at INTEGER NOT NULL,
-      embedding TEXT NOT NULL
+      embedding TEXT NOT NULL,
+      workspace_id TEXT,
+      source_key TEXT
     );
 
     CREATE TABLE IF NOT EXISTS facts (
@@ -221,6 +223,16 @@ export function getDb(): Database.Database {
   }
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_plan_node_position ON plan_nodes(plan_run_id,generation,position) WHERE plan_run_id IS NOT NULL`);
 
+  const memoryEntryColumns = new Set(
+    (db.pragma("table_info(memory_entries)") as Array<{ name: string }>).map((column) => column.name),
+  );
+  const missingMemoryEntryColumns: Record<string, string> = { workspace_id: "TEXT", source_key: "TEXT" };
+  for (const [column, definition] of Object.entries(missingMemoryEntryColumns)) {
+    if (!memoryEntryColumns.has(column)) db.exec(`ALTER TABLE memory_entries ADD COLUMN ${column} ${definition}`);
+  }
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_memory_entries_workspace ON memory_entries(workspace_id)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_memory_entries_source_key ON memory_entries(source_key)`);
+
   const checkpointColumns = new Set(
     (db.pragma("table_info(checkpoints)") as Array<{ name: string }>).map((column) => column.name),
   );
@@ -236,6 +248,9 @@ export function getDb(): Database.Database {
   );
   if (!connectionColumns.has("name_override")) {
     db.exec("ALTER TABLE service_connections ADD COLUMN name_override TEXT");
+  }
+  if (!connectionColumns.has("permission_by_capability_json")) {
+    db.exec("ALTER TABLE service_connections ADD COLUMN permission_by_capability_json TEXT");
   }
 
   const processedEventColumns = new Set(

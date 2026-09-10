@@ -266,9 +266,12 @@ async function readErrorDetail(response: Response): Promise<string> {
  */
 export class InfermaticProvider implements LLMProvider {
   readonly name = "infermatic";
+  readonly model: string;
   private nativeToolsRejected = false;
 
-  constructor(private readonly opts: InfermaticOptions) {}
+  constructor(private readonly opts: InfermaticOptions) {
+    this.model = opts.model;
+  }
 
   supportsNativeTools(): boolean {
     // Du point de vue de l'Agent, ce provider sait toujours produire des ToolCall structurés :
@@ -282,6 +285,7 @@ export class InfermaticProvider implements LLMProvider {
       messages,
       max_tokens: options.maxTokens ?? 20000,
       temperature: options.temperature,
+      top_p: options.topP,
       stop: options.stopSequences,
     };
   }

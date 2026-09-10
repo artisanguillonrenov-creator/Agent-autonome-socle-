@@ -4,6 +4,7 @@ import { ServiceAdapter } from "./serviceAdapter.js";
 import { OperationStore, type ServiceOperation } from "./operationStore.js";
 import { CONTRACT_SCHEMA_VERSION, type TaskRequest, type ServiceEvent, type DispatchCapabilityDecision } from "./contract.js";
 import { config } from "../config.js";
+import { requiresApprovalForRisk, permissionForCapability, isPermissionGranted } from "./riskPolicy.js";
 import { WorkspaceStore } from "../workspaces/workspaceStore.js";
 import { ArtifactStore } from "../workspaces/artifactStore.js";
 import { WorkspaceService } from "../services/workspaceService.js";
@@ -148,6 +149,19 @@ export class ServiceOrchestrator {
       return { taskId, traceId, status: "REJECTED", selectedService: service.id, error };
     }
 
+    // autonomy.permissionMatrix : vérifié au point d'exécution effectif, pas seulement
+    // dans l'interface — une capacité qui exige plus que la permission maximale accordée
+    // est refusée immédiatement, sans jamais atteindre le service.
+    const requiredPermission = permissionForCapability(service, decision.capability);
+    if (!isPermissionGranted(requiredPermission)) {
+      const taskId = `task-${randomUUID()}`;
+      const error = `PERMISSION_DENIED: la capacité '${decision.capability}' exige la permission ${requiredPermission}, non accordée par autonomy.permissionMatrix`;
+      this.store.createOperation({ taskId, traceId, idempotencyKey, objective: decision.objective,
+        capability: decision.capability, selectedService: service.id, status: "REJECTED", error,
+        riskLevel, approvalState: "REJECTED" });
+      return { taskId, traceId, status: "REJECTED", selectedService: service.id, error };
+    }
+
     // 3. Create Operation record (or reuse taskId if retrying existingOp)
     const taskId = existingOp?.taskId || `task-${randomUUID()}`;
     if (!existingOp) {
@@ -158,11 +172,11 @@ export class ServiceOrchestrator {
         objective: decision.objective,
         capability: decision.capability,
         selectedService: service.id,
-        status: riskLevel === "HIGH" || riskLevel === "CRITICAL" ? "QUEUED" : opts?.executionMode === "background" ? "QUEUED" : "DISPATCHING",
+        status: requiresApprovalForRisk(riskLevel) ? "QUEUED" : opts?.executionMode === "background" ? "QUEUED" : "DISPATCHING",
         riskLevel,
         approvalState: "NOT_REQUIRED",
         executionMode: opts?.executionMode ?? "foreground",
-        queuedAt: opts?.executionMode === "background" && riskLevel !== "HIGH" && riskLevel !== "CRITICAL" ? Date.now() : undefined,
+        queuedAt: opts?.executionMode === "background" && !requiresApprovalForRisk(riskLevel) ? Date.now() : undefined,
         scheduleTaskId: opts?.scheduleTaskId,
         workspaceId: opts?.workspaceId, specialistId:opts?.specialistId,planRunId:opts?.planRunId,planNodeId:opts?.planNodeId,parallelAllowed:opts?.parallelAllowed??false,
       });
@@ -189,12 +203,12 @@ export class ServiceOrchestrator {
       permissions: [],
     };
 
-    if (!existingOp && opts?.executionMode === "background") this.store.setDispatchRequest(taskId, request, riskLevel !== "HIGH" && riskLevel !== "CRITICAL");
+    if (!existingOp && opts?.executionMode === "background") this.store.setDispatchRequest(taskId, request, !requiresApprovalForRisk(riskLevel));
 
-    if (!existingOp && (riskLevel === "HIGH" || riskLevel === "CRITICAL")) {
+    if (!existingOp && requiresApprovalForRisk(riskLevel)) {
       const reason = riskLevel === "CRITICAL"
         ? "Risque critique : confirmation renforcée obligatoire avant tout envoi au service."
-        : "Risque élevé : approbation humaine obligatoire avant tout envoi au service.";
+        : `Risque ${riskLevel} au-delà du plafond autonomy.globalRiskLevel (${config.autonomy.globalRiskLevel}) : approbation humaine obligatoire avant tout envoi au service.`;
       if (!this.store.setPendingApproval(taskId, request, riskLevel, reason)) {
         this.store.updateStatus(taskId, "FAILED", undefined, "APPROVAL_PREPARATION_FAILED");
         const failed = this.store.getOperation(taskId)!;
@@ -206,11 +220,13 @@ export class ServiceOrchestrator {
 
     if (opts?.executionMode === "background") return { taskId, traceId, status: "QUEUED", selectedService: service.id };
 
-    // 5. Determine specific timeout for service
+    // 5. Determine specific timeout for service — connections.requestTimeoutMs is the
+    // global fallback default; un timeout explicite par service (requestTimeoutMs) garde
+    // toujours la priorité.
     const timeoutMs =
       service.id === "software_factory"
         ? config.softwareFactory.timeoutMs
-        : 5000;
+        : service.requestTimeoutMs ?? config.connections.requestTimeoutMs;
 
     // 6. Dispatch via ServiceAdapter
     const adapterRes = await this.adapter.dispatchTask(typeof (this.adapter as any).registerLocal==="function"?service:service.endpoint, request, timeoutMs);
@@ -260,7 +276,7 @@ export class ServiceOrchestrator {
     if (!service) {
       this.store.updateStatus(taskId, "FAILED", undefined, "Service approuvé introuvable.");
     } else {
-      const timeoutMs = service.id === "software_factory" ? config.softwareFactory.timeoutMs : 5000;
+      const timeoutMs = service.id === "software_factory" ? config.softwareFactory.timeoutMs : service.requestTimeoutMs ?? config.connections.requestTimeoutMs;
       const response = await this.adapter.dispatchTask(typeof (this.adapter as any).registerLocal==="function"?service:service.endpoint, request, timeoutMs);
       if (!response.success) {this.store.recordMetrics(taskId,response.transportDurationMs);this.store.updateStatus(taskId, "FAILED", undefined, `TRANSPORT_UNKNOWN: ${response.message}`, true);}
       else {const usage=this.processEvents(taskId,response.events);this.store.recordMetrics(taskId,response.transportDurationMs,usage);}
@@ -275,7 +291,7 @@ export class ServiceOrchestrator {
     const operation=this.store.getOperation(request.task_id); if(!operation) throw new Error("OPERATION_NOT_FOUND");
     const service=this.registry.getServiceById(operation.selectedService);
     if(!service){this.store.updateStatus(operation.taskId,"FAILED",undefined,"Service introuvable.");return this.store.getOperation(operation.taskId)!;}
-    const timeoutMs=service.id==="software_factory"?config.softwareFactory.timeoutMs:5000;
+    const timeoutMs=service.id==="software_factory"?config.softwareFactory.timeoutMs:service.requestTimeoutMs??config.connections.requestTimeoutMs;
     const response=await this.adapter.dispatchTask(typeof (this.adapter as any).registerLocal==="function"?service:service.endpoint,request,timeoutMs);
     if(!response.success){this.store.recordMetrics(operation.taskId,response.transportDurationMs);this.store.updateStatus(operation.taskId,"FAILED",undefined,`TRANSPORT_UNKNOWN: ${response.message}`,true);}
     else {const usage=this.processEvents(operation.taskId,response.events);this.store.recordMetrics(operation.taskId,response.transportDurationMs,usage);}

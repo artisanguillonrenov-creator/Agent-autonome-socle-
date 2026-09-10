@@ -2351,6 +2351,9 @@ function applyLocalSettingCache(key, value) {
   } else if (key === 'settings.theme' && typeof value === 'string') {
     localStorage.setItem('jarvis_theme', value);
     applyThemeRuntime(value);
+  } else if (key === 'settings.language' && typeof value === 'string') {
+    document.documentElement.lang = value;
+    localStorage.setItem('jarvis_language', value);
   }
 }
 
@@ -2405,7 +2408,33 @@ function renderSettingCard(setting) {
   const controlRow = document.createElement('div');
   controlRow.className = 'setting-card-control';
 
-  if (!def.editable || def.availability !== 'AVAILABLE') {
+  if (def.type === 'action' && def.availability === 'AVAILABLE') {
+    const btnRun = document.createElement('button');
+    btnRun.type = 'button';
+    btnRun.className = 'btn btn-secondary btn-sm';
+    btnRun.textContent = '▶ Lancer le test';
+    const resultText = document.createElement('span');
+    resultText.style.marginLeft = '10px';
+    resultText.style.fontSize = '0.85rem';
+    btnRun.addEventListener('click', async () => {
+      btnRun.disabled = true;
+      resultText.textContent = 'Test en cours…';
+      resultText.style.color = 'var(--text-secondary)';
+      try {
+        const result = await fetchApi('/api/settings/tool-compatibility-test', { method: 'POST' });
+        resultText.style.color = result.ok ? 'var(--accent-success)' : 'var(--accent-danger)';
+        resultText.textContent = result.ok
+          ? `✅ ${result.provider}/${result.model} — ${result.compatibility}`
+          : `❌ ${result.error || 'Échec du test'}`;
+      } catch (e) {
+        resultText.style.color = 'var(--accent-danger)';
+        resultText.textContent = `❌ Erreur : ${e.message}`;
+      } finally {
+        btnRun.disabled = false;
+      }
+    });
+    controlRow.append(btnRun, resultText);
+  } else if (!def.editable || def.availability !== 'AVAILABLE') {
     const disabledText = document.createElement('span');
     disabledText.style.color = 'var(--accent-warning)';
     disabledText.style.fontSize = '0.85rem';

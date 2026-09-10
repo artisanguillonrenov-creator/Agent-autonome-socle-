@@ -409,7 +409,9 @@ test("Jarvis Command Center API Endpoints Test", async () => {
     });
     const regenerated = await checkEndpoint(`${baseUrl}/api/chat/regenerate`, { method: "POST", body: "{}" });
     assert.equal(regenerated.response, "Une formulation différente.");
-    assert.deepEqual(regenerationOptions, { tools: undefined });
+    // Aucun outil (chemin sans effet de bord) ; temperature/topP/maxOutputTokens
+    // (intelligence.*) sont bien transmis — Chantier 8.
+    assert.deepEqual(regenerationOptions, { tools: undefined, temperature: config.llm.temperature, topP: config.llm.topP, maxTokens: config.llm.maxOutputTokens });
     assert.equal(agent.serviceOrchestrator.store.listOperations().length, operationsBeforeRegeneration);
 
     agent.setLLMProvider({

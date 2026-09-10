@@ -9,8 +9,11 @@ interface AnthropicOptions {
 /** Appel HTTP direct (pas de SDK) pour rester léger et sans dépendance propriétaire. */
 export class AnthropicProvider implements LLMProvider {
   readonly name = "anthropic";
+  readonly model: string;
 
-  constructor(private readonly opts: AnthropicOptions) {}
+  constructor(private readonly opts: AnthropicOptions) {
+    this.model = opts.model;
+  }
 
   async complete(messages: ChatMessage[], options: CompletionOptions = {}): Promise<LLMCompletionResult> {
     if (!this.opts.apiKey) {
@@ -41,6 +44,7 @@ export class AnthropicProvider implements LLMProvider {
         messages: rest,
         max_tokens: options.maxTokens ?? 1024,
         temperature: options.temperature,
+        top_p: options.topP,
         stop_sequences: options.stopSequences,
       }),
     });
