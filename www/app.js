@@ -2,6 +2,26 @@
 
 const NATIVE_VERSION = "1.0.0";
 
+// Clés historiques : présentes sur toutes les installations déjà en production.
+// Ne jamais les renommer/supprimer sans passer par migrateLegacyOtaState().
+const OTA_LEGACY_KEYS = {
+  activeVersion: 'jarvis_ota_active_version',
+  activeBundle: 'jarvis_ota_active_bundle',
+  previousVersion: 'jarvis_ota_previous_version',
+  previousBundle: 'jarvis_ota_previous_bundle',
+  lastCheck: 'jarvis_ota_last_check',
+  autoCheck: 'jarvis_ota_auto_check',
+};
+// Identité unique du bundle actif/précédent (buildId ou, à défaut, SHA-256).
+// C'est cette identité — pas le numéro de version affiché à l'utilisateur — qui sert
+// à détecter une nouvelle mise à jour et à empêcher la réinstallation en boucle.
+const OTA_KEYS = Object.assign({}, OTA_LEGACY_KEYS, {
+  activeBuildId: 'jarvis_ota_active_build_id',
+  activeSha256: 'jarvis_ota_active_sha256',
+  previousBuildId: 'jarvis_ota_previous_build_id',
+  previousSha256: 'jarvis_ota_previous_sha256',
+});
+
 // --- STATE MANAGEMENT ---
 const state = {
   activeView: 'accueil',
@@ -22,12 +42,52 @@ const state = {
   settings: null,
   rawCatalogModels: [],
   ota: {
-    activeVersion: localStorage.getItem('jarvis_ota_active_version') || '1.0.0',
-    previousVersion: localStorage.getItem('jarvis_ota_previous_version') || null,
-    lastCheck: localStorage.getItem('jarvis_ota_last_check') || 'Jamais',
-    autoCheck: localStorage.getItem('jarvis_ota_auto_check') !== 'false',
+    activeVersion: localStorage.getItem(OTA_KEYS.activeVersion) || '1.0.0',
+    activeBuildId: localStorage.getItem(OTA_KEYS.activeBuildId) || null,
+    activeSha256: localStorage.getItem(OTA_KEYS.activeSha256) || null,
+    previousVersion: localStorage.getItem(OTA_KEYS.previousVersion) || null,
+    previousBuildId: localStorage.getItem(OTA_KEYS.previousBuildId) || null,
+    previousSha256: localStorage.getItem(OTA_KEYS.previousSha256) || null,
+    lastCheck: localStorage.getItem(OTA_KEYS.lastCheck) || 'Jamais',
+    autoCheck: localStorage.getItem(OTA_KEYS.autoCheck) !== 'false',
   },
 };
+
+/**
+ * Installations existantes : seules la version affichée et le contenu du bundle
+ * étaient stockés (pas d'identité unique). On dérive une identité stable — le
+ * SHA-256 du bundle déjà installé — pour que ces installations rejoignent le nouveau
+ * mécanisme sans jamais se croire "à jour avec rien" ni se réinstaller en boucle.
+ */
+async function migrateLegacyOtaState() {
+  if (localStorage.getItem(OTA_KEYS.activeBuildId) === null) {
+    const legacyBundle = localStorage.getItem(OTA_LEGACY_KEYS.activeBundle);
+    const derivedId = legacyBundle ? await computeSha256(legacyBundle) : '';
+    localStorage.setItem(OTA_KEYS.activeBuildId, derivedId);
+    localStorage.setItem(OTA_KEYS.activeSha256, derivedId);
+    state.ota.activeBuildId = derivedId || null;
+    state.ota.activeSha256 = derivedId || null;
+  }
+
+  if (localStorage.getItem(OTA_KEYS.previousBuildId) === null) {
+    const legacyPrevBundle = localStorage.getItem(OTA_LEGACY_KEYS.previousBundle);
+    const derivedPrevId = legacyPrevBundle ? await computeSha256(legacyPrevBundle) : '';
+    localStorage.setItem(OTA_KEYS.previousBuildId, derivedPrevId);
+    localStorage.setItem(OTA_KEYS.previousSha256, derivedPrevId);
+    state.ota.previousBuildId = derivedPrevId || null;
+    state.ota.previousSha256 = derivedPrevId || null;
+  }
+}
+
+function getOtaManifestIdentity(manifest) {
+  if (!manifest) return null;
+  const id = manifest.buildId || manifest.sha256;
+  return id ? String(id) : null;
+}
+
+function getActiveOtaIdentity() {
+  return state.ota.activeBuildId || state.ota.activeSha256 || null;
+}
 
 // --- DOM ELEMENTS ---
 const elements = {
@@ -109,7 +169,7 @@ async function computeSha256(text) {
 
 async function checkOtaUpdates(isManual = false) {
   state.ota.lastCheck = new Date().toLocaleString();
-  localStorage.setItem('jarvis_ota_last_check', state.ota.lastCheck);
+  localStorage.setItem(OTA_KEYS.lastCheck, state.ota.lastCheck);
 
   try {
     const manifest = await fetchApi('/api/ota/manifest');
@@ -121,12 +181,22 @@ async function checkOtaUpdates(isManual = false) {
       return null;
     }
 
-    if (compareVersions(manifest.version, state.ota.activeVersion) > 0) {
-      showOtaBanner(manifest);
-      return manifest;
-    } else if (isManual) {
-      alert(`Votre Jarvis Command Center est déjà à jour (version OTA active : v${state.ota.activeVersion}).`);
+    // La détection d'une nouvelle mise à jour repose sur l'identité unique du bundle
+    // (buildId ou SHA-256), pas sur une comparaison de numéro de version : ça évite de
+    // dépendre d'un OTA_VERSION bumpé à la main et empêche de réinstaller en boucle un
+    // bundle déjà actif même si son numéro de version affiché n'a pas changé.
+    const manifestIdentity = getOtaManifestIdentity(manifest);
+    const activeIdentity = getActiveOtaIdentity();
+
+    if (manifestIdentity && activeIdentity && manifestIdentity === activeIdentity) {
+      if (isManual) {
+        alert(`Votre Jarvis Command Center est déjà à jour (version OTA active : v${state.ota.activeVersion}).`);
+      }
+      return null;
     }
+
+    showOtaBanner(manifest);
+    return manifest;
   } catch (err) {
     if (isManual) alert(`Impossible de vérifier les mises à jour OTA : ${err.message}`);
   }
@@ -154,7 +224,7 @@ function showOtaBanner(manifest) {
       <div style="font-size: 0.85rem; color: var(--text-muted);">${manifest.releaseNotes}</div>
     </div>
     <div style="display: flex; gap: 8px;">
-      <button class="btn btn-primary btn-sm" onclick="applyOtaUpdate('${manifest.version}')">Mettre à jour</button>
+      <button class="btn btn-primary btn-sm" onclick="applyOtaUpdate()">Mettre à jour</button>
       <button class="btn btn-secondary btn-sm" onclick="closeOtaBanner()">Plus tard</button>
     </div>
   `;
@@ -164,9 +234,22 @@ function closeOtaBanner() {
   if (elements.otaBanner) elements.otaBanner.style.display = 'none';
 }
 
-async function applyOtaUpdate(version) {
+async function applyOtaUpdate() {
   try {
     const manifest = await fetchApi('/api/ota/manifest');
+
+    const manifestIdentity = getOtaManifestIdentity(manifest);
+    const activeIdentity = getActiveOtaIdentity();
+    if (manifestIdentity && activeIdentity && manifestIdentity === activeIdentity) {
+      // Ne jamais réinstaller un bundle déjà actif, même sur un clic manuel répété.
+      alert(`Votre Jarvis Command Center est déjà à jour (version OTA active : v${state.ota.activeVersion}).`);
+      closeOtaBanner();
+      return;
+    }
+
+    if (!manifest.sha256) {
+      throw new Error('Manifeste OTA invalide : SHA-256 manquant, mise à jour refusée par sécurité.');
+    }
 
     const bundleUrl = getApiUrl('/api/ota/bundle');
     const headers = {};
@@ -179,12 +262,10 @@ async function applyOtaUpdate(version) {
     }
     const bundleString = await response.text();
 
-    if (manifest.sha256) {
-      const computedHash = await computeSha256(bundleString);
-      if (computedHash.toLowerCase() !== manifest.sha256.toLowerCase()) {
-        alert('⚠️ Échec de vérification SHA-256 : le bundle téléchargé semble altéré. Mise à jour annulée.');
-        return;
-      }
+    const computedHash = await computeSha256(bundleString);
+    if (computedHash.toLowerCase() !== manifest.sha256.toLowerCase()) {
+      alert('⚠️ Échec de vérification SHA-256 : le bundle téléchargé semble altéré. Mise à jour annulée.');
+      return;
     }
 
     const bundleData = JSON.parse(bundleString);
@@ -192,14 +273,28 @@ async function applyOtaUpdate(version) {
       throw new Error('Bundle OTA invalide ou corrompu.');
     }
 
-    localStorage.setItem('jarvis_ota_previous_version', state.ota.activeVersion);
-    localStorage.setItem('jarvis_ota_previous_bundle', localStorage.getItem('jarvis_ota_active_bundle') || '');
+    const oldVersion = state.ota.activeVersion;
+    const oldBundle = localStorage.getItem(OTA_LEGACY_KEYS.activeBundle) || '';
+    const oldBuildId = activeIdentity || '';
+    const oldSha256 = state.ota.activeSha256 || '';
+    const newIdentity = manifest.buildId ? String(manifest.buildId) : computedHash;
 
-    localStorage.setItem('jarvis_ota_active_version', manifest.version);
-    localStorage.setItem('jarvis_ota_active_bundle', bundleString);
+    localStorage.setItem(OTA_KEYS.previousVersion, oldVersion);
+    localStorage.setItem(OTA_KEYS.previousBundle, oldBundle);
+    localStorage.setItem(OTA_KEYS.previousBuildId, oldBuildId);
+    localStorage.setItem(OTA_KEYS.previousSha256, oldSha256);
 
-    state.ota.previousVersion = state.ota.activeVersion;
+    localStorage.setItem(OTA_KEYS.activeVersion, manifest.version);
+    localStorage.setItem(OTA_KEYS.activeBundle, bundleString);
+    localStorage.setItem(OTA_KEYS.activeBuildId, newIdentity);
+    localStorage.setItem(OTA_KEYS.activeSha256, computedHash);
+
+    state.ota.previousVersion = oldVersion;
+    state.ota.previousBuildId = oldBuildId || null;
+    state.ota.previousSha256 = oldSha256 || null;
     state.ota.activeVersion = manifest.version;
+    state.ota.activeBuildId = newIdentity;
+    state.ota.activeSha256 = computedHash;
 
     alert(`✅ Mise à jour OTA v${manifest.version} installée avec succès !`);
     window.location.reload();
@@ -209,8 +304,10 @@ async function applyOtaUpdate(version) {
 }
 
 function rollbackOtaUpdate() {
-  const prevVersion = localStorage.getItem('jarvis_ota_previous_version');
-  const prevBundle = localStorage.getItem('jarvis_ota_previous_bundle');
+  const prevVersion = localStorage.getItem(OTA_KEYS.previousVersion);
+  const prevBundle = localStorage.getItem(OTA_KEYS.previousBundle);
+  const prevBuildId = localStorage.getItem(OTA_KEYS.previousBuildId);
+  const prevSha256 = localStorage.getItem(OTA_KEYS.previousSha256);
 
   if (!prevVersion) {
     alert('Aucune version précédente disponible pour le rollback.');
@@ -218,15 +315,26 @@ function rollbackOtaUpdate() {
   }
 
   if (confirm(`Voulez-vous vraiment revenir à la version précédente (v${prevVersion}) ?`)) {
-    localStorage.setItem('jarvis_ota_active_version', prevVersion);
+    localStorage.setItem(OTA_KEYS.activeVersion, prevVersion);
+    localStorage.setItem(OTA_KEYS.activeBuildId, prevBuildId || '');
+    localStorage.setItem(OTA_KEYS.activeSha256, prevSha256 || '');
     if (prevBundle) {
-      localStorage.setItem('jarvis_ota_active_bundle', prevBundle);
+      localStorage.setItem(OTA_KEYS.activeBundle, prevBundle);
     } else {
-      localStorage.removeItem('jarvis_ota_active_bundle');
+      localStorage.removeItem(OTA_KEYS.activeBundle);
     }
 
-    localStorage.removeItem('jarvis_ota_previous_version');
-    localStorage.removeItem('jarvis_ota_previous_bundle');
+    localStorage.removeItem(OTA_KEYS.previousVersion);
+    localStorage.removeItem(OTA_KEYS.previousBundle);
+    localStorage.removeItem(OTA_KEYS.previousBuildId);
+    localStorage.removeItem(OTA_KEYS.previousSha256);
+
+    state.ota.activeVersion = prevVersion;
+    state.ota.activeBuildId = prevBuildId || null;
+    state.ota.activeSha256 = prevSha256 || null;
+    state.ota.previousVersion = null;
+    state.ota.previousBuildId = null;
+    state.ota.previousSha256 = null;
 
     alert(`✅ Rollback effectué. Retour à la version v${prevVersion}.`);
     window.location.reload();
@@ -1410,7 +1518,8 @@ async function renderSystemView() {
         <div class="card-title">Mises à jour OTA (Over-The-Air)</div>
         <div style="font-size: 0.9rem; color: var(--text-muted); line-height: 1.6; margin-top: 8px;">
           Version native APK : <strong>v${NATIVE_VERSION}</strong><br/>
-          Version OTA active : <strong style="color: var(--accent-primary);">v${state.ota.activeVersion}</strong><br/>
+          Version OTA active : <strong style="color: var(--accent-primary);">v${state.ota.activeVersion}</strong>
+          ${state.ota.activeBuildId ? `(build <code>${state.ota.activeBuildId.slice(0, 10)}</code>)` : ''}<br/>
           ${state.ota.previousVersion ? `Version précédente (Backup) : <strong>v${state.ota.previousVersion}</strong><br/>` : ''}
           Dernière vérification : ${state.ota.lastCheck}
         </div>
@@ -2492,9 +2601,11 @@ function bootstrapJarvis() {
     }
   }, 100);
 
-  if (state.ota && state.ota.autoCheck) {
-    setTimeout(() => checkOtaUpdates(false), 2000);
-  }
+  migrateLegacyOtaState().finally(() => {
+    if (state.ota && state.ota.autoCheck) {
+      setTimeout(() => checkOtaUpdates(false), 2000);
+    }
+  });
 }
 
 if (typeof window !== 'undefined') {
@@ -2504,6 +2615,16 @@ if (typeof window !== 'undefined') {
   window.timelineMarkerForEntry = timelineMarkerForEntry;
   window.copyPlainText = copyPlainText;
   window.isNearChatBottom = isNearChatBottom;
+  window.checkOtaUpdates = checkOtaUpdates;
+  window.applyOtaUpdate = applyOtaUpdate;
+  window.rollbackOtaUpdate = rollbackOtaUpdate;
+  window.migrateLegacyOtaState = migrateLegacyOtaState;
+  window.computeSha256 = computeSha256;
+  window.compareVersions = compareVersions;
+  window.getOtaManifestIdentity = getOtaManifestIdentity;
+  window.getActiveOtaIdentity = getActiveOtaIdentity;
+  window.OTA_KEYS = OTA_KEYS;
+  window.OTA_LEGACY_KEYS = OTA_LEGACY_KEYS;
 }
 
 if (typeof document !== 'undefined') {
@@ -2515,5 +2636,23 @@ if (typeof document !== 'undefined') {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { bootstrapJarvis, state, switchView, serviceEventToTimelineEntry, timelineMarkerForEntry, copyPlainText, isNearChatBottom };
+  module.exports = {
+    bootstrapJarvis,
+    state,
+    switchView,
+    serviceEventToTimelineEntry,
+    timelineMarkerForEntry,
+    copyPlainText,
+    isNearChatBottom,
+    checkOtaUpdates,
+    applyOtaUpdate,
+    rollbackOtaUpdate,
+    migrateLegacyOtaState,
+    computeSha256,
+    compareVersions,
+    getOtaManifestIdentity,
+    getActiveOtaIdentity,
+    OTA_KEYS,
+    OTA_LEGACY_KEYS,
+  };
 }
