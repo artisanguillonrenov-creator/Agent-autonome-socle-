@@ -6,13 +6,13 @@ import { assertSoftwareFactoryRepositoryAllowed, SoftwareFactoryService } from "
 import { validateArraySchemaItems } from "../llm/jsonSchema.js";
 import { CANONICAL_SKILL_IDS } from "../skills/catalog.js";
 
-type FakeOptions = { refs?: Record<string, Record<string, string>>; codeHits?: string[]; diffPages?: any[][]; totalFiles?: number };
+type FakeOptions = { refs?: Record<string, Record<string, string>>; codeHits?: Array<string|{path:string;repository:{full_name:string}}>; diffPages?: any[][]; totalFiles?: number };
 function fake(defaultFiles: Record<string, string>, options: FakeOptions = {}) {
   const refs = { main: defaultFiles, ...(options.refs ?? {}) };
   const filesAt = (ref = "main") => refs[ref] ?? {};
   const tree = (ref = "main") => Object.entries(filesAt(ref)).map(([path, content]) => ({ path, type: "blob", size: Buffer.byteLength(content), sha: path }));
   const diffResponse = (page = 1) => ({ data: { sha: "abc", commit: { message: "safe" }, files: options.diffPages?.[page - 1] ?? [], ...(options.totalFiles === undefined ? {} : { total_files: options.totalFiles }), total_commits: 1 } });
-  return { rest: { repos: { get: async () => ({ data: { default_branch: "main", id: 1 } }), getContent: async ({ path, ref }: any) => { const value = filesAt(ref)[path]; if (value === undefined) throw new Error("404"); return { data: { content: Buffer.from(value).toString("base64"), sha: path } }; }, getCommit: async ({ page }: any) => diffResponse(page) , compareCommits: async ({ page }: any) => diffResponse(page) }, git: { getTree: async ({ tree_sha }: any) => ({ data: { tree: tree(tree_sha), truncated: false } }) }, search: { code: async () => ({ data: { items: (options.codeHits ?? []).map(path => ({ path })) } }) }, pulls: { get: async () => ({ data: { number: 1, title: "PR", state: "open", changed_files: options.totalFiles ?? options.diffPages?.[0]?.length ?? 0 } }), listFiles: async () => ({ data: options.diffPages?.[0] ?? [] }) } } };
+  return { rest: { repos: { get: async () => ({ data: { default_branch: "main", id: 1 } }), getContent: async ({ path, ref }: any) => { const value = filesAt(ref)[path]; if (value === undefined) throw new Error("404"); return { data: { content: Buffer.from(value).toString("base64"), sha: path } }; }, getCommit: async ({ page }: any) => diffResponse(page) , compareCommits: async ({ page }: any) => diffResponse(page) }, git: { getTree: async ({ tree_sha }: any) => ({ data: { tree: tree(tree_sha), truncated: false } }) }, search: { code: async () => ({ data: { items: (options.codeHits ?? []).map(hit => typeof hit==="string"?{path:hit,repository:{full_name:"acme/repo"}}:hit) } }) }, pulls: { get: async () => ({ data: { number: 1, title: "PR", state: "open", changed_files: options.totalFiles ?? options.diffPages?.[0]?.length ?? 0 } }), listFiles: async () => ({ data: options.diffPages?.[0] ?? [] }) } } };
 }
 
 test("repository parsing, self repository and auth authority are strict", () => {
@@ -31,6 +31,8 @@ test("reader rejects secret and binary files", async () => {
   await assert.rejects(reader.readFile("acme/repo", "image.png"), /BINARY_OR_EXCLUDED_FILE/);
 });
 
+test("secret and excluded paths are never discoverable",async()=>{const reader=new GitHubRepositoryReader(fake({".env":"env",".env.prod":"env","credentials.json":"credentials","secrets.yaml":"secret","private_key.pem":"key","src/index.ts":"safe"}));for(const query of [".env","credentials","secret","private_key"]){assert.deepEqual((await reader.searchPaths("acme/repo",query)).results,[]);const content=await new GitHubRepositoryReader(fake({".env":"env","credentials.json":"credentials","secrets.yaml":"secret","src/index.ts":"safe"})).searchContent("acme/repo",query);assert.deepEqual(content.matches,[]);assert.deepEqual(content.recommendedFiles,[]);}});
+
 test("structured search ranks exact content and uses robust accent/synonym/word terms", async () => {
   const reader = new GitHubRepositoryReader(fake({ "src/odd.ts": "export const SERVICE_CONNECTION_IN_USE = true", "src/settings.ts": "validation service connection", "README.md": "repository file function settings" }));
   const exact = await reader.searchContent("acme/repo", "service_connection_in_use");
@@ -48,6 +50,10 @@ test("explicit non-default ref excludes default-branch Code Search hits", async 
   const result = await reader.searchContent("acme/repo", "UNIQUE_SYMBOL", "feature");
   assert.equal(result.matches.some(match => match.path === "src/old.ts"), false);
 });
+
+test("Code Search rejects a hit attributed to another repository",async()=>{const result=await new GitHubRepositoryReader(fake({"src/index.ts":"safe"},{codeHits:[{path:"src/index.ts",repository:{full_name:"evil/other"}}]})).searchContent("acme/repo","unmatched-symbol");assert.equal(result.matches.some(match=>match.source==="github-code-search"),false);});
+
+test("Software Factory token precedence keeps explicit token between factory and general",()=>{const oldFactory=process.env.GITHUB_FACTORY_TOKEN,oldGeneral=process.env.GITHUB_TOKEN;delete process.env.GITHUB_FACTORY_TOKEN;process.env.GITHUB_TOKEN="general";assert.equal((new SoftwareFactoryService({githubToken:"explicit"}) as any).githubToken,"explicit");process.env.GITHUB_FACTORY_TOKEN="factory";assert.equal((new SoftwareFactoryService({githubToken:"explicit"}) as any).githubToken,"factory");if(oldFactory===undefined)delete process.env.GITHUB_FACTORY_TOKEN;else process.env.GITHUB_FACTORY_TOKEN=oldFactory;if(oldGeneral===undefined)delete process.env.GITHUB_TOKEN;else process.env.GITHUB_TOKEN=oldGeneral;});
 
 test("bounded real audit reports observed dangerous config, missing tests and manifest inconsistency", async () => {
   const files = { "package.json": JSON.stringify({ main: "src/missing.ts" }), "src/index.ts": "start()", "src/config.ts": "safe=true", "src/services/payment.ts": "export const pay=()=>1", "src/orchestration/router.ts": "export const route=()=>1", "src/persistence/db.ts": "export const db={}", "src/skills/run.ts": "export const run=()=>1", "src/security/auth.ts": "export const auth = false", "src/unrelated.test.ts": "test('x',()=>{})", ".github/workflows/ci.yml": "on: push" };

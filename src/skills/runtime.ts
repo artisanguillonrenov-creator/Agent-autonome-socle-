@@ -7,7 +7,7 @@ import { TaskStore } from "../tasks/taskStore.js";
 import { WorkflowRegistry } from "../workflows/workflowRegistry.js";
 import { canonicalSkillCatalog } from "./catalog.js";
 import { config } from "../config.js";
-import { GitHubRepositoryReader, parseGitHubRepository, resolveSelfRepository, type SearchMatch } from "../github/repositoryReader.js";
+import { GitHubRepositoryReader, isForbiddenRepositoryPath, parseGitHubRepository, resolveSelfRepository, type SearchMatch } from "../github/repositoryReader.js";
 
 const schema=(properties:Record<string,unknown>,required:string[]=[]):SkillDefinition["parameters"]=>({type:"object",properties,required,additionalProperties:false});
 const object=(v:unknown):Record<string,unknown>=>v&&typeof v==="object"&&!Array.isArray(v)?v as Record<string,unknown>:{};
@@ -30,12 +30,14 @@ export function createRuntimeSkills(orchestrator:ServiceOrchestrator,planner:Pla
   });
   define("software_development",schema({objective:{type:"string"},repository:{type:"string"},filePath:{type:"string"},instructions:{type:"string"},exactContent:{type:"string"},targetBranch:{type:"string"},targetPr:{type:"integer"},constraints:{type:"array",items:{type:"string"}},executionMode:{type:"string",enum:["foreground","background"]}},["objective"]),async i=>{
     let filePath=typeof i.filePath==="string"?i.filePath.trim():"";
+    if(filePath&&isForbiddenRepositoryPath(filePath))throw new SoftwareDevelopmentTargetError("SOFTWARE_DEVELOPMENT_TARGET_FORBIDDEN",[{path:filePath,source:"path",score:100,confidence:"HIGH",evidence:"The requested path is secret, excluded, binary, or exceeds repository depth limits."}]);
     const self=/\b(ton|ta|tes|your)\b.*\b(d[eé]p[oô]t|repository|param[eè]tres|settings|page)\b|\b(am[eé]liore|audite?)\s+(?:ton|ta|tes)\b/i.test(String(i.objective));
     let resolvedRepository:string|undefined;
     if(typeof i.repository==="string"&&i.repository.trim()){const parsed=parseGitHubRepository(i.repository);resolvedRepository=`${parsed.owner}/${parsed.repo}`;}else if(self){const parsed=resolveSelfRepository(undefined,true);resolvedRepository=`${parsed.owner}/${parsed.repo}`;}
-    if(!filePath){if(!resolvedRepository)throw new SoftwareDevelopmentTargetError("SOFTWARE_DEVELOPMENT_TARGET_NOT_FOUND",[]);const discovery=await repositoryReaderFactory().searchContent(resolvedRepository,String(i.objective));const high=discovery.recommendedFiles.filter(target=>target.confidence==="HIGH");if(high.length>1)throw new SoftwareDevelopmentTargetError("MULTI_FILE_CHANGE_REQUIRES_FACTORY_EXTENSION",high);if(high.length===0)throw new SoftwareDevelopmentTargetError("SOFTWARE_DEVELOPMENT_TARGET_NOT_FOUND",discovery.recommendedFiles);filePath=high[0].path;}
+    let selectedTarget:SearchMatch|undefined;
+    if(!filePath){if(!resolvedRepository)throw new SoftwareDevelopmentTargetError("SOFTWARE_DEVELOPMENT_TARGET_NOT_FOUND",[]);const discovery=await repositoryReaderFactory().searchContent(resolvedRepository,String(i.objective));const ranked=[...discovery.recommendedFiles].sort((a,b)=>b.score-a.score||a.path.localeCompare(b.path)),high=ranked.filter(target=>target.confidence==="HIGH");const top=ranked[0],second=ranked[1],dominant=top?.confidence==="HIGH"&&top.score>=90&&(!second||top.score-second.score>=15);if(dominant)selectedTarget=top;else if(high.length>1)throw new SoftwareDevelopmentTargetError("MULTI_FILE_CHANGE_REQUIRES_FACTORY_EXTENSION",high);else if(high.length===1)selectedTarget=high[0];else throw new SoftwareDevelopmentTargetError("SOFTWARE_DEVELOPMENT_TARGET_NOT_FOUND",ranked);filePath=selectedTarget.path;if(isForbiddenRepositoryPath(filePath))throw new SoftwareDevelopmentTargetError("SOFTWARE_DEVELOPMENT_TARGET_FORBIDDEN",[selectedTarget]);}
     const directives=[typeof i.targetBranch==="string"?`TARGET_BRANCH=${i.targetBranch}`:null,Number.isInteger(i.targetPr)?`TARGET_PR=${i.targetPr}`:null,typeof i.instructions==="string"?i.instructions:null].filter(Boolean).join("\n");
-    return JSON.stringify(await dispatch("software_development",i,{repository:resolvedRepository,filePath,resolvedTargets:[{path:filePath,confidence:"HIGH"}],instructions:directives,exactContent:i.exactContent,neverAutoMerge:true}));
+    return JSON.stringify(await dispatch("software_development",i,{repository:resolvedRepository,filePath,resolvedTargets:selectedTarget?[selectedTarget]:[{path:filePath,source:"path",score:100,confidence:"HIGH",evidence:"Explicit filePath supplied by caller."}],instructions:directives,exactContent:i.exactContent,neverAutoMerge:true}));
   });
   define("deep_research",schema({objective:{type:"string"},queries:{type:"array",items:{type:"string"}},maxResultsPerQuery:{type:"integer"},constraints:{type:"array",items:{type:"string"}},workspaceId:{type:"string"}},["objective"]),async i=>{
     const workspaceId=typeof i.workspaceId==="string"?i.workspaceId:orchestrator.workspaces.create({name:"Recherche",ownerType:"ADHOC",ownerId:`research-${randomUUID()}`}).id;
