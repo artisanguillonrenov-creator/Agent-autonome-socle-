@@ -108,6 +108,14 @@ numéro de version, pour savoir si une mise à jour existe et pour ne jamais ré
 en boucle un bundle déjà actif. Seuls les changements Web (HTML/CSS/JS) passent par ce
 mécanisme ; un changement natif Android/Capacitor nécessite toujours un nouvel APK.
 
+Au démarrage, une mise à jour compatible est téléchargée, vérifiée (SHA-256) et
+installée automatiquement, sans action de l'utilisateur ; l'écran Système garde un
+bouton de vérification manuelle (avec confirmation visible) et un rollback vers la
+version précédente. Le bundle embarque aussi `index.html` : au lieu d'un simple
+`window.location.reload()` qui resservirait l'index.html figé dans l'APK, l'app réécrit
+le document courant avec l'`index.html` du bundle actif — les évolutions HTML prennent
+donc réellement effet, pas seulement CSS/JS.
+
 ## Tests
 
 ```bash

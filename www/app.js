@@ -167,6 +167,99 @@ async function computeSha256(text) {
   return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+/**
+ * Télécharge le bundle annoncé par `manifest` et vérifie obligatoirement son SHA-256
+ * avant de le considérer installable. Partagé entre l'installation automatique au
+ * démarrage et l'installation manuelle depuis l'écran Système, pour qu'un hash invalide
+ * soit refusé de façon identique dans les deux cas.
+ */
+async function fetchAndVerifyOtaBundle(manifest) {
+  if (!manifest.sha256) {
+    throw new Error('Manifeste OTA invalide : SHA-256 manquant, mise à jour refusée par sécurité.');
+  }
+
+  const bundleUrl = getApiUrl('/api/ota/bundle');
+  const headers = {};
+  if (state.token) {
+    headers['Authorization'] = `Bearer ${state.token}`;
+  }
+  const response = await fetch(bundleUrl, { headers });
+  if (!response.ok) {
+    throw new Error(`Erreur HTTP ${response.status} lors du téléchargement du bundle OTA.`);
+  }
+  const bundleString = await response.text();
+
+  const computedHash = await computeSha256(bundleString);
+  if (computedHash.toLowerCase() !== manifest.sha256.toLowerCase()) {
+    const err = new Error('Échec de vérification SHA-256 : le bundle téléchargé semble altéré.');
+    err.code = 'OTA_SHA256_MISMATCH';
+    throw err;
+  }
+
+  const bundleData = JSON.parse(bundleString);
+  if (!bundleData || !bundleData.files) {
+    throw new Error('Bundle OTA invalide ou corrompu.');
+  }
+
+  return { bundleString, bundleData, computedHash };
+}
+
+/**
+ * Enregistre le bundle vérifié comme version active (buildId/SHA-256 + contenu) et
+ * conserve l'ancien bundle comme version précédente pour permettre un rollback.
+ */
+function persistOtaInstall(manifest, bundleString, computedHash, activeIdentity) {
+  const oldVersion = state.ota.activeVersion;
+  const oldBundle = localStorage.getItem(OTA_LEGACY_KEYS.activeBundle) || '';
+  const oldBuildId = activeIdentity || '';
+  const oldSha256 = state.ota.activeSha256 || '';
+  const newIdentity = manifest.buildId ? String(manifest.buildId) : computedHash;
+
+  localStorage.setItem(OTA_KEYS.previousVersion, oldVersion);
+  localStorage.setItem(OTA_KEYS.previousBundle, oldBundle);
+  localStorage.setItem(OTA_KEYS.previousBuildId, oldBuildId);
+  localStorage.setItem(OTA_KEYS.previousSha256, oldSha256);
+
+  localStorage.setItem(OTA_KEYS.activeVersion, manifest.version);
+  localStorage.setItem(OTA_KEYS.activeBundle, bundleString);
+  localStorage.setItem(OTA_KEYS.activeBuildId, newIdentity);
+  localStorage.setItem(OTA_KEYS.activeSha256, computedHash);
+
+  state.ota.previousVersion = oldVersion;
+  state.ota.previousBuildId = oldBuildId || null;
+  state.ota.previousSha256 = oldSha256 || null;
+  state.ota.activeVersion = manifest.version;
+  state.ota.activeBuildId = newIdentity;
+  state.ota.activeSha256 = computedHash;
+}
+
+/**
+ * Recharge l'application sur le bundle actif. Si ce bundle contient un index.html
+ * (toujours le cas : scripts/build-ota.mjs l'inclut systématiquement), on réécrit le
+ * document courant avec — sinon un simple window.location.reload() re-servirait
+ * l'index.html natif figé dans l'APK et ignorerait silencieusement toute évolution
+ * HTML pourtant déjà vérifiée par SHA-256 avec le reste du bundle. Le document réécrit
+ * réexécute lui-même le bootloader (même vérification SHA-256, même injection
+ * style.css/app.js), donc rien ne change pour ces deux fichiers.
+ */
+function reloadJarvisApp() {
+  try {
+    const activeBundleStr = localStorage.getItem(OTA_KEYS.activeBundle);
+    if (activeBundleStr) {
+      const bundle = JSON.parse(activeBundleStr);
+      if (bundle && bundle.files && bundle.files['index.html']) {
+        document.open();
+        document.write(bundle.files['index.html']);
+        document.close();
+        return;
+      }
+    }
+  } catch (err) {
+    console.error('[OTA] Échec de rechargement via le index.html du bundle, repli sur reload() :', err);
+  }
+  window.location.reload();
+}
+
 async function checkOtaUpdates(isManual = false) {
   state.ota.lastCheck = new Date().toLocaleString();
   localStorage.setItem(OTA_KEYS.lastCheck, state.ota.lastCheck);
@@ -193,6 +286,21 @@ async function checkOtaUpdates(isManual = false) {
         alert(`Votre Jarvis Command Center est déjà à jour (version OTA active : v${state.ota.activeVersion}).`);
       }
       return null;
+    }
+
+    if (!isManual) {
+      // Vérification automatique au démarrage : téléchargement, vérification SHA-256
+      // et installation sans aucune interaction utilisateur. Un hash invalide annule
+      // silencieusement l'installation ; l'ancienne version active reste en place.
+      try {
+        const { bundleString, computedHash } = await fetchAndVerifyOtaBundle(manifest);
+        persistOtaInstall(manifest, bundleString, computedHash, activeIdentity);
+        reloadJarvisApp();
+      } catch (err) {
+        console.error('[OTA] Mise à jour automatique refusée :', err.message);
+        return null;
+      }
+      return manifest;
     }
 
     showOtaBanner(manifest);
@@ -247,58 +355,16 @@ async function applyOtaUpdate() {
       return;
     }
 
-    if (!manifest.sha256) {
-      throw new Error('Manifeste OTA invalide : SHA-256 manquant, mise à jour refusée par sécurité.');
-    }
-
-    const bundleUrl = getApiUrl('/api/ota/bundle');
-    const headers = {};
-    if (state.token) {
-      headers['Authorization'] = `Bearer ${state.token}`;
-    }
-    const response = await fetch(bundleUrl, { headers });
-    if (!response.ok) {
-      throw new Error(`Erreur HTTP ${response.status} lors du téléchargement du bundle OTA.`);
-    }
-    const bundleString = await response.text();
-
-    const computedHash = await computeSha256(bundleString);
-    if (computedHash.toLowerCase() !== manifest.sha256.toLowerCase()) {
-      alert('⚠️ Échec de vérification SHA-256 : le bundle téléchargé semble altéré. Mise à jour annulée.');
-      return;
-    }
-
-    const bundleData = JSON.parse(bundleString);
-    if (!bundleData || !bundleData.files) {
-      throw new Error('Bundle OTA invalide ou corrompu.');
-    }
-
-    const oldVersion = state.ota.activeVersion;
-    const oldBundle = localStorage.getItem(OTA_LEGACY_KEYS.activeBundle) || '';
-    const oldBuildId = activeIdentity || '';
-    const oldSha256 = state.ota.activeSha256 || '';
-    const newIdentity = manifest.buildId ? String(manifest.buildId) : computedHash;
-
-    localStorage.setItem(OTA_KEYS.previousVersion, oldVersion);
-    localStorage.setItem(OTA_KEYS.previousBundle, oldBundle);
-    localStorage.setItem(OTA_KEYS.previousBuildId, oldBuildId);
-    localStorage.setItem(OTA_KEYS.previousSha256, oldSha256);
-
-    localStorage.setItem(OTA_KEYS.activeVersion, manifest.version);
-    localStorage.setItem(OTA_KEYS.activeBundle, bundleString);
-    localStorage.setItem(OTA_KEYS.activeBuildId, newIdentity);
-    localStorage.setItem(OTA_KEYS.activeSha256, computedHash);
-
-    state.ota.previousVersion = oldVersion;
-    state.ota.previousBuildId = oldBuildId || null;
-    state.ota.previousSha256 = oldSha256 || null;
-    state.ota.activeVersion = manifest.version;
-    state.ota.activeBuildId = newIdentity;
-    state.ota.activeSha256 = computedHash;
+    const { bundleString, computedHash } = await fetchAndVerifyOtaBundle(manifest);
+    persistOtaInstall(manifest, bundleString, computedHash, activeIdentity);
 
     alert(`✅ Mise à jour OTA v${manifest.version} installée avec succès !`);
-    window.location.reload();
+    reloadJarvisApp();
   } catch (err) {
+    if (err && err.code === 'OTA_SHA256_MISMATCH') {
+      alert(`⚠️ ${err.message} Mise à jour annulée.`);
+      return;
+    }
     alert(`Erreur lors de l'installation de la mise à jour OTA : ${err.message}`);
   }
 }
@@ -337,7 +403,7 @@ function rollbackOtaUpdate() {
     state.ota.previousSha256 = null;
 
     alert(`✅ Rollback effectué. Retour à la version v${prevVersion}.`);
-    window.location.reload();
+    reloadJarvisApp();
   }
 }
 
@@ -2623,6 +2689,9 @@ if (typeof window !== 'undefined') {
   window.compareVersions = compareVersions;
   window.getOtaManifestIdentity = getOtaManifestIdentity;
   window.getActiveOtaIdentity = getActiveOtaIdentity;
+  window.fetchAndVerifyOtaBundle = fetchAndVerifyOtaBundle;
+  window.persistOtaInstall = persistOtaInstall;
+  window.reloadJarvisApp = reloadJarvisApp;
   window.OTA_KEYS = OTA_KEYS;
   window.OTA_LEGACY_KEYS = OTA_LEGACY_KEYS;
 }
@@ -2652,6 +2721,9 @@ if (typeof module !== 'undefined' && module.exports) {
     compareVersions,
     getOtaManifestIdentity,
     getActiveOtaIdentity,
+    fetchAndVerifyOtaBundle,
+    persistOtaInstall,
+    reloadJarvisApp,
     OTA_KEYS,
     OTA_LEGACY_KEYS,
   };
