@@ -74,10 +74,48 @@ export function applyAllEffectiveRuntimeSettings(agent: Agent, settingsStore = n
       config.projects.memoryRetentionDays = val;
     } else if (key === "activity.logLevel" && typeof val === "string") {
       config.activity.logLevel = val as typeof config.activity.logLevel;
+    } else if (key === "activity.emailAlerts" && typeof val === "boolean") {
+      config.activity.emailAlerts = val;
+    } else if (key === "automations.emailTriggers" && typeof val === "boolean") {
+      config.automations.emailTriggers = val;
+    } else if (key === "automations.crmTriggers" && typeof val === "boolean") {
+      config.automations.crmTriggers = val;
+    } else if (key === "automations.externalEventTriggers" && typeof val === "boolean") {
+      config.automations.externalEventTriggers = val;
+    } else if (key === "skills.studioProduct" && typeof val === "boolean") {
+      config.skills.studioProduct = val;
+      setBureauServiceEnabled(agent, "product_studio", val);
+    } else if (key === "skills.studioCreative" && typeof val === "boolean") {
+      config.skills.studioCreative = val;
+      setBureauServiceEnabled(agent, "creative_studio", val);
+    } else if (key === "skills.officeCommercial" && typeof val === "boolean") {
+      config.skills.officeCommercial = val;
+      setBureauServiceEnabled(agent, "commercial_office", val);
+    } else if (key === "skills.officeMarketing" && typeof val === "boolean") {
+      config.skills.officeMarketing = val;
+      setBureauServiceEnabled(agent, "marketing_office", val);
     }
   }
 
   if (agent.skills && agent.serviceOrchestrator?.registry) {
     agent.skills.refreshServiceAvailability(agent.serviceOrchestrator.registry);
+  }
+}
+
+/**
+ * skills.studioProduct/studioCreative/officeCommercial/officeMarketing : le bureau
+ * correspondant n'est réellement AVAILABLE (skill + capacité dispatchable) que si son
+ * réglage est activé ET le service local est enabled=true dans le ServiceRegistry —
+ * seul le champ `enabled` est patché (jamais endpoint/transport/capabilities), donc
+ * ceci ne peut jamais entrer en conflit avec une opération déjà en cours.
+ */
+function setBureauServiceEnabled(agent: Agent, serviceId: string, enabled: boolean): void {
+  try {
+    if (agent.serviceOrchestrator?.registry?.getServiceById(serviceId)) {
+      agent.serviceOrchestrator.registry.patchService(serviceId, { enabled });
+    }
+  } catch {
+    // SERVICE_CONNECTION_IN_USE ou absence du service factory (ex. tests isolés) : le
+    // réglage reste persisté en base et sera réappliqué au prochain appel de cette fonction.
   }
 }

@@ -6,6 +6,10 @@ import { webSearchSkill } from "./webSearch.js";
 import { executeCodeSkill } from "./executeCode.js";
 import { dispatchCapabilitySkill } from "./dispatchCapability.js";
 import { executeMissionSkill } from "./executeMission.js";
+import { productStudioSkill } from "./productStudio.js";
+import { creativeStudioSkill } from "./creativeStudio.js";
+import { commercialOfficeSkill } from "./commercialOffice.js";
+import { marketingOfficeSkill } from "./marketingOffice.js";
 
 export const builtinSkills: SkillDefinition[] = [
   getCurrentTimeSkill,
@@ -17,4 +21,8 @@ export const builtinSkills: SkillDefinition[] = [
   executeCodeSkill,
   dispatchCapabilitySkill,
   executeMissionSkill,
+  productStudioSkill,
+  creativeStudioSkill,
+  commercialOfficeSkill,
+  marketingOfficeSkill,
 ];

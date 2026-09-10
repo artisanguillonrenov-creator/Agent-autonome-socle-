@@ -11,6 +11,8 @@ import { saveLLMConfig } from "../persistence/llmConfigStore.js";
 import { SoftwareFactoryService } from "../services/softwareFactoryService.js";
 import type { TaskRequest } from "../orchestration/contract.js";
 import { NotificationStore } from "../autonomy/notificationStore.js";
+import { TriggerStore } from "../automations/triggerStore.js";
+import { handleEmailTrigger, handleCrmTrigger, handleExternalTrigger } from "../automations/triggerHandlers.js";
 import { WorkspaceStore } from "../workspaces/workspaceStore.js";
 import { ArtifactStore } from "../workspaces/artifactStore.js";
 import { ObservabilityStore } from "../observability/observabilityStore.js";
@@ -25,6 +27,7 @@ import type { LLMProvider, ToolDefinition } from "../llm/provider.js";
 
 const taskStore = new TaskStore();
 const notificationStore = new NotificationStore();
+const triggerStore = new TriggerStore();
 const softwareFactoryService = new SoftwareFactoryService();
 const workspaceStore = new WorkspaceStore();
 const artifactStore = new ArtifactStore(workspaceStore);
@@ -1813,6 +1816,60 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         const id = parts[parts.length - 2];
         const ok = agent.restoreCheckpoint(id);
         sendJson(res, ok ? 200 : 404, { ok });
+        return;
+      }
+
+      // 16. Automations Triggers Endpoints (Chantier 9) — authentification par le même
+      // Bearer que le reste de l'API (voir isAuthorized ci-dessus), à l'image de l'endpoint
+      // /tasks déjà utilisé pour le rappel Software Factory.
+      if (req.method === "POST" && pathname === "/api/triggers/email") {
+        let body: unknown;
+        try {
+          body = JSON.parse((await readBody(req)) || "{}");
+        } catch {
+          sendJson(res, 400, { error: "JSON invalide" });
+          return;
+        }
+        const result = await handleEmailTrigger(agent.serviceOrchestrator, triggerStore, body);
+        sendJson(res, result.status, result.body);
+        return;
+      }
+      if (req.method === "GET" && pathname === "/api/triggers/email") {
+        sendJson(res, 200, { items: triggerStore.list("EMAIL") });
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/triggers/crm") {
+        let body: unknown;
+        try {
+          body = JSON.parse((await readBody(req)) || "{}");
+        } catch {
+          sendJson(res, 400, { error: "JSON invalide" });
+          return;
+        }
+        const result = await handleCrmTrigger(agent.serviceOrchestrator, triggerStore, body);
+        sendJson(res, result.status, result.body);
+        return;
+      }
+      if (req.method === "GET" && pathname === "/api/triggers/crm") {
+        sendJson(res, 200, { items: triggerStore.list("CRM") });
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/triggers/external") {
+        let body: unknown;
+        try {
+          body = JSON.parse((await readBody(req)) || "{}");
+        } catch {
+          sendJson(res, 400, { error: "JSON invalide" });
+          return;
+        }
+        const result = await handleExternalTrigger(agent.serviceOrchestrator, triggerStore, body);
+        sendJson(res, result.status, result.body);
+        return;
+      }
+      if (req.method === "GET" && pathname === "/api/triggers/external") {
+        sendJson(res, 200, { items: triggerStore.list("EXTERNAL") });
         return;
       }
 

@@ -164,6 +164,57 @@ export function getDb(): Database.Database {
       new_value_json TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS product_studio_state (
+      workspace_id TEXT PRIMARY KEY, state_json TEXT NOT NULL, updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS creative_studio_state (
+      workspace_id TEXT PRIMARY KEY, state_json TEXT NOT NULL, updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS marketing_office_state (
+      workspace_id TEXT PRIMARY KEY, state_json TEXT NOT NULL, updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS crm_contacts (
+      id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('PROSPECT','CLIENT')),
+      name TEXT NOT NULL, email TEXT, company TEXT, status TEXT NOT NULL,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_crm_contacts_workspace ON crm_contacts(workspace_id);
+    CREATE INDEX IF NOT EXISTS idx_crm_contacts_email ON crm_contacts(email);
+
+    CREATE TABLE IF NOT EXISTS crm_opportunities (
+      id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, contact_id TEXT NOT NULL,
+      title TEXT NOT NULL, status TEXT NOT NULL, value REAL, currency TEXT,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_crm_opportunities_workspace ON crm_opportunities(workspace_id);
+    CREATE INDEX IF NOT EXISTS idx_crm_opportunities_contact ON crm_opportunities(contact_id);
+
+    CREATE TABLE IF NOT EXISTS crm_interactions (
+      id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, contact_id TEXT NOT NULL, opportunity_id TEXT,
+      type TEXT NOT NULL, note TEXT, occurred_at INTEGER NOT NULL, created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_crm_interactions_workspace ON crm_interactions(workspace_id);
+    CREATE INDEX IF NOT EXISTS idx_crm_interactions_contact ON crm_interactions(contact_id);
+
+    CREATE TABLE IF NOT EXISTS crm_next_actions (
+      id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, contact_id TEXT NOT NULL, opportunity_id TEXT,
+      title TEXT NOT NULL, due_at INTEGER, done INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_crm_next_actions_workspace ON crm_next_actions(workspace_id);
+
+    CREATE TABLE IF NOT EXISTS trigger_events (
+      id TEXT PRIMARY KEY, source TEXT NOT NULL CHECK(source IN ('EMAIL','CRM','EXTERNAL')), external_id TEXT NOT NULL,
+      received_at INTEGER NOT NULL, payload_json TEXT NOT NULL, workspace_id TEXT,
+      capability TEXT, objective TEXT, operation_task_id TEXT, status TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_trigger_events_dedupe ON trigger_events(source, external_id);
+
+    CREATE TABLE IF NOT EXISTS email_alerts_sent (
+      dedupe_key TEXT PRIMARY KEY, sent_at INTEGER NOT NULL, ok INTEGER NOT NULL, error TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS service_connections (
       service_id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
