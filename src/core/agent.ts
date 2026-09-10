@@ -17,6 +17,7 @@ import { createRuntimeSkills } from "../skills/runtime.js";
 import { WorkflowRegistry } from "../workflows/workflowRegistry.js";
 import { executeMissionMetadata } from "../skills/catalog.js";
 import { ActivityStore } from "../observability/activityStore.js";
+import type { GithubReadOnlyClient } from "../repository/githubReadOnlyClient.js";
 
 export interface AgentOptions {
   llm: LLMProvider;
@@ -25,6 +26,8 @@ export interface AgentOptions {
   reflectionEveryNSteps?: number;
   contextTokenBudget?: number;
   orchestrator?: ServiceOrchestrator;
+  /** Injectable pour les tests ; sinon un client GitHub en lecture seule réel est construit. */
+  repositoryClient?: GithubReadOnlyClient;
 }
 
 /**
@@ -65,7 +68,8 @@ export class Agent {
       new ReplanningEngine(opts.llm, this.serviceOrchestrator.registry));
     this.workflows=new WorkflowRegistry();
     const historical=new Map(builtinSkills.map(s=>[s.name,s]));
-    for(const skill of createRuntimeSkills(this.serviceOrchestrator,this.planner,this.planRunner,this.workflows)){
+    const runtimeSkills=opts.repositoryClient?createRuntimeSkills(this.serviceOrchestrator,this.planner,this.planRunner,this.workflows,opts.repositoryClient):createRuntimeSkills(this.serviceOrchestrator,this.planner,this.planRunner,this.workflows);
+    for(const skill of runtimeSkills){
       const old=historical.get(skill.name);this.skills.register(old?{...skill,handler:skill.handler??old.handler,parameters:old.parameters??skill.parameters,argsHint:old.argsHint}:skill);historical.delete(skill.name);
     }
     const mission=historical.get("execute_mission")!;this.skills.register({...executeMissionMetadata,...mission,id:"execute_mission",kind:"SYSTEM",availability:"AVAILABLE",exposure:"ALWAYS"});historical.delete("execute_mission");
