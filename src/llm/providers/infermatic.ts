@@ -280,7 +280,7 @@ export class InfermaticProvider implements LLMProvider {
     return {
       model: this.opts.model,
       messages,
-      max_tokens: options.maxTokens ?? 1024,
+      max_tokens: options.maxTokens ?? 20000,
       temperature: options.temperature,
       stop: options.stopSequences,
     };
