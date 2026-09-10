@@ -2,7 +2,7 @@ import type { TaskRequest, ServiceEvent } from "../orchestration/contract.js";
 import type { WebSearchProvider, SearchResult } from "../web/searchProvider.js";
 import { createWebSearchProvider } from "../web/searchFactory.js";
 import { MarketingOfficeStore } from "./marketingOfficeStore.js";
-import { buildBureauResult, completedEvent, failedEvent, officeLlm, parseJsonObject, asStringArray } from "./bureauContract.js";
+import { buildBureauResult, completedEvent, failedEvent, officeLlm, parseJsonObject, asStringArray, asMarketSourceLines } from "./bureauContract.js";
 import type { ChatMessage } from "../types.js";
 import type { LLMProvider } from "../llm/provider.js";
 import type { ModelRole } from "../llm/modelRouter.js";
@@ -69,7 +69,7 @@ export class MarketingOfficeService {
   private async defineStrategy(r: TaskRequest, workspaceId?: string): Promise<ServiceEvent[]> {
     const productBrief = r.context.productBrief && typeof r.context.productBrief === "object" ? JSON.stringify(r.context.productBrief) : undefined;
     const creativeBrief = r.context.creativeBrief && typeof r.context.creativeBrief === "object" ? JSON.stringify(r.context.creativeBrief) : undefined;
-    const marketSources = asStringArray(r.context.marketSources);
+    const marketSources = asMarketSourceLines(r.context.marketSources);
     if (!productBrief && !creativeBrief && !marketSources.length && !r.objective.trim()) throw new Error("MARKETING_OFFICE_STRATEGY_INPUT_REQUIRED");
 
     const messages: ChatMessage[] = [

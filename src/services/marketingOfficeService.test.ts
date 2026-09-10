@@ -91,6 +91,27 @@ test("Marketing Office : ANALYZE_MARKET réutilise le WebSearchProvider existant
   assert.equal((events[0].payload as any).result.sources.length, 1);
 });
 
+test("Marketing Office : les sources structurées de ANALYZE_MARKET survivent au passage dans DEFINE_STRATEGY.marketSources", async () => {
+  setupTestDb();
+  const stubSearch = { name: "stub", search: async () => [{ title: "Tendance Y", url: "https://example.com/y", snippet: "Tendance marché forte" }] };
+  const store = new MarketingOfficeStore();
+  const analyzeService = new MarketingOfficeService(store, stubSearch as any, jsonLlmFactory(STRATEGY_JSON));
+  const analyzeEvents = await analyzeService.handleTaskRequest(req("Analyse marché", { action: "ANALYZE_MARKET", queries: ["tendances"] }));
+  const sources = (analyzeEvents[0].payload as any).result.sources;
+
+  let capturedPrompt = "";
+  const { StubLLMProvider } = await import("./testStubLlm.js");
+  const captureLlm = () => new StubLLMProvider((messages) => {
+    capturedPrompt = messages.map((m) => m.content ?? "").join("\n");
+    return JSON.stringify(STRATEGY_JSON);
+  });
+  const strategyService = new MarketingOfficeService(store, undefined, captureLlm);
+  await strategyService.handleTaskRequest(req("Stratégie", { action: "DEFINE_STRATEGY", marketSources: sources }));
+
+  assert.match(capturedPrompt, /Tendance Y/);
+  assert.match(capturedPrompt, /example\.com\/y/);
+});
+
 test("Marketing Office : RECORD_RESULT échoue explicitement pour une campagne inconnue", async () => {
   setupTestDb();
   const service = new MarketingOfficeService(new MarketingOfficeStore(), undefined, jsonLlmFactory(STRATEGY_JSON));

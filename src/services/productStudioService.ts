@@ -2,7 +2,7 @@ import type { TaskRequest, ServiceEvent } from "../orchestration/contract.js";
 import type { WebSearchProvider, SearchResult } from "../web/searchProvider.js";
 import { createWebSearchProvider } from "../web/searchFactory.js";
 import { ProductStudioStore } from "./productStudioStore.js";
-import { buildBureauResult, completedEvent, failedEvent, officeLlm, parseJsonObject, asStringArray } from "./bureauContract.js";
+import { buildBureauResult, completedEvent, failedEvent, officeLlm, parseJsonObject, asStringArray, asMarketSourceLines } from "./bureauContract.js";
 import type { ChatMessage } from "../types.js";
 import type { LLMProvider } from "../llm/provider.js";
 import type { ModelRole } from "../llm/modelRouter.js";
@@ -72,7 +72,7 @@ export class ProductStudioService {
     const projectSummary = String(r.context.projectSummary ?? r.objective ?? "").trim();
     if (!projectSummary) throw new Error("PRODUCT_STUDIO_PROJECT_SUMMARY_REQUIRED");
     const targetUsersHint = typeof r.context.targetUsers === "string" ? r.context.targetUsers : undefined;
-    const marketSources = asStringArray(r.context.marketSources);
+    const marketSources = asMarketSourceLines(r.context.marketSources);
 
     const messages: ChatMessage[] = [
       { role: "system", content: SYSTEM_PROMPT },

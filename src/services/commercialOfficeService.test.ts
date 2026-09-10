@@ -122,6 +122,21 @@ test("Commercial Office : SEND_MESSAGE échoue explicitement si aucun fournisseu
   assert.equal(store.listInteractions(workspaceId, contact.id).filter((i) => i.type === "EMAIL_OUT").length, 0);
 });
 
+test("Commercial Office : la correspondance par e-mail est insensible à la casse (le contact n'est jamais dupliqué)", async () => {
+  setupTestDb();
+  const workspaceId = "proj-rp";
+  const store = new CommercialOfficeStore();
+  const service = new CommercialOfficeService(store, new NoopEmailProvider(), new NotificationStore());
+
+  const created = store.createContact(workspaceId, { kind: "PROSPECT", name: "Carla", email: "Carla@Example.com" });
+  const events = await service.handleTaskRequest(
+    req("commercial_office", "E-mail entrant", { action: "INGEST_EMAIL", from: "carla@example.com", subject: "Suite", body: "Une question", workspace: { id: workspaceId } }),
+  );
+  assert.equal((events[0].payload as any).result.created, false);
+  assert.equal((events[0].payload as any).result.contact.id, created.id);
+  assert.equal(store.listContacts(workspaceId).length, 1);
+});
+
 test("Commercial Office : INGEST_EMAIL crée un prospect si aucun contact ne correspond, sinon rattache l'interaction au contact existant", async () => {
   setupTestDb();
   const workspaceId = "proj-rp";

@@ -121,7 +121,7 @@ export class CommercialOfficeStore {
         `INSERT INTO crm_contacts (id, workspace_id, kind, name, email, company, status, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, 'prospect', ?, ?)`,
       )
-      .run(id, scope, input.kind, input.name.trim(), input.email?.trim() || null, input.company?.trim() || null, now, now);
+      .run(id, scope, input.kind, input.name.trim(), input.email?.trim().toLowerCase() || null, input.company?.trim() || null, now, now);
     return this.getContact(workspaceId, id)!;
   }
 

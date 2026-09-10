@@ -206,10 +206,15 @@ export function getDb(): Database.Database {
 
     CREATE TABLE IF NOT EXISTS trigger_events (
       id TEXT PRIMARY KEY, source TEXT NOT NULL CHECK(source IN ('EMAIL','CRM','EXTERNAL')), external_id TEXT NOT NULL,
-      received_at INTEGER NOT NULL, payload_json TEXT NOT NULL, workspace_id TEXT,
+      received_at INTEGER NOT NULL, payload_json TEXT NOT NULL, workspace_id TEXT NOT NULL,
       capability TEXT, objective TEXT, operation_task_id TEXT, status TEXT NOT NULL
     );
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_trigger_events_dedupe ON trigger_events(source, external_id);
+    -- workspace_id fait partie de la clé de déduplication : deux intégrations
+    -- distinctes (workspaces différents) peuvent légitimement réutiliser le même
+    -- external_id court sans se confondre. workspace_id est toujours une valeur
+    -- normalisée non NULL (voir bureauScope()) pour que la contrainte UNIQUE reste
+    -- effective même en l'absence de projet actif (SQLite ne déduplique jamais des NULL).
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_trigger_events_dedupe ON trigger_events(source, workspace_id, external_id);
 
     CREATE TABLE IF NOT EXISTS email_alerts_sent (
       dedupe_key TEXT PRIMARY KEY, sent_at INTEGER NOT NULL, ok INTEGER NOT NULL, error TEXT

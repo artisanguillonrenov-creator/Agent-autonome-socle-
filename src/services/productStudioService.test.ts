@@ -119,6 +119,29 @@ test("Product Studio : RESEARCH_MARKET réutilise le WebSearchProvider existant,
   assert.equal(payload.result.sources[0].title, "Concurrent X");
 });
 
+test("Product Studio : les sources structurées de RESEARCH_MARKET survivent au passage dans ANALYZE.marketSources", async () => {
+  setupTestDb();
+  const stubSearch = { name: "stub", search: async () => [{ title: "Concurrent X", url: "https://example.com/x", snippet: "Analyse concurrente détaillée" }] };
+  const store = new ProductStudioStore();
+  const researchService = new ProductStudioService(store, stubSearch as any, jsonLlmFactory(ANALYSIS_JSON));
+  const researchEvents = await researchService.handleTaskRequest(req("product_studio", "Recherche marché", { action: "RESEARCH_MARKET", queries: ["concurrents"] }));
+  const sources = (researchEvents[0].payload as any).result.sources;
+
+  let capturedPrompt = "";
+  const { StubLLMProvider } = await import("./testStubLlm.js");
+  const captureLlm = () => new StubLLMProvider((messages) => {
+    capturedPrompt = messages.map((m) => m.content ?? "").join("\n");
+    return JSON.stringify(ANALYSIS_JSON);
+  });
+  const analyzeService = new ProductStudioService(store, undefined, captureLlm);
+  await analyzeService.handleTaskRequest(req("product_studio", "Analyse", { action: "ANALYZE", projectSummary: "Projet", marketSources: sources }));
+
+  // Les objets SearchResult (title/url/snippet), pas seulement des chaînes, doivent
+  // apparaître dans le prompt — jamais silencieusement filtrés par un typeof strict.
+  assert.match(capturedPrompt, /Concurrent X/);
+  assert.match(capturedPrompt, /example\.com\/x/);
+});
+
 test("Product Studio : les projets restent isolés — l'analyse d'un projet n'apparaît jamais dans un autre", async () => {
   setupTestDb();
   const store = new ProductStudioStore();

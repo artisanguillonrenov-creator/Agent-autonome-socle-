@@ -37,9 +37,21 @@ export async function handleEmailTrigger(orchestrator: ServiceOrchestrator, stor
   const objective = `Traiter l'e-mail entrant de ${from}${subject ? ` : ${subject}` : ""}`;
   const orchResult = await orchestrator.dispatchCapability(
     { action: "DISPATCH_CAPABILITY", capability: "commercial_office", objective, context: { action: "INGEST_EMAIL", from, subject, body: typeof body.body === "string" ? body.body : "" } },
-    { executionMode: "background", workspaceId, idempotencyKey: `trigger:email:${messageId}` },
+    // Pas d'idempotencyKey dérivée de messageId : la déduplication de l'événement vit déjà
+    // dans TriggerStore.claim() (réclamation atomique) ; une clé fixe ferait retomber tout
+    // retry après correction de configuration sur le résultat REJECTED mis en cache par
+    // ServiceOrchestrator, qui ne redispatch jamais un REJECTED (contrairement à un FAILED
+    // retryable) — voir release() ci-dessus.
+    { executionMode: "background", workspaceId },
   );
-  store.attach("EMAIL", messageId, { operationTaskId: orchResult.taskId, capability: "commercial_office", objective, status: orchResult.status });
+  if (orchResult.status === "REJECTED") {
+    // Rejet d'infrastructure (ex. skills.officeCommercial désactivé) : ne consomme jamais
+    // définitivement messageId, pour qu'une livraison identique puisse être retraitée une
+    // fois la configuration corrigée.
+    store.release("EMAIL", messageId, workspaceId);
+    return { status: 502, body: { ok: false, duplicate: false, error: orchResult.error ?? "REJECTED" } };
+  }
+  store.attach("EMAIL", messageId, workspaceId, { operationTaskId: orchResult.taskId, capability: "commercial_office", objective, status: orchResult.status });
   return { status: 202, body: { ok: true, duplicate: false, taskId: orchResult.taskId, status: orchResult.status } };
 }
 
@@ -62,9 +74,15 @@ export async function handleCrmTrigger(orchestrator: ServiceOrchestrator, store:
   const objective = `Traiter l'événement CRM ${eventType}`;
   const orchResult = await orchestrator.dispatchCapability(
     { action: "DISPATCH_CAPABILITY", capability: "commercial_office", objective, context: { action: "INGEST_CRM_EVENT", eventType, data: isPlainObject(body.data) ? body.data : {} } },
-    { executionMode: "background", workspaceId, idempotencyKey: `trigger:crm:${eventId}` },
+    // Voir le commentaire équivalent dans handleEmailTrigger : pas de clé fixe dérivée de
+    // eventId, la déduplication vit déjà dans TriggerStore.claim().
+    { executionMode: "background", workspaceId },
   );
-  store.attach("CRM", eventId, { operationTaskId: orchResult.taskId, capability: "commercial_office", objective, status: orchResult.status });
+  if (orchResult.status === "REJECTED") {
+    store.release("CRM", eventId, workspaceId);
+    return { status: 502, body: { ok: false, duplicate: false, error: orchResult.error ?? "REJECTED" } };
+  }
+  store.attach("CRM", eventId, workspaceId, { operationTaskId: orchResult.taskId, capability: "commercial_office", objective, status: orchResult.status });
   return { status: 202, body: { ok: true, duplicate: false, taskId: orchResult.taskId, status: orchResult.status } };
 }
 
@@ -97,8 +115,14 @@ export async function handleExternalTrigger(orchestrator: ServiceOrchestrator, s
 
   const orchResult = await orchestrator.dispatchCapability(
     { action: "DISPATCH_CAPABILITY", capability, objective, context: isPlainObject(body.context) ? body.context : {} },
-    { executionMode: "background", workspaceId, idempotencyKey: `trigger:external:${eventId}` },
+    // Voir le commentaire équivalent dans handleEmailTrigger : pas de clé fixe dérivée de
+    // eventId, la déduplication vit déjà dans TriggerStore.claim().
+    { executionMode: "background", workspaceId },
   );
-  store.attach("EXTERNAL", eventId, { operationTaskId: orchResult.taskId, capability, objective, status: orchResult.status });
+  if (orchResult.status === "REJECTED") {
+    store.release("EXTERNAL", eventId, workspaceId);
+    return { status: 502, body: { ok: false, duplicate: false, error: orchResult.error ?? "REJECTED" } };
+  }
+  store.attach("EXTERNAL", eventId, workspaceId, { operationTaskId: orchResult.taskId, capability, objective, status: orchResult.status });
   return { status: 202, body: { ok: true, duplicate: false, taskId: orchResult.taskId, status: orchResult.status } };
 }

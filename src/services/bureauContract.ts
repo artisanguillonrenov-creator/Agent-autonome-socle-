@@ -126,3 +126,27 @@ export function parseJsonObject(raw: string): Record<string, unknown> {
 export function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((x): x is string => typeof x === "string" && x.trim().length > 0) : [];
 }
+
+/**
+ * Les actions RESEARCH_MARKET/ANALYZE_MARKET renvoient `sources` comme des objets
+ * `{title,url,snippet}` (SearchResult), et documentent leur réinjection dans une action
+ * suivante via context.marketSources. Accepte donc aussi bien des chaînes que ces objets
+ * de source — jamais un simple filtre par typeof qui perdrait silencieusement les preuves
+ * collectées quand l'appelant enchaîne fidèlement les deux actions.
+ */
+export function asMarketSourceLines(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (typeof item === "string") return item.trim();
+      if (item && typeof item === "object" && !Array.isArray(item)) {
+        const o = item as Record<string, unknown>;
+        const title = typeof o.title === "string" ? o.title : undefined;
+        const url = typeof o.url === "string" ? o.url : undefined;
+        const snippet = typeof o.snippet === "string" ? o.snippet : undefined;
+        return [title, url, snippet].filter((x): x is string => !!x && x.trim().length > 0).join(" — ");
+      }
+      return "";
+    })
+    .filter((line) => line.trim().length > 0);
+}

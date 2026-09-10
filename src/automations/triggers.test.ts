@@ -69,6 +69,60 @@ test("automations.emailTriggers : messageId/from manquants sont rejetés (jamais
   }
 });
 
+test("un événement rejeté (service cible désactivé) peut être retraité une fois la configuration corrigée", async () => {
+  setupTestDb();
+  config.automations.emailTriggers = true;
+  try {
+    // commercial_office volontairement désactivé : le dispatch sera REJECTED.
+    const orchestrator = new ServiceOrchestrator();
+    const store = new TriggerStore();
+    const payload = { messageId: "msg-retry-1", from: "prospect@example.com" };
+
+    const rejected = await handleEmailTrigger(orchestrator, store, payload);
+    assert.equal(rejected.status, 502);
+    assert.equal(rejected.body.ok, false);
+    // L'événement rejeté n'a pas consommé messageId : aucune ligne "coincée" en base.
+    assert.equal(store.get("EMAIL", "msg-retry-1"), null);
+
+    // La configuration est corrigée...
+    orchestrator.registry.patchService("commercial_office", { enabled: true });
+    // ...et la même livraison peut maintenant être traitée avec succès, pas comme un doublon.
+    const retried = await handleEmailTrigger(orchestrator, store, payload);
+    assert.equal(retried.status, 202);
+    assert.equal(retried.body.duplicate, false);
+  } finally {
+    config.automations.emailTriggers = false;
+  }
+});
+
+test("le même eventId dans deux workspaces distincts ne se confond jamais et ne fuite pas l'un vers l'autre", async () => {
+  setupTestDb();
+  config.automations.crmTriggers = true;
+  try {
+    const orchestrator = freshOrchestrator();
+    const store = new TriggerStore();
+    const payloadA = { eventId: "shared-id", eventType: "NEW_LEAD", data: { name: "Lead A" }, workspaceId: "workspace-a" };
+    const payloadB = { eventId: "shared-id", eventType: "NEW_LEAD", data: { name: "Lead B" }, workspaceId: "workspace-b" };
+
+    const resultA = await handleCrmTrigger(orchestrator, store, payloadA);
+    assert.equal(resultA.status, 202);
+    assert.equal(resultA.body.duplicate, false);
+
+    // Même eventId, workspace différent : traité comme un événement distinct, jamais un doublon.
+    const resultB = await handleCrmTrigger(orchestrator, store, payloadB);
+    assert.equal(resultB.status, 202);
+    assert.equal(resultB.body.duplicate, false);
+
+    const recordA = store.get("CRM", "shared-id", "workspace-a")!;
+    const recordB = store.get("CRM", "shared-id", "workspace-b")!;
+    assert.notEqual(recordA.id, recordB.id);
+    assert.equal((recordA.payload as any).data.name, "Lead A");
+    assert.equal((recordB.payload as any).data.name, "Lead B");
+  } finally {
+    config.automations.crmTriggers = false;
+  }
+});
+
 test("automations.crmTriggers : désactivé par défaut, puis idempotent par eventId", async () => {
   setupTestDb();
   config.automations.crmTriggers = false;
