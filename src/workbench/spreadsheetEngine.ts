@@ -159,6 +159,17 @@ export class SpreadsheetEngine {
         throw e;
       }
       throw new Error(WORKBENCH_ERRORS.SPREADSHEET_FORMAT_UNSUPPORTED);
+    } finally {
+      // Stopping mid-parse (early-stop on a bounded readRange) leaves the
+      // underlying file stream open unless explicitly closed here.
+      const stream = (reader as any).stream;
+      if (stream && typeof stream.destroy === "function") {
+        stream.on?.("error", () => {
+          // Destroying a stream mid-pipe can surface a benign close error;
+          // it must not become an unhandled 'error' event.
+        });
+        stream.destroy();
+      }
     }
   }
 
@@ -310,6 +321,11 @@ export class SpreadsheetEngine {
     const format = this.detectFormat(cleanRel);
     if (format === "csv" || format === "tsv") {
       return ["Sheet1"];
+    }
+
+    const stats = statSync(absolutePath);
+    if (stats.size > SPREADSHEET_LIMITS.maxInputBytes) {
+      throw new Error(WORKBENCH_ERRORS.SPREADSHEET_LIMIT_EXCEEDED);
     }
 
     return this.withXlsxWorkbookReader(absolutePath, async (reader) => {
@@ -474,12 +490,23 @@ export class SpreadsheetEngine {
     const colIndex = columns.map((col) => headers.indexOf(col));
     const rowObjects: Record<string, unknown>[] = [];
     let lastDataIndex = -1;
+    let hasMore = false;
 
+    // `break` on an async for-await loop calls the iterator's return(),
+    // which propagates through parseSax/iterateStream and stops pulling
+    // further XML out of the underlying zip entry — so once the requested
+    // range (plus one lookahead row to confirm more data exists) has been
+    // seen, we genuinely stop parsing rather than draining the rest of a
+    // multi-million-row sheet just to count it.
     for await (const row of it) {
       const dataIndex = row.number - 2;
       if (dataIndex < 0) continue;
-      lastDataIndex = Math.max(lastDataIndex, dataIndex);
-      if (dataIndex >= startRow && dataIndex < collectEndRow) {
+      if (dataIndex >= collectEndRow) {
+        hasMore = true;
+        break;
+      }
+      lastDataIndex = dataIndex;
+      if (dataIndex >= startRow) {
         const rowObj: Record<string, unknown> = {};
         columns.forEach((col, idx) => {
           const ci = colIndex[idx];
@@ -489,8 +516,11 @@ export class SpreadsheetEngine {
       }
     }
 
+    const totalRowsKnown = !hasMore;
+    // When stopped early, this is a confirmed lower bound (rows 0..lastDataIndex
+    // are known to exist), never an invented exact total.
     const totalRows = lastDataIndex + 1;
-    if (hardEndRow < desiredEndRow && totalRows > hardEndRow) {
+    if (hardEndRow < desiredEndRow && hasMore) {
       truncated = true;
       warnings.push(`Rows capped at ${maxAllowedRows} due to cell/row limits.`);
     }
@@ -500,7 +530,7 @@ export class SpreadsheetEngine {
       columns,
       rows: rowObjects,
       totalRows,
-      totalRowsKnown: true,
+      totalRowsKnown,
       truncated,
       warnings
     };

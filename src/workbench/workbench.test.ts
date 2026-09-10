@@ -3,12 +3,13 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync } from "node:fs";
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
 import Database from "better-sqlite3";
 import ExcelJS from "exceljs";
 import { WorkspaceStore } from "../workspaces/workspaceStore.js";
 import { ArtifactStore } from "../workspaces/artifactStore.js";
 import { DocumentEngine } from "./documentEngine.js";
-import { SpreadsheetEngine } from "./spreadsheetEngine.js";
+import { SpreadsheetEngine, SPREADSHEET_LIMITS } from "./spreadsheetEngine.js";
 import { DataAnalysisEngine } from "./dataAnalysisEngine.js";
 import { DatabaseQueryEngine } from "./databaseQueryEngine.js";
 import { ReportEngine } from "./reportEngine.js";
@@ -273,6 +274,107 @@ test("XLSX MAXCELLS BOUND: 100 columns x 3000 rows real XLSX capped at 250,000 c
   assert.equal(range.columns.length, 100);
   assert.equal(range.rows.length, 2500); // 100 * 2500 = 250,000 cells max
   assert.equal(range.truncated, true);
+  // The sheet has 3000 rows but the cell cap stops the stream at row 2500;
+  // the real total beyond that point was never counted.
+  assert.equal(range.totalRowsKnown, false);
+
+  cleanupTestEnvironment();
+});
+
+test("XLSX MAXROWS BOUND: >10,000 rows early-stopped at the row cap with an honest totalRowsKnown=false", async () => {
+  const { workspaceStore, workspace } = setupTestEnvironment();
+  const engine = new SpreadsheetEngine(workspaceStore);
+
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("Sheet1");
+  ws.addRow(["id"]);
+  for (let i = 1; i <= 10005; i++) {
+    ws.addRow([i]);
+  }
+  const buf = Buffer.from(await wb.xlsx.writeBuffer());
+  workspaceStore.writeFile(workspace.id, "big_xlsx_rows.xlsx", buf);
+
+  const range = await engine.readRange(workspace.id, "big_xlsx_rows.xlsx");
+  assert.equal(range.rows.length, 10000);
+  assert.equal(range.truncated, true);
+  assert.equal(range.totalRowsKnown, false);
+
+  cleanupTestEnvironment();
+});
+
+test("XLSX EARLY STOP: a small requested range never iterates a large sheet to its last row", async () => {
+  const { workspaceStore, workspace } = setupTestEnvironment();
+  const engine = new SpreadsheetEngine(workspaceStore);
+
+  const TOTAL_ROWS = 5000;
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("Sheet1");
+  ws.addRow(["id"]);
+  for (let i = 1; i <= TOTAL_ROWS; i++) {
+    ws.addRow([i]);
+  }
+  const buf = Buffer.from(await wb.xlsx.writeBuffer());
+  workspaceStore.writeFile(workspace.id, "early_stop.xlsx", buf);
+
+  // Instrument the real ExcelJS streaming reader to count how many row
+  // events actually flow through the async-iterator protocol our engine
+  // consumes, proving the stream is abandoned instead of drained.
+  // ExcelJS.stream.xlsx does not publicly export WorksheetReader (only
+  // WorkbookReader/WorkbookWriter), so reach into the concrete module that
+  // WorkbookReader itself constructs instances from.
+  const require = createRequire(import.meta.url);
+  const WorksheetReaderClass = require("exceljs/lib/stream/xlsx/worksheet-reader.js");
+  const proto = WorksheetReaderClass.prototype;
+  const originalAsyncIterator = proto[Symbol.asyncIterator];
+  let rowsProducedByStream = 0;
+  proto[Symbol.asyncIterator] = function (this: any) {
+    const gen = originalAsyncIterator.call(this);
+    return {
+      async next(...args: any[]) {
+        const res = await gen.next(...args);
+        if (!res.done) rowsProducedByStream++;
+        return res;
+      },
+      async return(value?: any) {
+        return typeof gen.return === "function" ? gen.return(value) : { done: true, value };
+      },
+      [Symbol.asyncIterator]() {
+        return this;
+      }
+    };
+  };
+
+  let startRowRange: Awaited<ReturnType<typeof engine.readRange>>;
+  let endRowRange: Awaited<ReturnType<typeof engine.readRange>>;
+  try {
+    startRowRange = await engine.readRange(workspace.id, "early_stop.xlsx", { startRow: 0, endRow: 10 });
+    assert.ok(
+      rowsProducedByStream < 50,
+      `expected far fewer than ${TOTAL_ROWS} rows to be pulled from the stream, got ${rowsProducedByStream}`
+    );
+
+    // A non-zero startRow still requires scanning past the skipped rows
+    // (XLSX row-major XML has no random access), but the engine must still
+    // stop shortly after endRow rather than draining the rest of the sheet.
+    rowsProducedByStream = 0;
+    endRowRange = await engine.readRange(workspace.id, "early_stop.xlsx", { startRow: 20, endRow: 30 });
+    assert.ok(
+      rowsProducedByStream < 50,
+      `expected the stream to stop shortly after endRow, not drain toward row ${TOTAL_ROWS}, got ${rowsProducedByStream}`
+    );
+  } finally {
+    proto[Symbol.asyncIterator] = originalAsyncIterator;
+  }
+
+  assert.equal(startRowRange.rows.length, 10);
+  assert.equal(startRowRange.rows[0].id, 1);
+  // An explicit small endRow is the user's own choice, not a safety-limit
+  // truncation, but we still don't know the real total since we stopped.
+  assert.equal(startRowRange.truncated, false);
+  assert.equal(startRowRange.totalRowsKnown, false);
+
+  assert.equal(endRowRange.rows.length, 10);
+  assert.equal(endRowRange.rows[0].id, 21);
 
   cleanupTestEnvironment();
 });
@@ -347,6 +449,40 @@ test("XLS FORMAT REJECTED: legacy binary .xls is never claimed as supported", as
   await assert.rejects(
     () => engine.inspect(workspace.id, "legacy.xls"),
     (err: any) => err.message === WORKBENCH_ERRORS.SPREADSHEET_FORMAT_UNSUPPORTED
+  );
+
+  cleanupTestEnvironment();
+});
+
+test("LISTSHEETS INPUT LIMIT: oversized XLSX rejected before hitting the WorkbookReader", async () => {
+  // The default WorkspaceStore file-size cap (10 MB) is smaller than the
+  // spreadsheet input limit (25 MB), so this test needs its own store with
+  // a higher cap to actually exercise SPREADSHEET_LIMIT_EXCEEDED rather
+  // than the workspace's own WORKSPACE_FILE_TOO_LARGE check.
+  if (existsSync(TEST_WORKSPACES_ROOT)) {
+    rmSync(TEST_WORKSPACES_ROOT, { recursive: true, force: true });
+  }
+  mkdirSync(TEST_WORKSPACES_ROOT, { recursive: true });
+  const workspaceStore = new WorkspaceStore(
+    TEST_WORKSPACES_ROOT,
+    SPREADSHEET_LIMITS.maxInputBytes + 1024,
+    SPREADSHEET_LIMITS.maxInputBytes + 1024
+  );
+  const workspace = workspaceStore.create({
+    name: "Oversized Workspace",
+    ownerType: "ADHOC",
+    ownerId: `test-owner-${randomUUID()}`
+  });
+  const engine = new SpreadsheetEngine(workspaceStore);
+
+  // A valid XLSX header is not required: the size check must happen before
+  // any parsing is attempted, so an oversized garbage buffer is sufficient.
+  const oversized = Buffer.alloc(SPREADSHEET_LIMITS.maxInputBytes + 1, 1);
+  workspaceStore.writeFile(workspace.id, "oversized.xlsx", oversized);
+
+  await assert.rejects(
+    () => engine.listSheets(workspace.id, "oversized.xlsx"),
+    (err: any) => err.message === WORKBENCH_ERRORS.SPREADSHEET_LIMIT_EXCEEDED
   );
 
   cleanupTestEnvironment();
