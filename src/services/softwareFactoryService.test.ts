@@ -6,6 +6,7 @@ import {
   SoftwareFactoryServer,
   parseRepoUrl,
   extractTaskParams,
+  cleanLLMCodeOutput,
   type ParsedSoftwareTask,
 } from "./softwareFactoryService.js";
 import { OperationStore } from "../orchestration/operationStore.js";
@@ -15,6 +16,26 @@ import { MockProvider } from "../llm/providers/mock.js";
 import { LocalHashingEmbeddingProvider } from "../llm/embeddings.js";
 import type { TaskRequest, ServiceEvent } from "../orchestration/contract.js";
 import { config } from "../config.js";
+import type { LLMProvider, CompletionOptions } from "../llm/provider.js";
+import type { ChatMessage } from "../types.js";
+
+/** Fournisseur LLM contrôlable en test : capture messages/options, renvoie un contenu fixé ou lève une erreur. */
+class StubLLMProvider implements LLMProvider {
+  readonly name = "stub";
+  public lastMessages: ChatMessage[] = [];
+  public lastOptions: CompletionOptions = {};
+  constructor(
+    private readonly content: string | null,
+    private readonly errorToThrow?: Error,
+  ) {}
+
+  async complete(messages: ChatMessage[], options: CompletionOptions = {}) {
+    this.lastMessages = messages;
+    this.lastOptions = options;
+    if (this.errorToThrow) throw this.errorToThrow;
+    return { content: this.content };
+  }
+}
 
 test("parseRepoUrl extrait correctement owner et repo depuis différentes formats", () => {
   assert.deepEqual(parseRepoUrl("https://github.com/myorg/myrepo"), { owner: "myorg", repo: "myrepo" });
@@ -608,7 +629,7 @@ test("TEST F — bypass LLM quand exactContent est présent", async () => {
   const service = new SoftwareFactoryService({
     githubToken: "test-token",
     octokitClient: mockOctokit,
-    // openrouterApiKey est volontairement non configuré
+    // Aucun llmProvider fourni : le LLM ne doit jamais être appelé grâce à exactContent
   });
 
   service.generateCodeUpdate = async () => {
@@ -1019,30 +1040,199 @@ test("TEST O — NO_GITHUB_DIFF quand compareCommits retourne zéro fichier", as
   );
 });
 
-test("TEST P — NO_CHANGES_GENERATED quand le contenu généré est vide ou identique", async () => {
-  const service = new SoftwareFactoryService({
-    openrouterApiKey: "fake-key",
-  });
+test("TEST P — NO_CHANGES_GENERATED quand le contenu généré est identique au contenu existant", async () => {
+  const stub = new StubLLMProvider("console.log('identical');");
+  const service = new SoftwareFactoryService({ llmProvider: stub });
 
+  await assert.rejects(
+    async () => {
+      await service.generateCodeUpdate("console.log('identical');", "src/test.ts", "pas de changement");
+    },
+    (err: unknown) => err instanceof Error && err.message.includes("NO_CHANGES_GENERATED"),
+  );
+});
+
+// --- Bascule OpenRouter -> Infermatic : configuration par défaut ---
+
+test("config.softwareFactory expose des valeurs par défaut Infermatic indépendantes de config.llm", () => {
+  assert.equal(config.softwareFactory.provider, "infermatic");
+  assert.equal(config.softwareFactory.model, "Qwen-Qwen3.6-35B-A3B");
+  assert.equal(config.softwareFactory.maxTokens, 7000);
+});
+
+// --- Utilisation effective du provider Infermatic ---
+
+test("Software Factory appelle Infermatic (api.totalgpt.ai) et jamais OpenRouter quand SOFTWARE_FACTORY_PROVIDER=infermatic", async () => {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () =>
-    new Response(
-      JSON.stringify({
-        choices: [{ message: { content: "console.log('identical');" } }],
-      }),
-      { status: 200 },
-    );
+  const previousInfermaticKey = config.llm.infermaticApiKey;
+  const calledUrls: string[] = [];
+  let capturedBody: Record<string, unknown> | undefined;
+
+  config.llm.infermaticApiKey = "test-infermatic-key";
+  globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+    calledUrls.push(String(url));
+    capturedBody = init?.body ? JSON.parse(String(init.body)) : undefined;
+    return new Response(JSON.stringify({ choices: [{ message: { content: "export const patched = true;" } }] }), {
+      status: 200,
+    });
+  }) as typeof fetch;
 
   try {
+    // La sélection persistée de Jarvis pointe volontairement vers un autre provider :
+    // la Software Factory ne doit jamais s'y raccrocher.
+    const { closeDb, getDb } = await import("../persistence/db.js");
+    config.db.path = ":memory:";
+    closeDb();
+    getDb();
+    const { saveLLMConfig } = await import("../persistence/llmConfigStore.js");
+    saveLLMConfig("anthropic", "claude-3-5-sonnet");
+
+    const service = new SoftwareFactoryService({
+      softwareFactoryProvider: "infermatic",
+      softwareFactoryModel: "Qwen-Qwen3.6-35B-A3B",
+    });
+    const result = await service.generateCodeUpdate("old", "src/x.ts", "faire X");
+
+    assert.equal(result, "export const patched = true;");
+    assert.equal(calledUrls.length, 1);
+    assert.match(calledUrls[0], /^https:\/\/api\.totalgpt\.ai\/v1\/chat\/completions$/);
+    assert.ok(!calledUrls.some((u) => u.includes("openrouter.ai")), "Aucune requête ne doit atteindre OpenRouter");
+    assert.equal(capturedBody?.model, "Qwen-Qwen3.6-35B-A3B");
+  } finally {
+    globalThis.fetch = originalFetch;
+    config.llm.infermaticApiKey = previousInfermaticKey;
+  }
+});
+
+test("Le provider/modèle actif de Jarvis (llm_active_model persisté) n'est jamais modifié par la Software Factory", async () => {
+  const { closeDb, getDb } = await import("../persistence/db.js");
+  config.db.path = ":memory:";
+  closeDb();
+  getDb();
+  const { saveLLMConfig, loadLLMConfig } = await import("../persistence/llmConfigStore.js");
+  saveLLMConfig("anthropic", "claude-3-5-sonnet");
+
+  const stub = new StubLLMProvider("export const y = 2;");
+  const service = new SoftwareFactoryService({
+    llmProvider: stub,
+    softwareFactoryProvider: "infermatic",
+    softwareFactoryModel: "Qwen-Qwen3.6-35B-A3B",
+  });
+  await service.generateCodeUpdate("old", "src/y.ts", "faire Y");
+
+  assert.deepEqual(loadLLMConfig(), { provider: "anthropic", model: "claude-3-5-sonnet" });
+});
+
+test("generateCodeUpdate transmet maxTokens (défaut 7000) et temperature 0.2 au provider", async () => {
+  const stub = new StubLLMProvider("export const a = 1;");
+  const service = new SoftwareFactoryService({ llmProvider: stub });
+  await service.generateCodeUpdate("old", "src/a.ts", "faire A");
+
+  assert.equal(stub.lastOptions.maxTokens, 7000);
+  assert.equal(stub.lastOptions.temperature, 0.2);
+});
+
+test("SOFTWARE_FACTORY_MAX_TOKENS personnalisé est bien transmis au provider", async () => {
+  const stub = new StubLLMProvider("export const b = 2;");
+  const service = new SoftwareFactoryService({ llmProvider: stub, softwareFactoryMaxTokens: 4321 });
+  await service.generateCodeUpdate("old", "src/b.ts", "faire B");
+
+  assert.equal(stub.lastOptions.maxTokens, 4321);
+});
+
+test("Une erreur de génération de code n'expose jamais la clé API Infermatic", async () => {
+  const originalFetch = globalThis.fetch;
+  const previousInfermaticKey = config.llm.infermaticApiKey;
+  const secretKey = "sk-super-secret-infermatic-key-12345";
+  config.llm.infermaticApiKey = secretKey;
+  globalThis.fetch = (async () => new Response("Erreur interne, en-tête Authorization rejeté", { status: 500 })) as typeof fetch;
+
+  try {
+    const service = new SoftwareFactoryService({
+      softwareFactoryProvider: "infermatic",
+      softwareFactoryModel: "Qwen-Qwen3.6-35B-A3B",
+    });
     await assert.rejects(
-      async () => {
-        await service.generateCodeUpdate("console.log('identical');", "src/test.ts", "pas de changement");
+      service.generateCodeUpdate("old", "src/x.ts", "faire X"),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.match((err as Error).message, /CODE_GENERATION_FAILED/);
+        assert.ok(!(err as Error).message.includes(secretKey), "La clé API ne doit jamais apparaître dans l'erreur");
+        return true;
       },
-      (err: unknown) => err instanceof Error && err.message.includes("NO_CHANGES_GENERATED"),
     );
   } finally {
     globalThis.fetch = originalFetch;
+    config.llm.infermaticApiKey = previousInfermaticKey;
   }
+});
+
+// --- Récupération et nettoyage de la réponse LLM ---
+
+test("generateCodeUpdate récupère correctement une réponse avec code complet", async () => {
+  const code = "export function greet(): string {\n  return 'hi';\n}";
+  const stub = new StubLLMProvider(code);
+  const service = new SoftwareFactoryService({ llmProvider: stub });
+  const result = await service.generateCodeUpdate("old content", "src/greet.ts", "ajouter greet()");
+  assert.equal(result, code);
+});
+
+test("cleanLLMCodeOutput nettoie un bloc Markdown ```typescript ... ```", () => {
+  const result = cleanLLMCodeOutput("```typescript\nexport const x = 42;\n```");
+  assert.equal(result, "export const x = 42;");
+});
+
+test("cleanLLMCodeOutput retire les balises <think>...</think> avant utilisation", () => {
+  const result = cleanLLMCodeOutput("<think>Je réfléchis à la meilleure implémentation...</think>\nexport const y = 1;");
+  assert.equal(result, "export const y = 1;");
+  assert.ok(!result.includes("<think>") && !result.includes("</think>"));
+});
+
+test("cleanLLMCodeOutput retire <think> puis nettoie le bloc Markdown restant", () => {
+  const result = cleanLLMCodeOutput("<think>raisonnement interne...</think>\n```ts\nexport const z = 2;\n```");
+  assert.equal(result, "export const z = 2;");
+});
+
+test("generateCodeUpdate nettoie une réponse ```typescript ... ``` avant de retourner le code", async () => {
+  const stub = new StubLLMProvider("```typescript\nexport const x = 42;\n```");
+  const service = new SoftwareFactoryService({ llmProvider: stub });
+  const result = await service.generateCodeUpdate("old", "src/x.ts", "faire X");
+  assert.equal(result, "export const x = 42;");
+});
+
+test("generateCodeUpdate nettoie une réponse avec balise <think> avant de retourner le code", async () => {
+  const stub = new StubLLMProvider("<think>je réfléchis...</think>\nexport const y = 1;");
+  const service = new SoftwareFactoryService({ llmProvider: stub });
+  const result = await service.generateCodeUpdate("old", "src/y.ts", "faire Y");
+  assert.equal(result, "export const y = 1;");
+  assert.ok(!result.includes("<think>"));
+});
+
+test("generateCodeUpdate rejette une réponse vide avec NO_CHANGES_GENERATED", async () => {
+  const stub = new StubLLMProvider("");
+  const service = new SoftwareFactoryService({ llmProvider: stub });
+  await assert.rejects(
+    service.generateCodeUpdate("old", "src/x.ts", "faire X"),
+    (err: unknown) => err instanceof Error && err.message.includes("NO_CHANGES_GENERATED"),
+  );
+});
+
+test("generateCodeUpdate rejette une réponse null avec NO_CHANGES_GENERATED", async () => {
+  const stub = new StubLLMProvider(null);
+  const service = new SoftwareFactoryService({ llmProvider: stub });
+  await assert.rejects(
+    service.generateCodeUpdate("old", "src/x.ts", "faire X"),
+    (err: unknown) => err instanceof Error && err.message.includes("NO_CHANGES_GENERATED"),
+  );
+});
+
+test("generateCodeUpdate rejette une réponse qui ne contient qu'un bloc <think> vide de code", async () => {
+  const stub = new StubLLMProvider("<think>je réfléchis encore et encore...</think>");
+  const service = new SoftwareFactoryService({ llmProvider: stub });
+  await assert.rejects(
+    service.generateCodeUpdate("old", "src/x.ts", "faire X"),
+    (err: unknown) => err instanceof Error && err.message.includes("NO_CHANGES_GENERATED"),
+  );
 });
 
 test("TEST Q — Création d'un nouveau fichier quand getContent retourne 404", async () => {
