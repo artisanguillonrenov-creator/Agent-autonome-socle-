@@ -1,5 +1,5 @@
 import { readFileSync, statSync } from "node:fs";
-import XLSX from "xlsx";
+import ExcelJS from "exceljs";
 import { WorkspaceStore } from "../workspaces/workspaceStore.js";
 import {
   AggregateFunction,
@@ -39,11 +39,57 @@ export class SpreadsheetEngine {
     }
   }
 
-  private readWorkbook(workspaceId: string, relativePath: string): {
-    workbook: XLSX.WorkBook;
-    format: "csv" | "tsv" | "xlsx";
-    cleanRel: string;
-  } {
+  private parseCsvTsvContent(
+    content: string,
+    delimiter: string
+  ): { headers: string[]; rows: string[][] } {
+    const lines = content.split(/\r?\n/).filter((line) => line.length > 0);
+    if (lines.length === 0) {
+      return { headers: [], rows: [] };
+    }
+
+    const parseLine = (line: string): string[] => {
+      const result: string[] = [];
+      let current = "";
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        if (char === '"') {
+          if (inQuotes && line[i + 1] === '"') {
+            current += '"';
+            i++;
+          } else {
+            inQuotes = !inQuotes;
+          }
+        } else if (char === delimiter && !inQuotes) {
+          result.push(current.trim());
+          current = "";
+        } else {
+          current += char;
+        }
+      }
+      result.push(current.trim());
+      return result;
+    };
+
+    const rawHeaders = parseLine(lines[0]);
+    const headers = rawHeaders.map((h, i) => (h ? h : `col_${i + 1}`));
+    const rows = lines.slice(1).map((line) => parseLine(line));
+
+    return { headers, rows };
+  }
+
+  private async loadXlsxWorkbook(absolutePath: string): Promise<ExcelJS.Workbook> {
+    const workbook = new ExcelJS.Workbook();
+    try {
+      await workbook.xlsx.readFile(absolutePath);
+      return workbook;
+    } catch {
+      throw new Error(WORKBENCH_ERRORS.SPREADSHEET_FORMAT_UNSUPPORTED);
+    }
+  }
+
+  async inspect(workspaceId: string, relativePath: string): Promise<SpreadsheetInspectResult> {
     const { relativePath: cleanRel, absolutePath } = resolveWorkspacePath(
       this.workspaceStore,
       workspaceId,
@@ -56,47 +102,300 @@ export class SpreadsheetEngine {
     }
 
     const format = this.detectFormat(cleanRel);
-    let workbook: XLSX.WorkBook;
+    let sheetNames: string[] = [];
+    let rowCount = 0;
+    let columnCount = 0;
+    let columns: string[] = [];
+    let sampleRows: Record<string, unknown>[] = [];
+    const warnings: string[] = ["Type inferences are estimates based on cell inspection."];
 
-    try {
-      if (format === "csv") {
-        const content = readFileSync(absolutePath, "utf-8");
-        workbook = XLSX.read(content, { type: "string", raw: false });
-      } else if (format === "tsv") {
-        const content = readFileSync(absolutePath, "utf-8");
-        workbook = XLSX.read(content, { type: "string", FS: "\t", raw: false });
-      } else {
-        const buffer = readFileSync(absolutePath);
-        workbook = XLSX.read(buffer, { type: "buffer", cellFormula: false, cellHTML: false });
+    if (format === "csv" || format === "tsv") {
+      sheetNames = ["Sheet1"];
+      const delimiter = format === "csv" ? "," : "\t";
+      const content = readFileSync(absolutePath, "utf-8");
+      const { headers, rows } = this.parseCsvTsvContent(content, delimiter);
+
+      columns = headers;
+      rowCount = rows.length;
+      columnCount = headers.length;
+
+      // Bound inspection to first 500 rows
+      const boundedRows = rows.slice(0, 500);
+      if (rows.length > 500) {
+        warnings.push("Type inference and statistics estimated from first 500 rows.");
       }
-    } catch (e: any) {
-      if (e?.message === WORKBENCH_ERRORS.SPREADSHEET_LIMIT_EXCEEDED) throw e;
-      throw new Error(WORKBENCH_ERRORS.SPREADSHEET_FORMAT_UNSUPPORTED);
-    }
 
-    return { workbook, format, cleanRel };
+      sampleRows = boundedRows.slice(0, 5).map((r) => {
+        const rowObj: Record<string, unknown> = {};
+        columns.forEach((col, idx) => {
+          rowObj[col] = r[idx] ?? null;
+        });
+        return rowObj;
+      });
+
+      const inferredTypes = this.inferTypesFromRows(
+        boundedRows.map((r) => {
+          const obj: Record<string, unknown> = {};
+          columns.forEach((col, idx) => {
+            obj[col] = r[idx] ?? null;
+          });
+          return obj;
+        }),
+        columns
+      );
+
+      return {
+        file: cleanRel,
+        format,
+        sheetNames,
+        rowCount,
+        columnCount,
+        columns,
+        inferredTypes: inferredTypes.types,
+        emptyCells: inferredTypes.emptyCells,
+        sampleRows,
+        warnings
+      };
+    } else {
+      const workbook = await this.loadXlsxWorkbook(absolutePath);
+      sheetNames = workbook.worksheets.map((s) => s.name);
+      if (sheetNames.length === 0) {
+        throw new Error(WORKBENCH_ERRORS.SPREADSHEET_FORMAT_UNSUPPORTED);
+      }
+
+      const sheet = workbook.worksheets[0];
+      rowCount = Math.max(0, sheet.rowCount - 1); // Exclude header row
+
+      const headerRow = sheet.getRow(1);
+      const headerValues = Array.isArray(headerRow.values) ? headerRow.values.slice(1) : [];
+      columns = headerValues.map((h, i) => (h !== null && h !== undefined && String(h).trim() !== "" ? String(h) : `col_${i + 1}`));
+      columnCount = columns.length;
+
+      // Inspect at most 500 rows
+      const inspectRowCount = Math.min(rowCount, 500);
+      if (rowCount > 500) {
+        warnings.push("Type inference and statistics estimated from first 500 rows.");
+      }
+
+      const inspectedRows: Record<string, unknown>[] = [];
+      for (let r = 2; r <= inspectRowCount + 1; r++) {
+        const row = sheet.getRow(r);
+        const rowObj: Record<string, unknown> = {};
+        columns.forEach((col, cIdx) => {
+          const cellVal = row.getCell(cIdx + 1).value;
+          rowObj[col] = this.extractCellValue(cellVal);
+        });
+        inspectedRows.push(rowObj);
+      }
+
+      sampleRows = inspectedRows.slice(0, 5);
+      const inferredTypes = this.inferTypesFromRows(inspectedRows, columns);
+
+      return {
+        file: cleanRel,
+        format,
+        sheetNames,
+        rowCount,
+        columnCount,
+        columns,
+        inferredTypes: inferredTypes.types,
+        emptyCells: inferredTypes.emptyCells,
+        sampleRows,
+        warnings
+      };
+    }
   }
 
-  inspect(workspaceId: string, relativePath: string): SpreadsheetInspectResult {
-    const { workbook, format, cleanRel } = this.readWorkbook(workspaceId, relativePath);
-    const sheetNames = workbook.SheetNames;
-    if (sheetNames.length === 0) {
-      throw new Error(WORKBENCH_ERRORS.SPREADSHEET_FORMAT_UNSUPPORTED);
+  async listSheets(workspaceId: string, relativePath: string): Promise<string[]> {
+    const { relativePath: cleanRel, absolutePath } = resolveWorkspacePath(
+      this.workspaceStore,
+      workspaceId,
+      relativePath
+    );
+
+    const format = this.detectFormat(cleanRel);
+    if (format === "csv" || format === "tsv") {
+      return ["Sheet1"];
     }
 
-    const firstSheet = workbook.Sheets[sheetNames[0]];
-    const rawRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(firstSheet, {
-      defval: null,
-      raw: true
-    });
+    const workbook = await this.loadXlsxWorkbook(absolutePath);
+    return workbook.worksheets.map((s) => s.name);
+  }
 
-    const columns: string[] = [];
-    if (rawRows.length > 0) {
-      for (const key of Object.keys(rawRows[0])) {
-        if (!columns.includes(key)) columns.push(key);
+  async readRange(
+    workspaceId: string,
+    relativePath: string,
+    options: ReadRangeOptions = {}
+  ): Promise<RangeResult> {
+    const { relativePath: cleanRel, absolutePath } = resolveWorkspacePath(
+      this.workspaceStore,
+      workspaceId,
+      relativePath
+    );
+
+    const stats = statSync(absolutePath);
+    if (stats.size > SPREADSHEET_LIMITS.maxInputBytes) {
+      throw new Error(WORKBENCH_ERRORS.SPREADSHEET_LIMIT_EXCEEDED);
+    }
+
+    const format = this.detectFormat(cleanRel);
+    const warnings: string[] = [];
+    let truncated = false;
+
+    if (format === "csv" || format === "tsv") {
+      const delimiter = format === "csv" ? "," : "\t";
+      const content = readFileSync(absolutePath, "utf-8");
+      const { headers, rows: allDataRows } = this.parseCsvTsvContent(content, delimiter);
+
+      const totalRows = allDataRows.length;
+      let startRow = options.startRow ?? 0;
+      let endRow = options.endRow ?? totalRows;
+
+      if (startRow < 0 || endRow < startRow) {
+        throw new Error(WORKBENCH_ERRORS.SPREADSHEET_RANGE_INVALID);
+      }
+
+      let requestedColumns = options.columns;
+      if (!requestedColumns || requestedColumns.length === 0) {
+        requestedColumns = headers;
+      }
+
+      // PRE-CALCULATE BOUNDS BEFORE ROW OBJECT MATERIALIZATION
+      let effectiveColumnCount = requestedColumns.length;
+      if (effectiveColumnCount > SPREADSHEET_LIMITS.maxColumnsPerRead) {
+        effectiveColumnCount = SPREADSHEET_LIMITS.maxColumnsPerRead;
+        truncated = true;
+        warnings.push(`Columns capped at ${SPREADSHEET_LIMITS.maxColumnsPerRead}.`);
+      }
+      const columns = requestedColumns.slice(0, effectiveColumnCount);
+
+      const maxAllowedRows = Math.min(
+        SPREADSHEET_LIMITS.maxRowsPerRead,
+        Math.floor(SPREADSHEET_LIMITS.maxCellsPerRead / Math.max(1, effectiveColumnCount))
+      );
+
+      const requestedRowCount = endRow - startRow;
+      if (requestedRowCount > maxAllowedRows) {
+        truncated = true;
+        warnings.push(`Rows capped at ${maxAllowedRows} due to cell/row limits.`);
+      }
+
+      const effectiveEndRow = Math.min(endRow, startRow + maxAllowedRows);
+
+      // Materialize ONLY the bounded row slice
+      const slicedRows = allDataRows.slice(startRow, effectiveEndRow);
+      const rowObjects = slicedRows.map((r) => {
+        const rowObj: Record<string, unknown> = {};
+        columns.forEach((col) => {
+          const colIdx = headers.indexOf(col);
+          rowObj[col] = colIdx >= 0 ? r[colIdx] ?? null : null;
+        });
+        return rowObj;
+      });
+
+      return {
+        sheet: "Sheet1",
+        columns,
+        rows: rowObjects,
+        totalRows,
+        truncated,
+        warnings
+      };
+    } else {
+      const workbook = await this.loadXlsxWorkbook(absolutePath);
+      const targetSheetName = options.sheet || workbook.worksheets[0]?.name;
+      const sheet = targetSheetName ? workbook.getWorksheet(targetSheetName) : undefined;
+      if (!sheet) {
+        throw new Error(WORKBENCH_ERRORS.SPREADSHEET_RANGE_INVALID);
+      }
+
+      const totalRows = Math.max(0, sheet.rowCount - 1);
+      let startRow = options.startRow ?? 0;
+      let endRow = options.endRow ?? totalRows;
+
+      if (startRow < 0 || endRow < startRow) {
+        throw new Error(WORKBENCH_ERRORS.SPREADSHEET_RANGE_INVALID);
+      }
+
+      const headerRow = sheet.getRow(1);
+      const headerValues = Array.isArray(headerRow.values) ? headerRow.values.slice(1) : [];
+      const headers = headerValues.map((h, i) => (h !== null && h !== undefined && String(h).trim() !== "" ? String(h) : `col_${i + 1}`));
+
+      let requestedColumns = options.columns;
+      if (!requestedColumns || requestedColumns.length === 0) {
+        requestedColumns = headers;
+      }
+
+      // PRE-CALCULATE BOUNDS BEFORE ROW MATERIALIZATION
+      let effectiveColumnCount = requestedColumns.length;
+      if (effectiveColumnCount > SPREADSHEET_LIMITS.maxColumnsPerRead) {
+        effectiveColumnCount = SPREADSHEET_LIMITS.maxColumnsPerRead;
+        truncated = true;
+        warnings.push(`Columns capped at ${SPREADSHEET_LIMITS.maxColumnsPerRead}.`);
+      }
+      const columns = requestedColumns.slice(0, effectiveColumnCount);
+
+      const maxAllowedRows = Math.min(
+        SPREADSHEET_LIMITS.maxRowsPerRead,
+        Math.floor(SPREADSHEET_LIMITS.maxCellsPerRead / Math.max(1, effectiveColumnCount))
+      );
+
+      const requestedRowCount = endRow - startRow;
+      if (requestedRowCount > maxAllowedRows) {
+        truncated = true;
+        warnings.push(`Rows capped at ${maxAllowedRows} due to cell/row limits.`);
+      }
+
+      const effectiveEndRow = Math.min(endRow, startRow + maxAllowedRows);
+
+      // Materialize ONLY rows from (startRow + 2) to (effectiveEndRow + 1)
+      const rowObjects: Record<string, unknown>[] = [];
+      const startExcelRow = startRow + 2; // Row 1 is header
+      const endExcelRow = effectiveEndRow + 1;
+
+      for (let r = startExcelRow; r <= endExcelRow && r <= sheet.rowCount; r++) {
+        const row = sheet.getRow(r);
+        const rowObj: Record<string, unknown> = {};
+        columns.forEach((col) => {
+          const colIdx = headers.indexOf(col);
+          if (colIdx >= 0) {
+            rowObj[col] = this.extractCellValue(row.getCell(colIdx + 1).value);
+          } else {
+            rowObj[col] = null;
+          }
+        });
+        rowObjects.push(rowObj);
+      }
+
+      return {
+        sheet: targetSheetName,
+        columns,
+        rows: rowObjects,
+        totalRows,
+        truncated,
+        warnings
+      };
+    }
+  }
+
+  private extractCellValue(val: ExcelJS.CellValue): unknown {
+    if (val === null || val === undefined) return null;
+    if (typeof val === "object") {
+      if (val instanceof Date) return val.toISOString();
+      if ("result" in val && val.result !== undefined) {
+        return this.extractCellValue(val.result as any);
+      }
+      if ("text" in val && typeof val.text === "string") {
+        return val.text;
       }
     }
+    return val;
+  }
 
+  private inferTypesFromRows(
+    rows: Record<string, unknown>[],
+    columns: string[]
+  ): { types: Record<string, ColumnType>; emptyCells: number } {
     let emptyCells = 0;
     const typeCounts: Record<string, Record<ColumnType, number>> = {};
     for (const col of columns) {
@@ -112,7 +411,7 @@ export class SpreadsheetEngine {
       };
     }
 
-    for (const row of rawRows) {
+    for (const row of rows) {
       for (const col of columns) {
         const val = row[col];
         if (val === null || val === undefined || val === "") {
@@ -149,147 +448,23 @@ export class SpreadsheetEngine {
       }
     }
 
-    const inferredTypes: Record<string, ColumnType> = {};
+    const types: Record<string, ColumnType> = {};
     for (const col of columns) {
       const counts = typeCounts[col];
       const nonAttr = Object.entries(counts).filter(([k, v]) => k !== "EMPTY" && v > 0);
 
       if (nonAttr.length === 0) {
-        inferredTypes[col] = "EMPTY";
+        types[col] = "EMPTY";
       } else if (nonAttr.length === 1) {
-        inferredTypes[col] = nonAttr[0][0] as ColumnType;
-      } else if (
-        nonAttr.length === 2 &&
-        counts.INTEGER > 0 &&
-        counts.FLOAT > 0
-      ) {
-        inferredTypes[col] = "FLOAT";
+        types[col] = nonAttr[0][0] as ColumnType;
+      } else if (nonAttr.length === 2 && counts.INTEGER > 0 && counts.FLOAT > 0) {
+        types[col] = "FLOAT";
       } else {
-        inferredTypes[col] = "MIXED";
+        types[col] = "MIXED";
       }
     }
 
-    const sampleRows = rawRows.slice(0, 5);
-
-    return {
-      file: cleanRel,
-      format,
-      sheetNames,
-      rowCount: rawRows.length,
-      columnCount: columns.length,
-      columns,
-      inferredTypes,
-      emptyCells,
-      sampleRows,
-      warnings: ["Type inferences are estimates based on cell inspection."]
-    };
-  }
-
-  listSheets(workspaceId: string, relativePath: string): string[] {
-    const { workbook } = this.readWorkbook(workspaceId, relativePath);
-    return workbook.SheetNames;
-  }
-
-  readRange(
-    workspaceId: string,
-    relativePath: string,
-    options: ReadRangeOptions = {}
-  ): RangeResult {
-    const { workbook } = this.readWorkbook(workspaceId, relativePath);
-    const targetSheetName = options.sheet || workbook.SheetNames[0];
-    if (!workbook.SheetNames.includes(targetSheetName)) {
-      throw new Error(WORKBENCH_ERRORS.SPREADSHEET_RANGE_INVALID);
-    }
-
-    const sheet = workbook.Sheets[targetSheetName];
-
-    // Decode range to determine total rows
-    const range = sheet["!ref"] ? XLSX.utils.decode_range(sheet["!ref"]) : { s: { r: 0, c: 0 }, e: { r: 0, c: 0 } };
-    const sheetRows = range.e.r >= range.s.r ? range.e.r - range.s.r + 1 : 0;
-    const totalRows = Math.max(0, sheetRows - 1); // Exclude header row
-
-    let startRow = options.startRow ?? 0;
-    let endRow = options.endRow ?? totalRows;
-
-    if (startRow < 0 || endRow < startRow) {
-      throw new Error(WORKBENCH_ERRORS.SPREADSHEET_RANGE_INVALID);
-    }
-
-    // Always extract real header row from top row (r: range.s.r)
-    const headerRowRows = XLSX.utils.sheet_to_json<string[]>(sheet, {
-      header: 1,
-      range: {
-        s: { r: range.s.r, c: range.s.c },
-        e: { r: range.s.r, c: range.e.c }
-      }
-    });
-
-    const headers: string[] = headerRowRows.length > 0 && Array.isArray(headerRowRows[0])
-      ? headerRowRows[0].map((h, i) => (h !== null && h !== undefined && String(h).trim() !== "" ? String(h) : `col_${i + 1}`))
-      : [];
-
-    const requestedRowCount = endRow - startRow;
-    let truncated = false;
-    const warnings: string[] = [];
-
-    if (requestedRowCount > SPREADSHEET_LIMITS.maxRowsPerRead) {
-      truncated = true;
-      warnings.push(`Rows capped at ${SPREADSHEET_LIMITS.maxRowsPerRead}.`);
-    }
-
-    // Materialize ONLY requested slice using headers
-    const fetchStart = range.s.r + 1 + startRow; // Skip header row
-    const fetchEnd = Math.min(range.e.r, range.s.r + 1 + Math.min(endRow, startRow + SPREADSHEET_LIMITS.maxRowsPerRead) - 1);
-
-    let rawDataRows: Record<string, unknown>[] = [];
-    if (fetchStart <= range.e.r && fetchStart <= fetchEnd) {
-      rawDataRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, {
-        header: headers,
-        defval: null,
-        raw: true,
-        range: {
-          s: { r: fetchStart, c: range.s.c },
-          e: { r: fetchEnd, c: range.e.c }
-        }
-      });
-    }
-
-    let sliced = rawDataRows;
-
-    let columns = options.columns;
-    if (!columns || columns.length === 0) {
-      columns = headers.length > 0 ? headers : (sliced.length > 0 ? Object.keys(sliced[0]) : []);
-    }
-
-    if (columns.length > SPREADSHEET_LIMITS.maxColumnsPerRead) {
-      columns = columns.slice(0, SPREADSHEET_LIMITS.maxColumnsPerRead);
-      truncated = true;
-      warnings.push(`Columns capped at ${SPREADSHEET_LIMITS.maxColumnsPerRead}.`);
-    }
-
-    if (sliced.length * columns.length > SPREADSHEET_LIMITS.maxCellsPerRead) {
-      const maxRows = Math.floor(SPREADSHEET_LIMITS.maxCellsPerRead / columns.length);
-      sliced = sliced.slice(0, maxRows);
-      truncated = true;
-      warnings.push(`Cells capped at ${SPREADSHEET_LIMITS.maxCellsPerRead}.`);
-    }
-
-    const rows = sliced.map((row) => {
-      const filteredRow: Record<string, unknown> = {};
-      for (const col of columns!) {
-        filteredRow[col] = row[col] ?? null;
-      }
-      return filteredRow;
-    });
-
-    return {
-      sheet: targetSheetName,
-      columns,
-      rows,
-      totalRows,
-      truncated,
-      warnings
-    };
+    return { types, emptyCells };
   }
 
   filter(
@@ -443,14 +618,35 @@ export class SpreadsheetEngine {
 
   exportCsv(rows: Record<string, unknown>[]): string {
     if (rows.length === 0) return "";
-    const sheet = XLSX.utils.json_to_sheet(rows);
-    return XLSX.utils.sheet_to_csv(sheet);
+    const headers = Object.keys(rows[0]);
+    const escape = (val: unknown) => {
+      const str = String(val ?? "");
+      if (str.includes(",") || str.includes('"') || str.includes("\n")) {
+        return `"${str.replace(/"/g, '""')}"`;
+      }
+      return str;
+    };
+
+    const lines = [headers.join(",")];
+    for (const row of rows) {
+      lines.push(headers.map((h) => escape(row[h])).join(","));
+    }
+    return lines.join("\n");
   }
 
-  exportXlsx(rows: Record<string, unknown>[], sheetName = "Sheet1"): Buffer {
-    const sheet = XLSX.utils.json_to_sheet(rows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, sheet, sheetName);
-    return XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+  async exportXlsx(rows: Record<string, unknown>[], sheetName = "Sheet1"): Promise<Buffer> {
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet(sheetName);
+
+    if (rows.length > 0) {
+      const headers = Object.keys(rows[0]);
+      sheet.addRow(headers);
+      for (const row of rows) {
+        sheet.addRow(headers.map((h) => row[h] ?? null));
+      }
+    }
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    return Buffer.from(buffer);
   }
 }

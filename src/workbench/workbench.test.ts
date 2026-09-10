@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync } from "node:
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
-import XLSX from "xlsx";
+import ExcelJS from "exceljs";
 import { WorkspaceStore } from "../workspaces/workspaceStore.js";
 import { ArtifactStore } from "../workspaces/artifactStore.js";
 import { DocumentEngine } from "./documentEngine.js";
@@ -91,20 +91,59 @@ test("DOCUMENT SEARCH BOUNDS: maxResults clamped to 100 & contextChars clamped t
   cleanupTestEnvironment();
 });
 
-test("SPREADSHEET LIMIT TRUNCATION: >10,000 rows & maxCells truncation", () => {
+test("SPREADSHEET LIMIT TRUNCATION: >10,000 rows, maxColumnsPerRead, & maxCellsPerRead real tests", async () => {
   const { workspaceStore, workspace } = setupTestEnvironment();
   const engine = new SpreadsheetEngine(workspaceStore);
 
+  // 1. >10,000 rows test
   const lines: string[] = ["id,val"];
   for (let i = 1; i <= 10005; i++) {
     lines.push(`${i},test_${i}`);
   }
   workspaceStore.writeFile(workspace.id, "big_sheet.csv", lines.join("\n"));
 
-  const range = engine.readRange(workspace.id, "big_sheet.csv");
+  const range = await engine.readRange(workspace.id, "big_sheet.csv");
   assert.equal(range.totalRows, 10005);
   assert.equal(range.rows.length, 10000);
   assert.equal(range.truncated, true);
+
+  // 2. maxColumnsPerRead (>200 columns => capped at 200)
+  const cols = Array.from({ length: 250 }, (_, i) => `col_${i + 1}`);
+  const colLine = cols.join(",");
+  const valLine = cols.map((_, i) => `val_${i + 1}`).join(",");
+  workspaceStore.writeFile(workspace.id, "wide_sheet.csv", `${colLine}\n${valLine}`);
+
+  const wideRange = await engine.readRange(workspace.id, "wide_sheet.csv");
+  assert.equal(wideRange.columns.length, 200);
+  assert.equal(wideRange.truncated, true);
+
+  // 3. maxCellsPerRead test: 100 columns x 5000 rows = 500,000 cells requested => capped at 250,000 cells (2500 rows)
+  const hundredCols = Array.from({ length: 100 }, (_, i) => `c_${i + 1}`);
+  const hundredHeader = hundredCols.join(",");
+  const cellLines = [hundredHeader];
+  const sampleDataLine = hundredCols.map(() => "1").join(",");
+  for (let i = 0; i < 5000; i++) {
+    cellLines.push(sampleDataLine);
+  }
+  workspaceStore.writeFile(workspace.id, "cells_sheet.csv", cellLines.join("\n"));
+
+  const cellsRange = await engine.readRange(workspace.id, "cells_sheet.csv");
+  assert.equal(cellsRange.columns.length, 100);
+  assert.equal(cellsRange.rows.length, 2500); // 100 * 2500 = 250,000 cells max
+  assert.equal(cellsRange.truncated, true);
+
+  // 4. XLSX export and roundtrip re-read test
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("Sheet1");
+  ws.addRow(["id", "name"]);
+  ws.addRow([1, "Alice"]);
+  ws.addRow([2, "Bob"]);
+  const xlsxBuf = Buffer.from(await wb.xlsx.writeBuffer());
+  workspaceStore.writeFile(workspace.id, "roundtrip.xlsx", xlsxBuf);
+
+  const reInspect = await engine.inspect(workspace.id, "roundtrip.xlsx");
+  assert.equal(reInspect.format, "xlsx");
+  assert.equal(reInspect.rowCount, 2);
 
   cleanupTestEnvironment();
 });
