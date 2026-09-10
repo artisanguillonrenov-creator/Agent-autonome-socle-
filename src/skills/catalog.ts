@@ -6,7 +6,8 @@ export const CANONICAL_SKILL_IDS = [
 
 export type CanonicalSkillId = typeof CANONICAL_SKILL_IDS[number];
 const internal = new Set(["dispatch_capability","approve_action","notify_user","delegate_specialist","execute_parallel","consolidate_results","external_service","checkpoint_task","restore_task"]);
-const available = new Set(["inspect_task","cancel_task","schedule_task","monitor_condition","web_search","deep_research","file_management","software_development","execute_workflow","manage_skill","checkpoint_task","restore_task"]);
+const available = new Set(["inspect_task","cancel_task","schedule_task","monitor_condition","web_search","deep_research","file_management","software_development","execute_workflow","manage_skill","checkpoint_task","restore_task","document_work","spreadsheet_work","data_analysis","database_query","report_generation"]);
+const workspaceBound = new Set(["file_management","document_work","spreadsheet_work","database_query","report_generation"]);
 const workflows = new Set(["compare_sources","monitor_web"]);
 const categories: Record<string, SkillCategory> = {
   web_search:"Recherche",deep_research:"Recherche",knowledge_search:"Recherche",compare_sources:"Workflows",monitor_web:"Workflows",
@@ -17,6 +18,7 @@ const categories: Record<string, SkillCategory> = {
 const descriptions: Partial<Record<CanonicalSkillId,string>> = {
   inspect_task:"Inspecte factuellement une opération, un plan ou une programmation.", cancel_task:"Annule une tâche ou demande son annulation sans exagérer le résultat.", schedule_task:"Crée et administre rappels et tâches programmées.", monitor_condition:"Surveille périodiquement une condition avec le moteur WATCH.",
   web_search:"Recherche des informations actuelles sur le Web.", deep_research:"Effectue une recherche approfondie et documentée.", file_management:"Liste, lit, écrit ou supprime un fichier dans un workspace sécurisé.", software_development:"Délègue une modification logicielle à la Software Factory.", execute_workflow:"Exécute un workflow réutilisable actif.", manage_skill:"Administre les préférences de skills et le cycle de vie des workflows.", compare_sources:"Compare plusieurs sources sur un sujet.", monitor_web:"Surveille périodiquement une information Web.",
+  document_work:"Lit et recherche dans un document (txt/markdown/json/csv/html/pdf) d'un workspace, résultats bornés.", spreadsheet_work:"Inspecte, liste les feuilles et lit/filtre/agrège des plages bornées d'un classeur CSV/TSV/XLSX d'un workspace.", data_analysis:"Calcule des statistiques bornées (describe, agrégats, groupBy, distribution, corrélation, séries temporelles) sur des lignes fournies ou lues depuis un workspace.", database_query:"Liste les tables, décrit un schéma ou exécute une requête SELECT strictement en lecture seule sur une base SQLite d'un workspace.", report_generation:"Génère un rapport (markdown/json/csv) borné à partir de sections/tableaux/constats fournis, persisté via l'ArtifactStore du workspace.",
 };
 
 function metadata(id: CanonicalSkillId): SkillDefinition {
@@ -26,7 +28,7 @@ function metadata(id: CanonicalSkillId): SkillDefinition {
   const exposure:SkillExposure=isInternal||kind==="FUTURE"?"NEVER":"DYNAMIC";
   const serviceCapability=["deep_research","file_management","software_development"].includes(id)?id:undefined;
   const executionTarget:SkillExecutionTarget=isInternal?"INTERNAL":isWorkflow||id==="execute_workflow"?"WORKFLOW":serviceCapability?"SERVICE_CAPABILITY":"LOCAL_HANDLER";
-  return {id,name:id,displayName:id.split("_").map(x=>x[0].toUpperCase()+x.slice(1)).join(" "),description:descriptions[id]??`Capacité Jarvis ${id}.`,category:categories[id]??(kind==="FUTURE"?"Futur":isInternal?"Interne":"Contrôle"),kind,availability,exposure,risk:id==="software_development"||id==="file_management"?"MEDIUM":"LOW",executionTarget,serviceCapability,aliases:[],tags:id.split("_"),requiresWorkspace:id==="file_management",requiresConnector:false,unavailableReason:availability==="UNAVAILABLE"?"Capability planned for a future release":undefined,defaultEnabled:true,argsHint:"{}",parameters:{type:"object",properties:{},additionalProperties:false}};
+  return {id,name:id,displayName:id.split("_").map(x=>x[0].toUpperCase()+x.slice(1)).join(" "),description:descriptions[id]??`Capacité Jarvis ${id}.`,category:categories[id]??(kind==="FUTURE"?"Futur":isInternal?"Interne":"Contrôle"),kind,availability,exposure,risk:id==="software_development"||workspaceBound.has(id)?"MEDIUM":"LOW",executionTarget,serviceCapability,aliases:[],tags:id.split("_"),requiresWorkspace:workspaceBound.has(id),requiresConnector:false,unavailableReason:availability==="UNAVAILABLE"?"Capability planned for a future release":undefined,defaultEnabled:true,argsHint:"{}",parameters:{type:"object",properties:{},additionalProperties:false}};
 }
 
 /** The code-owned source of truth. Runtime availability may only narrow these declarations. */

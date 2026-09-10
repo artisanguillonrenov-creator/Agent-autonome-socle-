@@ -693,18 +693,32 @@ export class SpreadsheetEngine {
           case "endsWith":
             if (!String(val ?? "").toLowerCase().endsWith(String(targetVal ?? "").toLowerCase())) return false;
             break;
-          case "greaterThan":
-            if (Number(val) <= Number(targetVal)) return false;
+          case "greaterThan": {
+            // NaN comparisons (`<=`, `<`, etc.) are always false in JS, so a
+            // naive `if (Number(val) <= Number(targetVal)) return false`
+            // would let a non-numeric cell ("n/a", "") implicitly match
+            // EVERY numeric operator at once. Requiring both sides to be
+            // finite makes a non-numeric cell deterministically not match
+            // any of greaterThan/greaterOrEqual/lessThan/lessOrEqual.
+            const a = Number(val), b = Number(targetVal);
+            if (!Number.isFinite(a) || !Number.isFinite(b) || a <= b) return false;
             break;
-          case "greaterOrEqual":
-            if (Number(val) < Number(targetVal)) return false;
+          }
+          case "greaterOrEqual": {
+            const a = Number(val), b = Number(targetVal);
+            if (!Number.isFinite(a) || !Number.isFinite(b) || a < b) return false;
             break;
-          case "lessThan":
-            if (Number(val) >= Number(targetVal)) return false;
+          }
+          case "lessThan": {
+            const a = Number(val), b = Number(targetVal);
+            if (!Number.isFinite(a) || !Number.isFinite(b) || a >= b) return false;
             break;
-          case "lessOrEqual":
-            if (Number(val) > Number(targetVal)) return false;
+          }
+          case "lessOrEqual": {
+            const a = Number(val), b = Number(targetVal);
+            if (!Number.isFinite(a) || !Number.isFinite(b) || a > b) return false;
             break;
+          }
           case "isEmpty":
             if (val !== null && val !== undefined && val !== "") return false;
             break;
@@ -806,18 +820,32 @@ export class SpreadsheetEngine {
 
     if (validNums.length === 0) return 0;
 
+    // Number.isFinite on each input doesn't guarantee a finite result:
+    // summing/averaging can still overflow to Infinity (e.g. two values
+    // near Number.MAX_VALUE). MIN/MAX can't overflow (they return one of
+    // the already-finite inputs) but are checked too for a uniform,
+    // documented guarantee across all four aggregates.
+    let result: number;
     switch (fn) {
       case "SUM":
-        return validNums.reduce((a, b) => a + b, 0);
+        result = validNums.reduce((a, b) => a + b, 0);
+        break;
       case "MEAN":
-        return validNums.reduce((a, b) => a + b, 0) / validNums.length;
+        result = validNums.reduce((a, b) => a + b, 0) / validNums.length;
+        break;
       case "MIN":
-        return Math.min(...validNums);
+        result = Math.min(...validNums);
+        break;
       case "MAX":
-        return Math.max(...validNums);
+        result = Math.max(...validNums);
+        break;
       default:
         return 0;
     }
+    if (!Number.isFinite(result)) {
+      throw new Error(WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED);
+    }
+    return result;
   }
 
   exportCsv(rows: Record<string, unknown>[]): string {

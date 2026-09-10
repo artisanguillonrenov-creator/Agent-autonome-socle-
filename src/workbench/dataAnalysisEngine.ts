@@ -23,6 +23,23 @@ export const DATASET_LIMITS = {
   maxResultRows: 1_000
 };
 
+/**
+ * True ISO-8601 week + week-year (Thursday-anchored): shifts the date to
+ * the Thursday of its own week, then the ISO year is that Thursday's
+ * calendar year and the week number counts from that year's Jan 1st.
+ * This is what makes 2021-01-01 (a Friday) fall in 2020-W53, not "2021-W01"
+ * as a naive Jan-1-anchored calculation would produce.
+ */
+function isoWeekKey(date: Date): string {
+  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const dayNum = d.getUTCDay() || 7; // Sunday=0 -> 7, so Mon=1..Sun=7
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+  const isoYear = d.getUTCFullYear();
+  const yearStart = Date.UTC(isoYear, 0, 1);
+  const isoWeek = Math.ceil(((d.getTime() - yearStart) / 86400000 + 1) / 7);
+  return `${isoYear}-W${String(isoWeek).padStart(2, "0")}`;
+}
+
 export class DataAnalysisEngine {
   private validateDataset(rows: Record<string, unknown>[]): string[] {
     if (rows.length > DATASET_LIMITS.maxRowsInMemory) {
@@ -198,22 +215,36 @@ export class DataAnalysisEngine {
     return nums;
   }
 
+  /**
+   * Number.isFinite on inputs alone doesn't guarantee a finite output: two
+   * finite values can still overflow to Infinity/NaN through addition,
+   * squaring, or division (e.g. Number.MAX_VALUE + Number.MAX_VALUE).
+   * Every public numeric result is checked here rather than trusting the
+   * arithmetic to stay in range.
+   */
+  private assertFiniteResult(value: number): number {
+    if (!Number.isFinite(value)) {
+      throw new Error(WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED);
+    }
+    return value;
+  }
+
   sum(rows: Record<string, unknown>[], column: string): number {
     const nums = this.getNumericValues(rows, column);
-    return nums.reduce((a, b) => a + b, 0);
+    return this.assertFiniteResult(nums.reduce((a, b) => a + b, 0));
   }
 
   mean(rows: Record<string, unknown>[], column: string): number {
     const nums = this.getNumericValues(rows, column);
     if (nums.length === 0) return 0;
-    return nums.reduce((a, b) => a + b, 0) / nums.length;
+    return this.assertFiniteResult(nums.reduce((a, b) => a + b, 0) / nums.length);
   }
 
   median(rows: Record<string, unknown>[], column: string): number {
     const nums = this.getNumericValues(rows, column).sort((a, b) => a - b);
     if (nums.length === 0) return 0;
     const mid = Math.floor(nums.length / 2);
-    return nums.length % 2 !== 0 ? nums[mid] : (nums[mid - 1] + nums[mid]) / 2;
+    return this.assertFiniteResult(nums.length % 2 !== 0 ? nums[mid] : (nums[mid - 1] + nums[mid]) / 2);
   }
 
   min(rows: Record<string, unknown>[], column: string): number {
@@ -231,9 +262,11 @@ export class DataAnalysisEngine {
   stddev(rows: Record<string, unknown>[], column: string): number {
     const nums = this.getNumericValues(rows, column);
     if (nums.length <= 1) return 0;
-    const avg = nums.reduce((a, b) => a + b, 0) / nums.length;
-    const variance = nums.reduce((a, b) => a + Math.pow(b - avg, 2), 0) / (nums.length - 1);
-    return Math.sqrt(variance);
+    const avg = this.assertFiniteResult(nums.reduce((a, b) => a + b, 0) / nums.length);
+    const variance = this.assertFiniteResult(
+      nums.reduce((a, b) => a + Math.pow(b - avg, 2), 0) / (nums.length - 1)
+    );
+    return this.assertFiniteResult(Math.sqrt(variance));
   }
 
   groupBy(
@@ -512,11 +545,11 @@ export class DataAnalysisEngine {
       }
     };
 
-    const q1 = calcQuartile(0.25);
-    const q3 = calcQuartile(0.75);
-    const iqr = q3 - q1;
-    const lowerBound = q1 - 1.5 * iqr;
-    const upperBound = q3 + 1.5 * iqr;
+    const q1 = this.assertFiniteResult(calcQuartile(0.25));
+    const q3 = this.assertFiniteResult(calcQuartile(0.75));
+    const iqr = this.assertFiniteResult(q3 - q1);
+    const lowerBound = this.assertFiniteResult(q1 - 1.5 * iqr);
+    const upperBound = this.assertFiniteResult(q3 + 1.5 * iqr);
 
     const outliersList = numericVals.filter((v) => v < lowerBound || v > upperBound);
 
@@ -589,7 +622,7 @@ export class DataAnalysisEngine {
     const num = n * sumAB - sumA * sumB;
     const den = Math.sqrt((n * sumA2 - sumA * sumA) * (n * sumB2 - sumB * sumB));
 
-    const coefficient = den === 0 ? 0 : Number((num / den).toFixed(4));
+    const coefficient = den === 0 ? 0 : this.assertFiniteResult(Number((num / den).toFixed(4)));
 
     return {
       columnA,
@@ -635,10 +668,7 @@ export class DataAnalysisEngine {
       } else if (granularity === "YEAR") {
         key = `${year}`;
       } else if (granularity === "WEEK") {
-        const firstDayOfYear = new Date(Date.UTC(year, 0, 1));
-        const pastDaysOfYear = (dateObj.getTime() - firstDayOfYear.getTime()) / 86400000;
-        const weekNum = Math.ceil((pastDaysOfYear + firstDayOfYear.getUTCDay() + 1) / 7);
-        key = `${year}-W${String(weekNum).padStart(2, "0")}`;
+        key = isoWeekKey(dateObj);
       }
 
       if (!groups.has(key)) groups.set(key, []);
@@ -669,8 +699,8 @@ export class DataAnalysisEngine {
 
       if (valueColumn) {
         if (count > 0) {
-          const sum = vals.reduce((a, b) => a + b, 0);
-          const mean = sum / count;
+          const sum = this.assertFiniteResult(vals.reduce((a, b) => a + b, 0));
+          const mean = this.assertFiniteResult(sum / count);
           const min = Math.min(...vals);
           const max = Math.max(...vals);
 

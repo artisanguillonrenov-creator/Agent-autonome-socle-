@@ -181,6 +181,124 @@ test("DATA ANALYSIS BOUNDS & COUNT_NON_NULL VALIDATION: timeSeries, groupBy, dis
   assert.equal(tsRes.truncated, true);
 });
 
+test("TIME SERIES WEEK: true ISO-8601 week + week-year, not a naive Jan-1-anchored count", () => {
+  const engine = new DataAnalysisEngine();
+
+  // The canonical example: 2021-01-01 is a Friday, and per ISO-8601 it
+  // belongs to the last week of 2020 (week 53), not "2021-W01" as a naive
+  // day-of-year/7 calculation would produce.
+  const oneRow = (dateStr: string) => engine.timeSeriesSummary([{ date: dateStr }], "date", "WEEK").points[0].period;
+
+  assert.equal(oneRow("2021-01-01T00:00:00.000Z"), "2020-W53");
+
+  // Dec 31 2024 (a Tuesday) falls in ISO week 1 of 2025, since Jan 4 2025
+  // (which is always in week 1) lands in the same Mon-Sun week.
+  assert.equal(oneRow("2024-12-31T00:00:00.000Z"), "2025-W01");
+
+  // Jan 1 2024 is itself a Monday, so it starts week 1 of 2024 directly.
+  assert.equal(oneRow("2024-01-01T00:00:00.000Z"), "2024-W01");
+
+  // Jan 1 2023 is a Sunday: per ISO-8601 it belongs to the last week of
+  // the PREVIOUS year (2022-W52), since ISO weeks start on Monday.
+  assert.equal(oneRow("2023-01-01T00:00:00.000Z"), "2022-W52");
+
+  // A date deep in an ordinary week groups distinctly from Dec 31/Jan 1.
+  assert.equal(oneRow("2024-06-15T00:00:00.000Z"), "2024-W24");
+
+  // Grouping puts both sides of a year boundary into the correct ISO
+  // buckets in the same call, in chronological (lexicographic) order.
+  const boundary = engine.timeSeriesSummary(
+    [{ date: "2020-12-28T00:00:00.000Z" }, { date: "2021-01-01T00:00:00.000Z" }, { date: "2021-01-04T00:00:00.000Z" }],
+    "date",
+    "WEEK"
+  );
+  assert.deepEqual(
+    boundary.points.map((p) => p.period),
+    ["2020-W53", "2021-W01"]
+  );
+  assert.equal(boundary.points[0].count, 2); // Dec 28 and Jan 1 share ISO week 2020-W53
+  assert.equal(boundary.points[1].count, 1);
+});
+
+test("FINITE OUTPUT GUARD: overflow from Number.MAX_VALUE arithmetic never escapes as a public result", () => {
+  const engine = new DataAnalysisEngine();
+  const overflowRows = [{ n: Number.MAX_VALUE }, { n: Number.MAX_VALUE }];
+
+  // Every finite-INPUT operation can still overflow on the OUTPUT side:
+  // MAX_VALUE + MAX_VALUE = Infinity even though both inputs are finite.
+  for (const op of ["sum", "mean", "stddev"] as const) {
+    assert.throws(
+      () => (engine as any)[op](overflowRows, "n"),
+      (err: any) => err.message === WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED,
+      `${op} should reject an overflowing result`
+    );
+  }
+
+  // median of two equal MAX_VALUE entries averages them: still overflows.
+  assert.throws(
+    () => engine.median(overflowRows, "n"),
+    (err: any) => err.message === WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED
+  );
+
+  // min/max never overflow (they return one of the finite inputs as-is).
+  assert.equal(engine.min(overflowRows, "n"), Number.MAX_VALUE);
+  assert.equal(engine.max(overflowRows, "n"), Number.MAX_VALUE);
+
+  // correlation: squaring MAX_VALUE-sized inputs overflows sumA2/sumB2.
+  assert.throws(
+    () => engine.correlation(overflowRows.map((r) => ({ ...r, m: r.n })), "n", "m"),
+    (err: any) => err.message === WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED
+  );
+
+  // groupBy numeric aggregation inherits the guard via sum/mean/min/max.
+  const grouped = [
+    { g: "a", n: Number.MAX_VALUE },
+    { g: "a", n: Number.MAX_VALUE }
+  ];
+  assert.throws(
+    () => engine.groupBy(grouped, "g", "n", "SUM"),
+    (err: any) => err.message === WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED
+  );
+
+  // timeSeriesSummary: the per-period sum overflows the same way.
+  const seriesRows = [
+    { date: "2024-01-01", n: Number.MAX_VALUE },
+    { date: "2024-01-01", n: Number.MAX_VALUE }
+  ];
+  assert.throws(
+    () => engine.timeSeriesSummary(seriesRows, "date", "DAY", "n"),
+    (err: any) => err.message === WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED
+  );
+
+  // outliers: q1 landing at -MAX_VALUE and q3 at +MAX_VALUE overflows the
+  // IQR itself (q3 - q1 = 2 * MAX_VALUE = Infinity).
+  const outlierRows = [{ n: -Number.MAX_VALUE }, { n: -Number.MAX_VALUE }, { n: Number.MAX_VALUE }, { n: Number.MAX_VALUE }];
+  assert.throws(
+    () => engine.outliers(outlierRows, "n"),
+    (err: any) => err.message === WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED
+  );
+});
+
+test("FINITE OUTPUT GUARD: SpreadsheetEngine aggregate SUM/MEAN reject Number.MAX_VALUE overflow", () => {
+  const engine = new SpreadsheetEngine();
+  const rows = [{ n: Number.MAX_VALUE }, { n: Number.MAX_VALUE }];
+
+  assert.throws(
+    () => engine.aggregate(rows, { function: "SUM", valueColumn: "n" }),
+    (err: any) => err.message === WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED
+  );
+  assert.throws(
+    () => engine.aggregate(rows, { function: "MEAN", valueColumn: "n" }),
+    (err: any) => err.message === WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED
+  );
+
+  // MIN/MAX never overflow.
+  const minResult = engine.aggregate(rows, { function: "MIN", valueColumn: "n" });
+  assert.equal(minResult[0].n_min, Number.MAX_VALUE);
+  const maxResult = engine.aggregate(rows, { function: "MAX", valueColumn: "n" });
+  assert.equal(maxResult[0].n_max, Number.MAX_VALUE);
+});
+
 test("NON-FINITE NUMBER REJECTION: DataAnalysisEngine never treats NaN/Infinity as a usable numeric value", () => {
   const engine = new DataAnalysisEngine();
   const nonFiniteValues = [NaN, Infinity, -Infinity, "Infinity", "-Infinity", "NaN"];
@@ -690,6 +808,34 @@ test("SPREADSHEET COLUMN VALIDATION: unknown requested column raises a stable er
   );
 
   cleanupTestEnvironment();
+});
+
+test("SPREADSHEET NUMERIC FILTERS: a non-numeric cell never implicitly matches greaterThan/lessThan alike", () => {
+  const engine = new SpreadsheetEngine();
+  const rows = [{ v: "n/a" }, { v: "5" }, { v: "15" }, { v: NaN }, { v: Infinity }, { v: "-Infinity" }];
+
+  const above10 = engine.filter(rows, [{ column: "v", operator: "greaterThan", value: 10 }]);
+  const below10 = engine.filter(rows, [{ column: "v", operator: "lessThan", value: 10 }]);
+
+  // "n/a" (and other non-finite-looking values) must not match BOTH sides
+  // of a numeric split — the old `Number(val) <= Number(targetVal)` check
+  // always evaluated false for NaN, silently letting every such row
+  // through both greaterThan and lessThan simultaneously.
+  assert.ok(!above10.some((r) => r.v === "n/a"));
+  assert.ok(!below10.some((r) => r.v === "n/a"));
+  assert.ok(!above10.some((r) => Number.isNaN(r.v)));
+  assert.ok(!below10.some((r) => Number.isNaN(r.v)));
+  assert.ok(!above10.some((r) => r.v === Infinity));
+  assert.ok(!below10.some((r) => r.v === "-Infinity"));
+
+  // Genuinely numeric values still split correctly.
+  assert.deepEqual(above10.map((r) => r.v), ["15"]);
+  assert.deepEqual(below10.map((r) => r.v), ["5"]);
+
+  const orEqual10 = engine.filter(rows, [{ column: "v", operator: "greaterOrEqual", value: 15 }]);
+  assert.deepEqual(orEqual10.map((r) => r.v), ["15"]);
+  const orEqualLess = engine.filter(rows, [{ column: "v", operator: "lessOrEqual", value: 5 }]);
+  assert.deepEqual(orEqualLess.map((r) => r.v), ["5"]);
 });
 
 test("SPREADSHEET RANGE VALIDATION: startRow/endRow reject NaN, Infinity, non-integers, and negatives", async () => {
