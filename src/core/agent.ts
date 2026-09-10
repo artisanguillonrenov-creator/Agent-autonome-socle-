@@ -227,7 +227,7 @@ export class Agent {
     }
 
     this.stepCount += 1;
-    await this.reflection.maybeReflect();
+    await this.reflection.maybeReflect(workspaceId);
 
     if (!finalResponse) {
       finalResponse = `Erreur : Limite maximale d'itérations (${this.maxIterations}) atteinte. Dernière étape exécutée : ${lastActionOrStep}. Veuillez reformuler ou découper votre demande.`;

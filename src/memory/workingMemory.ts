@@ -49,6 +49,16 @@ export class WorkingMemory {
     return this.entries.slice(-n).map((e) => e.message);
   }
 
+  /**
+   * Équivalent de `recent(n)`, mais scopé par workspace selon les mêmes règles que
+   * `allFor()` — réutilisé par ReflectionEngine pour ne jamais mélanger l'analyse de
+   * plusieurs projets quand l'isolation est active. Identique à `recent(n)` quand
+   * `isolate` est false ou qu'aucun `workspaceId` n'est fourni.
+   */
+  recentFor(workspaceId: string | undefined, isolate: boolean, n: number): ChatMessage[] {
+    return this.allFor(workspaceId, isolate).slice(-n);
+  }
+
   clear(): void {
     this.entries = [];
   }

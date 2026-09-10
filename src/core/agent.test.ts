@@ -568,3 +568,37 @@ test("ISOLATION: le protocole assistant -> tool_calls -> tool results reste corr
     config.projects.projectIsolation = previousIsolation;
   }
 });
+
+test("ISOLATION: Agent.step propage bien workspaceId à reflection.maybeReflect() — aucun mélange inter-projets via le ReflectionEngine", async () => {
+  const previousIsolation = config.projects.projectIsolation;
+  config.projects.projectIsolation = true;
+  try {
+    let reflectionTranscript = "";
+    let chatCalls = 0;
+    const spy: LLMProvider = {
+      name: "agent-reflect-spy",
+      async complete(messages: ChatMessage[]) {
+        const isReflectionCall = messages.some((m) => m.role === "system" && String(m.content ?? "").includes("module de réflexion"));
+        if (isReflectionCall) {
+          reflectionTranscript = messages.map((m) => String(m.content ?? "")).join("\n");
+          return { content: "Synthèse réflexion" };
+        }
+        chatCalls += 1;
+        return { content: `Réponse agent ${chatCalls}` };
+      },
+    };
+    const agent = new Agent({ llm: spy, embeddings: new LocalHashingEmbeddingProvider(), reflectionEveryNSteps: 1 });
+
+    await agent.step("Message confidentiel du projet A", "workspace-a");
+    await agent.step("Message du projet B", "workspace-b");
+
+    assert.equal(
+      reflectionTranscript.includes("Message confidentiel du projet A"),
+      false,
+      "la réflexion déclenchée pour B ne doit jamais analyser le contenu de A",
+    );
+    assert.ok(reflectionTranscript.includes("Message du projet B"), "la réflexion de B doit porter sur son propre contenu");
+  } finally {
+    config.projects.projectIsolation = previousIsolation;
+  }
+});

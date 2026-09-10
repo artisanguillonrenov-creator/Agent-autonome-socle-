@@ -11,7 +11,10 @@ import { providerForRole } from "../llm/modelRouter.js";
 import { config } from "../config.js";
 
 export class ReflectionEngine {
+  /** Compteur global — utilisé quand projects.projectIsolation est désactivé, ou qu'aucun workspaceId n'est fourni (comportement historique inchangé). */
   private stepsSinceLastReflection = 0;
+  /** Compteurs par workspace — utilisés quand l'isolation est active, pour que les tours d'un projet ne fassent jamais avancer artificiellement le seuil d'un autre. */
+  private stepsSinceLastReflectionByWorkspace = new Map<string, number>();
   private customEveryNSteps?: number;
 
   constructor(
@@ -31,18 +34,41 @@ export class ReflectionEngine {
     return this.customEveryNSteps ?? config.reflection.everyNSteps;
   }
 
-  /** À appeler après chaque tour de la boucle agent. Réfléchit si l'intervalle est atteint. */
-  async maybeReflect(): Promise<string | null> {
+  private isIsolated(workspaceId: string | undefined): boolean {
+    return config.projects.projectIsolation && Boolean(workspaceId);
+  }
+
+  /**
+   * À appeler après chaque tour de la boucle agent. Réfléchit si l'intervalle est
+   * atteint. `workspaceId` : projet actif pour ce tour (projects.projectIsolation) —
+   * quand l'isolation est active, chaque workspace a son propre compteur de seuil,
+   * pour que les tours d'un projet ne déclenchent jamais la réflexion d'un autre.
+   */
+  async maybeReflect(workspaceId?: string): Promise<string | null> {
+    if (this.isIsolated(workspaceId)) {
+      const count = (this.stepsSinceLastReflectionByWorkspace.get(workspaceId!) ?? 0) + 1;
+      if (count < this.everyNSteps) {
+        this.stepsSinceLastReflectionByWorkspace.set(workspaceId!, count);
+        return null;
+      }
+      this.stepsSinceLastReflectionByWorkspace.set(workspaceId!, 0);
+      return this.reflect(workspaceId);
+    }
+
     this.stepsSinceLastReflection += 1;
     if (this.stepsSinceLastReflection < this.everyNSteps) {
       return null;
     }
     this.stepsSinceLastReflection = 0;
-    return this.reflect();
+    return this.reflect(workspaceId);
   }
 
-  async reflect(): Promise<string> {
-    const recent = this.memory.working.recent(this.everyNSteps * 2);
+  async reflect(workspaceId?: string): Promise<string> {
+    const isolate = this.isIsolated(workspaceId);
+    // Réutilise le filtrage déjà présent dans WorkingMemory (allFor/recentFor) plutôt
+    // que de reconstruire une seconde logique : aucun tour d'un autre workspace n'entre
+    // dans le transcript analysé quand l'isolation est active.
+    const recent = this.memory.working.recentFor(workspaceId, isolate, this.everyNSteps * 2);
     if (recent.length === 0) {
       return "";
     }
@@ -67,7 +93,12 @@ export class ReflectionEngine {
     const insight = typeof rawInsight === "string" ? rawInsight : rawInsight.content ?? "";
 
     if (insight.trim().length > 0) {
-      await this.memory.vector.add(insight.trim(), "reflection");
+      // La réflexion porte le même scope que le workspace qui l'a produite — cohérent
+      // avec MemoryManager.recordTurn(), qui tague déjà systématiquement les tours
+      // episodic de leur workspaceId. Sans isolation active, ceci reste sans effet
+      // observable : VectorMemory.search() ne filtre par workspace que lorsque
+      // projects.projectIsolation est activé.
+      await this.memory.vector.add(insight.trim(), "reflection", { workspaceId });
     }
     return insight;
   }
