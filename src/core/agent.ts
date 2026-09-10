@@ -17,6 +17,7 @@ import { createRuntimeSkills } from "../skills/runtime.js";
 import { WorkflowRegistry } from "../workflows/workflowRegistry.js";
 import { executeMissionMetadata } from "../skills/catalog.js";
 import { ActivityStore } from "../observability/activityStore.js";
+import { validateArraySchemaItems } from "../llm/jsonSchema.js";
 
 export interface AgentOptions {
   llm: LLMProvider;
@@ -121,6 +122,7 @@ export class Agent {
           },
         },
       }));
+      for (const tool of toolDefinitions) validateArraySchemaItems(tool.function.parameters, `tool.${tool.function.name}.parameters`);
 
       const completionResult = await this.llm.complete(messages, {
         tools: toolDefinitions.length > 0 ? toolDefinitions : undefined,

@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { Octokit } from "@octokit/rest";
 import { CONTRACT_SCHEMA_VERSION, type TaskRequest, type ServiceEvent } from "../orchestration/contract.js";
 import { config } from "../config.js";
+import { getGitHubToken } from "../github/auth.js";
 
 export interface SoftwareFactoryConfig {
   githubToken?: string;
@@ -35,12 +36,19 @@ export function parseRepoUrl(repoUrlStr?: string): { owner: string; repo: string
   return null;
 }
 
+export function softwareFactoryAllowedRepositories(env: NodeJS.ProcessEnv = process.env): Set<string> {
+  return new Set((env.SOFTWARE_FACTORY_ALLOWED_REPOS || "artisanguillonrenov-creator/Agent-autonome-socle-").split(",").map(v=>v.trim().replace(/^https?:\/\/github\.com\//i,"").replace(/\.git$/i,"").toLowerCase()).filter(Boolean));
+}
+export function assertSoftwareFactoryRepositoryAllowed(owner:string,repo:string,env:NodeJS.ProcessEnv=process.env):void {
+  if(!softwareFactoryAllowedRepositories(env).has(`${owner}/${repo}`.toLowerCase()))throw new Error("SOFTWARE_FACTORY_REPOSITORY_NOT_ALLOWED");
+}
+
 export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
   const ctx = taskReq.context || {};
 
-  // Chaînes exactes de notre dépôt sur GitHub (avec le tiret final obligatoire)
-  const owner = "artisanguillonrenov-creator";
-  const repo = "Agent-autonome-socle-";
+  const requested=parseRepoUrl(typeof ctx.repository==="string"?ctx.repository:undefined);
+  const owner = requested?.owner || "artisanguillonrenov-creator";
+  const repo = requested?.repo || "Agent-autonome-socle-";
 
   let filePath = String(ctx.filePath || ctx.path || ctx.file || "").trim();
   const objectiveStr = String(taskReq.objective || "").trim();
@@ -135,7 +143,7 @@ export class SoftwareFactoryService {
   public readonly maxRetries: number;
 
   constructor(configObj: SoftwareFactoryConfig = {}) {
-    this.githubToken = process.env.GITHUB_FACTORY_TOKEN || configObj.githubToken || process.env.GITHUB_TOKEN || "";
+    this.githubToken = getGitHubToken() || configObj.githubToken || "";
     this.octokit = configObj.octokitClient || new Octokit({ auth: this.githubToken || undefined });
     this.openrouterApiKey = configObj.openrouterApiKey || process.env.OPENROUTER_API_KEY || "";
     this.openrouterModel = configObj.openrouterModel || process.env.SOFTWARE_FACTORY_MODEL || "google/gemini-2.0-flash-lite-preview-02-05:free";
@@ -274,6 +282,8 @@ export class SoftwareFactoryService {
     summary: string;
   }> {
     const { owner, repo, filePath, instructions, targetBranch, targetPr } = params;
+    // Direct-call guard: no GitHub read or write happens before this check.
+    assertSoftwareFactoryRepositoryAllowed(owner,repo);
     const cleanTaskId = taskId.replace(/^task-/, "");
     let branchName = `jarvis/task-${cleanTaskId}`;
 
@@ -518,6 +528,8 @@ export class SoftwareFactoryService {
     let params: ParsedSoftwareTask;
     try {
       params = extractTaskParams(taskReq);
+      // Service entry-point guard, independently repeated by executeWorkflow.
+      assertSoftwareFactoryRepositoryAllowed(params.owner,params.repo);
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       const errorCode = errorMsg.split(":")[0] || "FILE_PATH_MISSING";
