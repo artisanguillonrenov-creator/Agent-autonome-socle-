@@ -13,9 +13,8 @@ export interface LLMProviderOptions {
   model?: string;
 }
 
-/** Factory : crée une instance de LLMProvider selon la config active ou les options. */
-export function createLLMProvider(opts?: LLMProviderOptions): LLMProvider {
-  // Try loading persistent selection if not explicitly provided
+/** Résout le provider/modèle à utiliser (options explicites > sélection persistée > config par défaut), sans aucun effet de bord. */
+export function resolveLLMSelection(opts?: LLMProviderOptions): { provider: LLMProviderName; model: string } {
   let providerName = opts?.provider;
   let modelName = opts?.model;
 
@@ -30,9 +29,16 @@ export function createLLMProvider(opts?: LLMProviderOptions): LLMProvider {
   providerName = providerName || config.llm.provider;
   modelName = modelName || config.llm.model;
 
-  // Sync config
-  config.llm.provider = providerName;
-  config.llm.model = modelName;
+  return { provider: providerName, model: modelName };
+}
+
+/**
+ * Factory : crée une instance de LLMProvider selon la config active ou les options.
+ * Fonction pure — ne modifie jamais `config.llm` ni aucun état global, afin qu'un
+ * simple test de modèle (POST /api/models/test) ne puisse pas changer le fournisseur/modèle actif.
+ */
+export function createLLMProvider(opts?: LLMProviderOptions): LLMProvider {
+  const { provider: providerName, model: modelName } = resolveLLMSelection(opts);
 
   switch (providerName) {
     case "anthropic":

@@ -19,6 +19,8 @@ import { SETTINGS_CATALOG, SETTINGS_SECTIONS } from "../settings/catalog.js";
 import { SettingsStore, SettingScopeType } from "../settings/store.js";
 import { applyAllEffectiveRuntimeSettings } from "../settings/applier.js";
 import { getDb } from "../persistence/db.js";
+import type { ChatMessage } from "../types.js";
+import type { LLMProvider } from "../llm/provider.js";
 
 const taskStore = new TaskStore();
 const notificationStore = new NotificationStore();
@@ -102,11 +104,8 @@ const DEFAULT_PRESET_MODELS: Record<string, Array<{ id: string; name: string; is
     { id: "o1", name: "o1" },
     { id: "o3-mini", name: "o3-Mini" },
   ],
-  infermatic: [
-    { id: "llama-3.3-70b-instruct", name: "Llama 3.3 70B Instruct" },
-    { id: "mistral-large-2411", name: "Mistral Large 2411" },
-    { id: "qwen2.5-72b-instruct", name: "Qwen 2.5 72B Instruct" },
-  ],
+  // Infermatic n'a volontairement pas de liste statique ici : le catalogue dépend
+  // du compte/abonnement et est récupéré dynamiquement via fetchInfermaticCatalog().
   ollama: [
     { id: "llama3", name: "Llama 3" },
     { id: "mistral", name: "Mistral" },
@@ -114,6 +113,76 @@ const DEFAULT_PRESET_MODELS: Record<string, Array<{ id: string; name: string; is
   ],
   mock: [{ id: "mock-model", name: "Mock Model (Offline)" }],
 };
+
+interface CatalogModel {
+  id: string;
+  name: string;
+}
+
+type InfermaticCatalogResult =
+  | { ok: true; models: CatalogModel[] }
+  | { ok: false; status: number; error: string };
+
+/**
+ * Interroge la Core API Infermatic (OpenAI-compatible) pour obtenir la liste réelle
+ * des modèles disponibles pour le compte/abonnement configuré. Aucune liste statique
+ * de secours : en cas d'échec, on retourne une erreur explicite plutôt qu'un faux catalogue.
+ */
+async function fetchInfermaticCatalog(): Promise<InfermaticCatalogResult> {
+  if (!config.llm.infermaticApiKey) {
+    return { ok: false, status: 400, error: "INFERMATIC_KEY_MISSING" };
+  }
+
+  const endpoint = `${config.llm.infermaticBaseUrl.replace(/\/+$/, "")}/models`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+
+  try {
+    const response = await fetch(endpoint, {
+      headers: { authorization: `Bearer ${config.llm.infermaticApiKey}` },
+      signal: controller.signal,
+    });
+
+    if (response.status === 401 || response.status === 403) {
+      return { ok: false, status: 502, error: "INFERMATIC_CATALOG_UNAUTHORIZED" };
+    }
+    if (!response.ok) {
+      return { ok: false, status: 502, error: "INFERMATIC_CATALOG_UNAVAILABLE" };
+    }
+
+    const data = (await response.json()) as { data?: Array<{ id: string; name?: string }> };
+    if (!Array.isArray(data.data)) {
+      return { ok: false, status: 502, error: "INFERMATIC_CATALOG_UNAVAILABLE" };
+    }
+
+    // L'id du modèle n'est JAMAIS transformé (casse, format...) : il doit rester
+    // strictement identique à celui renvoyé par Infermatic pour rester sélectionnable.
+    const models = data.data.map((m) => ({ id: m.id, name: m.name || m.id }));
+    return { ok: true, models };
+  } catch (err) {
+    if ((err as Error).name === "AbortError") {
+      return { ok: false, status: 504, error: "INFERMATIC_CATALOG_TIMEOUT" };
+    }
+    return { ok: false, status: 502, error: "INFERMATIC_CATALOG_UNAVAILABLE" };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Messages de validation représentatifs de l'usage réel de Jarvis (system prompt +
+ * instruction courte). Un modèle qui échoue ici (ex : pas de support system/chat)
+ * doit échouer au test AVANT de pouvoir devenir le modèle actif.
+ */
+const JARVIS_COMPATIBILITY_MESSAGES: ChatMessage[] = [
+  { role: "system", content: "You are Jarvis. Follow the user's instruction." },
+  { role: "user", content: "Reply only with OK." },
+];
+
+async function testJarvisCompatibility(provider: LLMProvider): Promise<string> {
+  const result = await provider.complete(JARVIS_COMPATIBILITY_MESSAGES, { maxTokens: 5 });
+  return typeof result === "string" ? result : result.content ?? "";
+}
 
 function applyRuntimeSettingEffect(key: string, value: unknown, agent: Agent): void {
   if (key === "intelligence.skillSelectorMax" && typeof value === "number") {
@@ -1484,6 +1553,17 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
       if (req.method === "GET" && pathname.startsWith("/api/models/catalog/")) {
         const parts = pathname.split("/");
         const prov = parts[parts.length - 1];
+
+        if (prov === "infermatic") {
+          const result = await fetchInfermaticCatalog();
+          if (!result.ok) {
+            sendJson(res, result.status, { error: result.error, models: [] });
+            return;
+          }
+          sendJson(res, 200, result.models);
+          return;
+        }
+
         sendJson(res, 200, DEFAULT_PRESET_MODELS[prov] || []);
         return;
       }
@@ -1495,10 +1575,11 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
           return;
         }
 
+        // Fonction rigoureusement lecture-seule : createLLMProvider est pur et rien ici
+        // n'écrit dans config.llm, dans llmConfigStore, ni dans l'agent (voir point 9).
         try {
           const testProviderInstance = createLLMProvider({ provider: body.provider, model: body.model });
-          const responseResult = await testProviderInstance.complete([{ role: "user", content: "Test ping" }]);
-          const responseText = typeof responseResult === "string" ? responseResult : responseResult.content ?? "";
+          const responseText = await testJarvisCompatibility(testProviderInstance);
           sendJson(res, 200, {
             ok: true,
             provider: body.provider,
@@ -1527,15 +1608,17 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         const currentProv = config.llm.provider;
         const currentModel = config.llm.model;
 
+        // Application atomique : on valide d'abord le candidat sans toucher à quoi que ce
+        // soit ; seule une validation réussie déclenche l'écriture (agent + config + store).
+        // En cas d'échec, l'ancien provider/modèle reste intégralement en place (point 10).
         try {
           const newProviderInstance = createLLMProvider({ provider: body.provider, model: body.model });
-          await newProviderInstance.complete([{ role: "user", content: "Validation du modèle" }]);
+          await testJarvisCompatibility(newProviderInstance);
 
           agent.setLLMProvider(newProviderInstance);
-          saveLLMConfig(body.provider, body.model);
-
           config.llm.provider = body.provider;
           config.llm.model = body.model;
+          saveLLMConfig(body.provider, body.model);
 
           sendJson(res, 200, {
             ok: true,
@@ -1544,11 +1627,6 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
             message: `Modèle actif mis à jour : ${body.model}`,
           });
         } catch (err) {
-          const fallbackInstance = createLLMProvider({ provider: currentProv, model: currentModel });
-          agent.setLLMProvider(fallbackInstance);
-          config.llm.provider = currentProv;
-          config.llm.model = currentModel;
-
           sendJson(res, 200, {
             ok: false,
             activeProvider: currentProv,

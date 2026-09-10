@@ -38,9 +38,20 @@ export class InfermaticProvider implements LLMProvider {
     });
 
     if (!res.ok) {
-      throw new Error(`Infermatic API ${res.status}: ${await res.text()}`);
+      const rawBody = await res.text().catch(() => "");
+      let detail = rawBody.slice(0, 300);
+      try {
+        const parsed = JSON.parse(rawBody) as { error?: { message?: string } | string };
+        detail = (typeof parsed.error === "string" ? parsed.error : parsed.error?.message) || detail;
+      } catch {
+        // rawBody n'est pas du JSON exploitable, on garde l'extrait brut tronqué.
+      }
+      throw new Error(`Infermatic API ${res.status}: ${detail || "erreur inconnue"}`);
     }
-    const data = (await res.json()) as { choices: Array<{ message: { content: string } }> };
+    const data = (await res.json()) as { choices?: Array<{ message: { content: string } }> };
+    if (!data.choices || data.choices.length === 0) {
+      throw new Error("Infermatic API : réponse sans choix (modèle possiblement incompatible avec /chat/completions).");
+    }
     return {
       content: data.choices[0]?.message.content ?? "",
       toolCalls: undefined,

@@ -1226,6 +1226,20 @@ async function loadModelsForSelectedProvider() {
       ];
       if (statusBox) statusBox.textContent = '';
     }
+  } else if (provider === 'infermatic') {
+    if (statusBox) statusBox.innerHTML = '<span style="color: var(--text-muted); font-size: 0.85rem;">Chargement des modèles Infermatic...</span>';
+    try {
+      const response = await fetchApi(`/api/models/catalog/${provider}`);
+      // Pas de repli sur une liste codée en dur : le catalogue Infermatic dépend du
+      // compte/abonnement et provient uniquement de GET /models côté serveur.
+      state.rawCatalogModels = Array.isArray(response) ? response : [];
+      if (statusBox) statusBox.textContent = '';
+    } catch (err) {
+      state.rawCatalogModels = [];
+      if (statusBox) {
+        statusBox.innerHTML = `<div style="padding: 10px; background: rgba(239,68,68,0.15); border: 1px solid var(--accent-danger); border-radius: 8px; color: var(--accent-danger);">Impossible de récupérer les modèles Infermatic : ${err.message}</div>`;
+      }
+    }
   } else {
     try {
       const response = await fetchApi(`/api/models/catalog/${provider}`);
