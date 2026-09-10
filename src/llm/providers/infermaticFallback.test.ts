@@ -179,3 +179,24 @@ test("Une erreur 400 sans tools reste une vraie erreur API et ne déclenche pas 
     globalThis.fetch = originalFetch;
   }
 });
+
+test("InfermaticProvider autorise 4096 tokens de sortie par défaut pour éviter les réponses coupées", async () => {
+  const originalFetch = globalThis.fetch;
+  let sentBody: any = null;
+  try {
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      sentBody = JSON.parse(init?.body as string);
+      return new Response(JSON.stringify({ choices: [{ message: { content: "Réponse complète" } }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const provider = new InfermaticProvider({ apiKey: "k", baseUrl: "https://api.totalgpt.ai/v1", model: "m" });
+    await provider.complete([{ role: "user", content: "réponse longue" }]);
+
+    assert.equal(sentBody.max_tokens, 4096);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
