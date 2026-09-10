@@ -7,6 +7,44 @@ interface InfermaticOptions {
   model: string;
 }
 
+const THINK_BLOCK_RE = /<think>[\s\S]*?<\/think>/gi;
+const THINK_OPEN_RE = /<think>/i;
+const THINK_CLOSE_RE = /<\/think>/i;
+
+/**
+ * Qwen (et d'autres modèles "reasoning") peuvent renvoyer leur raisonnement interne
+ * directement dans `message.content`, encadré par des balises <think>...</think>.
+ * Ce raisonnement ne doit jamais atteindre l'utilisateur final de Jarvis : cette
+ * fonction ne nettoie que le flux "chat" (voir infermatic.ts) et ne doit pas être
+ * réutilisée telle quelle pour la Software Factory, qui possède déjà son propre
+ * nettoyage (cleanLLMCodeOutput dans softwareFactoryService.ts, couplé à l'extraction
+ * de blocs de code).
+ */
+export function sanitizeInfermaticVisibleContent(rawContent: string | null | undefined): string | null {
+  if (rawContent == null) {
+    return null;
+  }
+
+  let cleaned = rawContent.replace(THINK_BLOCK_RE, "");
+
+  // </think> résiduel sans ouverture correspondante : tout ce qui précède est
+  // considéré comme du raisonnement interne, on ne garde que ce qui suit.
+  const closeIdx = cleaned.search(THINK_CLOSE_RE);
+  if (closeIdx !== -1) {
+    cleaned = cleaned.slice(closeIdx).replace(THINK_CLOSE_RE, "");
+  }
+
+  // <think> jamais refermé : impossible de distinguer raisonnement et réponse finale,
+  // on écarte tout ce qui suit l'ouverture plutôt que d'exposer du raisonnement brut.
+  const openIdx = cleaned.search(THINK_OPEN_RE);
+  if (openIdx !== -1) {
+    cleaned = cleaned.slice(0, openIdx);
+  }
+
+  cleaned = cleaned.trim();
+  return cleaned.length > 0 ? cleaned : null;
+}
+
 /**
  * Infermatic (Core API) expose une API OpenAI-compatible : https://api.totalgpt.ai/v1.
  * Le protocole de tool calling natif suit le même format que OpenRouter/OpenAI (voir
@@ -98,7 +136,10 @@ export class InfermaticProvider implements LLMProvider {
     }
 
     const message = data.choices[0]?.message;
-    const content = message?.content ?? null;
+    // Certains fournisseurs OpenAI-compatibles exposent un raisonnement séparé via
+    // `reasoning` / `reasoning_content` : on ne les lit jamais ici, ils ne doivent ni
+    // remplacer `content` ni être renvoyés à l'utilisateur.
+    const content = sanitizeInfermaticVisibleContent(message?.content ?? null);
     const toolCalls = Array.isArray(message?.tool_calls) && message.tool_calls.length > 0 ? message.tool_calls : undefined;
 
     return { content, toolCalls };

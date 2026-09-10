@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { InfermaticProvider } from "./infermatic.js";
+import { InfermaticProvider, sanitizeInfermaticVisibleContent } from "./infermatic.js";
 
 test("InfermaticProvider refuse d'appeler l'API sans clé configurée", async () => {
   const provider = new InfermaticProvider({ apiKey: "", baseUrl: "https://api.totalgpt.ai/v1", model: "any-model" });
@@ -262,6 +262,115 @@ test("InfermaticProvider renvoie une réponse naturelle sans tool_calls quand le
 
     assert.equal(result.content, "Bonjour, comment puis-je aider ?");
     assert.equal(result.toolCalls, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// --- sanitizeInfermaticVisibleContent : masquage du raisonnement interne Qwen ---
+
+test("sanitizeInfermaticVisibleContent supprime un bloc <think> unique et garde le reste", () => {
+  const raw = "<think>Internal reasoning</think>\nBonjour";
+  assert.equal(sanitizeInfermaticVisibleContent(raw), "Bonjour");
+});
+
+test("sanitizeInfermaticVisibleContent supprime un bloc <think> multi-lignes en anglais", () => {
+  const raw = "<think>\nEnglish reasoning\nline 2\nline 3\n</think>\n\nBonjour, que puis-je faire pour vous ?";
+  assert.equal(sanitizeInfermaticVisibleContent(raw), "Bonjour, que puis-je faire pour vous ?");
+});
+
+test("sanitizeInfermaticVisibleContent laisse inchangé un texte normal sans balise <think>", () => {
+  assert.equal(sanitizeInfermaticVisibleContent("Bonjour"), "Bonjour");
+  assert.equal(
+    sanitizeInfermaticVisibleContent("Explication technique normale sans balise think."),
+    "Explication technique normale sans balise think.",
+  );
+});
+
+test("sanitizeInfermaticVisibleContent supprime plusieurs blocs <think> successifs", () => {
+  const raw = "<think>A</think>\n<think>B</think>\nRéponse finale";
+  assert.equal(sanitizeInfermaticVisibleContent(raw), "Réponse finale");
+});
+
+test("sanitizeInfermaticVisibleContent renvoie null pour un bloc <think> jamais refermé", () => {
+  const raw = "<think>\nraisonnement non terminé";
+  const cleaned = sanitizeInfermaticVisibleContent(raw);
+  assert.equal(cleaned, null);
+  assert.ok(cleaned === null || !cleaned.includes("raisonnement"));
+});
+
+test("sanitizeInfermaticVisibleContent traite un </think> résiduel sans ouverture comme raisonnement", () => {
+  const raw = "raisonnement interne...\n</think>\nBonjour";
+  assert.equal(sanitizeInfermaticVisibleContent(raw), "Bonjour");
+});
+
+test("sanitizeInfermaticVisibleContent est insensible à la casse des balises", () => {
+  const raw = "<THINK>Reasoning</THINK>\nBonjour";
+  assert.equal(sanitizeInfermaticVisibleContent(raw), "Bonjour");
+});
+
+test("sanitizeInfermaticVisibleContent renvoie null quand rawContent est null ou vide", () => {
+  assert.equal(sanitizeInfermaticVisibleContent(null), null);
+  assert.equal(sanitizeInfermaticVisibleContent(undefined), null);
+  assert.equal(sanitizeInfermaticVisibleContent(""), null);
+  assert.equal(sanitizeInfermaticVisibleContent("<think>tout est raisonnement</think>"), null);
+});
+
+// --- complete() : le raisonnement interne ne doit jamais atteindre l'utilisateur ---
+
+test("InfermaticProvider masque le raisonnement <think> dans content quand un tool_call est présent (tool_calls conservés)", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const toolCalls = [{ id: "call_1", type: "function", function: { name: "web_search", arguments: '{"query":"test"}' } }];
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "<think>reasoning</think>",
+                tool_calls: toolCalls,
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+
+    const provider = new InfermaticProvider({ apiKey: "k", baseUrl: "https://api.totalgpt.ai/v1", model: "m" });
+    const result = await provider.complete([{ role: "user", content: "cherche" }]);
+
+    assert.equal(result.content, null);
+    assert.deepEqual(result.toolCalls, toolCalls);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("InfermaticProvider nettoie content en <think>...</think>\\nBonjour tout en conservant les tool_calls à l'identique", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const toolCalls = [{ id: "call_2", type: "function", function: { name: "web_search", arguments: '{"query":"autre"}' } }];
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "<think>reasoning</think>\nBonjour",
+                tool_calls: toolCalls,
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+
+    const provider = new InfermaticProvider({ apiKey: "k", baseUrl: "https://api.totalgpt.ai/v1", model: "m" });
+    const result = await provider.complete([{ role: "user", content: "cherche" }]);
+
+    assert.equal(result.content, "Bonjour");
+    assert.deepEqual(result.toolCalls, toolCalls);
   } finally {
     globalThis.fetch = originalFetch;
   }
