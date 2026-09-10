@@ -31,7 +31,6 @@
     "@capacitor/cli": "^8.5.1",
     "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^20.14.0",
-    "@types/pdf-parse": "^1.1.5",
     "tsx": "^4.19.0",
     "typescript": "^5.5.4"
   }

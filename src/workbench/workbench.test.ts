@@ -255,6 +255,117 @@ test("REPORT ROLLBACK PRESERVATION: Pre-existing targetPath remains strictly int
   cleanupTestEnvironment();
 });
 
+test("XLSX MAXCELLS BOUND: 100 columns x 3000 rows real XLSX capped at 250,000 cells", async () => {
+  const { workspaceStore, workspace } = setupTestEnvironment();
+  const engine = new SpreadsheetEngine(workspaceStore);
+
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("Sheet1");
+  const headers = Array.from({ length: 100 }, (_, i) => `c_${i + 1}`);
+  ws.addRow(headers);
+  for (let i = 0; i < 3000; i++) {
+    ws.addRow(headers.map(() => 1));
+  }
+  const buf = Buffer.from(await wb.xlsx.writeBuffer());
+  workspaceStore.writeFile(workspace.id, "big_xlsx_cells.xlsx", buf);
+
+  const range = await engine.readRange(workspace.id, "big_xlsx_cells.xlsx");
+  assert.equal(range.columns.length, 100);
+  assert.equal(range.rows.length, 2500); // 100 * 2500 = 250,000 cells max
+  assert.equal(range.truncated, true);
+
+  cleanupTestEnvironment();
+});
+
+test("XLSX MAXCOLUMNS BOUND: >200 columns capped at 200 with truncated=true", async () => {
+  const { workspaceStore, workspace } = setupTestEnvironment();
+  const engine = new SpreadsheetEngine(workspaceStore);
+
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("Sheet1");
+  const headers = Array.from({ length: 250 }, (_, i) => `col_${i + 1}`);
+  ws.addRow(headers);
+  ws.addRow(headers.map((_, i) => `val_${i + 1}`));
+  const buf = Buffer.from(await wb.xlsx.writeBuffer());
+  workspaceStore.writeFile(workspace.id, "wide_xlsx.xlsx", buf);
+
+  const range = await engine.readRange(workspace.id, "wide_xlsx.xlsx");
+  assert.equal(range.columns.length, 200);
+  assert.equal(range.truncated, true);
+
+  cleanupTestEnvironment();
+});
+
+test("XLSX FORMULA CELLS: cached result exposed, never executed/evaluated by Jarvis", async () => {
+  const { workspaceStore, workspace } = setupTestEnvironment();
+  const engine = new SpreadsheetEngine(workspaceStore);
+
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("Sheet1");
+  ws.addRow(["a", "b", "sum"]);
+  ws.getRow(2).getCell(1).value = 2;
+  ws.getRow(2).getCell(2).value = 3;
+  ws.getRow(2).getCell(3).value = { formula: "A2+B2", result: 5 } as any;
+  const buf = Buffer.from(await wb.xlsx.writeBuffer());
+  workspaceStore.writeFile(workspace.id, "formula.xlsx", buf);
+
+  const range = await engine.readRange(workspace.id, "formula.xlsx");
+  assert.equal(range.rows.length, 1);
+  assert.equal(range.rows[0].sum, 5);
+
+  cleanupTestEnvironment();
+});
+
+test("CSV MULTILINE QUOTED FIELDS: embedded newlines, commas, and escaped quotes parsed correctly", async () => {
+  const { workspaceStore, workspace } = setupTestEnvironment();
+  const engine = new SpreadsheetEngine(workspaceStore);
+
+  const fixture = [
+    "id,description",
+    '1,"bonjour',
+    'le monde"',
+    '2,"a,b"',
+    '3,"quote ""test"""'
+  ].join("\n");
+  workspaceStore.writeFile(workspace.id, "multiline.csv", fixture);
+
+  const range = await engine.readRange(workspace.id, "multiline.csv");
+  assert.equal(range.rows.length, 3);
+  assert.equal(range.rows[0].description, "bonjour\nle monde");
+  assert.equal(range.rows[1].description, "a,b");
+  assert.equal(range.rows[2].description, 'quote "test"');
+
+  cleanupTestEnvironment();
+});
+
+test("XLS FORMAT REJECTED: legacy binary .xls is never claimed as supported", async () => {
+  const { workspaceStore, workspace } = setupTestEnvironment();
+  const engine = new SpreadsheetEngine(workspaceStore);
+
+  workspaceStore.writeFile(workspace.id, "legacy.xls", Buffer.from("not a real xls file"));
+
+  await assert.rejects(
+    () => engine.inspect(workspace.id, "legacy.xls"),
+    (err: any) => err.message === WORKBENCH_ERRORS.SPREADSHEET_FORMAT_UNSUPPORTED
+  );
+
+  cleanupTestEnvironment();
+});
+
+test("SPREADSHEET COLUMN VALIDATION: unknown requested column raises a stable error", async () => {
+  const { workspaceStore, workspace } = setupTestEnvironment();
+  const engine = new SpreadsheetEngine(workspaceStore);
+
+  workspaceStore.writeFile(workspace.id, "cols.csv", "id,name\n1,Alice\n2,Bob");
+
+  await assert.rejects(
+    () => engine.readRange(workspace.id, "cols.csv", { columns: ["id", "does_not_exist"] }),
+    (err: any) => err.message === WORKBENCH_ERRORS.SPREADSHEET_RANGE_INVALID
+  );
+
+  cleanupTestEnvironment();
+});
+
 test("SYMLINK TEST: Non-swallowed symlink exception assertion", () => {
   const { workspaceStore, workspace } = setupTestEnvironment();
 

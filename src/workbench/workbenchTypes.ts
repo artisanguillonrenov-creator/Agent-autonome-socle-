@@ -176,7 +176,12 @@ export interface SpreadsheetInspectResult {
   columnCount: number;
   columns: string[];
   inferredTypes: Record<string, ColumnType>;
-  emptyCells: number;
+  /**
+   * Empty-cell count observed within the bounded inspection sample only
+   * (see warnings when rowCount exceeds the sample size) — never the
+   * exact total for the whole sheet.
+   */
+  sampledEmptyCells: number;
   sampleRows: Record<string, unknown>[];
   warnings: string[];
 }
@@ -193,6 +198,8 @@ export interface RangeResult {
   columns: string[];
   rows: Record<string, unknown>[];
   totalRows: number;
+  /** False when totalRows is a known lower bound rather than the exact total. */
+  totalRowsKnown: boolean;
   truncated: boolean;
   warnings: string[];
 }
