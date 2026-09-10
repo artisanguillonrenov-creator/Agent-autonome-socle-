@@ -1,5 +1,4 @@
 import { createReadStream } from "node:fs";
-import { once } from "node:events";
 import * as unzipper from "unzipper";
 import { WORKBENCH_LIMITS, workbenchError } from "./limits.js";
 
@@ -33,41 +32,61 @@ interface EntryState {
 }
 
 /**
- * Reproduit fidèlement `exceljs/lib/utils/iterate-stream.js` (non exporté par le paquet) : c'est
- * exactement ainsi qu'ExcelJS consomme le flux `unzipper.Parse({ forceStream: true })`, pause/
- * reprise incluses. Réutiliser ce même protocole de consommation, plutôt que l'itération
- * asynchrone native du stream, garantit qu'aucun octet n'est vu différemment par la garde et par
- * le lecteur réel.
+ * ExcelJS's own internal `lib/utils/iterate-stream.js` — the exact function `WorkbookReader` uses
+ * to drain this same `unzipper.Parse({ forceStream: true })` stream — calls `stream.pause()`
+ * immediately before every `yield`. That pattern is the confirmed cause of
+ * https://github.com/exceljs/exceljs/issues/3064: on Node ≥18 (worst on Node 22 — reproduced here
+ * locally at roughly a 85-90% failure rate for a 5-sheet workbook), the pause/resume dance can let
+ * the parser's internal engine advance past an entry — observably, `xl/workbook.xml` sometimes
+ * never reaches `WorkbookReader._parseWorkbook`, so `this.model` stays `undefined` and any
+ * worksheet access throws `Cannot read properties of undefined (reading 'sheets')`.
+ *
+ * This guard never called into that buggy function directly, but originally mirrored its
+ * pause()-before-yield shape for the sake of literal parity with ExcelJS's own consumption
+ * protocol (see the module doc comment above). Since that shape is the actual bug, faithfully
+ * reproducing it was faithfully reproducing the race. Fixed here — and, since this project also
+ * ships `patches/exceljs+4.4.0.patch` (applied deterministically on every `npm install` via
+ * `postinstall`) rewriting ExcelJS's own `iterate-stream.js` the identical way — by never pausing
+ * the source stream at all: a single permanent `'data'` listener drains every chunk straight into
+ * a queue, and the generator only ever waits (never un-listens) when that queue is empty. There is
+ * no window in which an emitted entry is not being captured.
  */
 async function* iterateZipEntries(stream: unzipper.ParseStream): AsyncGenerator<unzipper.Entry> {
   const pending: unzipper.Entry[] = [];
-  stream.on("data", (entry: unzipper.Entry) => pending.push(entry));
-
   let ended = false;
-  let resolveEnded!: () => void;
-  const endedPromise = new Promise<void>((resolve) => {
-    resolveEnded = resolve;
+  let streamError: Error | false = false;
+  let notify: (() => void) | null = null;
+
+  const wake = () => {
+    if (notify) {
+      const resolve = notify;
+      notify = null;
+      resolve();
+    }
+  };
+
+  stream.on("data", (entry: unzipper.Entry) => {
+    pending.push(entry);
+    wake();
   });
   stream.on("end", () => {
     ended = true;
-    resolveEnded();
+    wake();
   });
-
-  let streamError: Error | false = false;
   stream.on("error", (err: Error) => {
     streamError = err;
-    resolveEnded();
+    wake();
   });
 
-  while (!ended || pending.length > 0) {
-    if (pending.length === 0) {
-      stream.resume();
-      await Promise.race([once(stream, "data"), endedPromise]);
-    } else {
-      stream.pause();
+  while (true) {
+    while (pending.length > 0) {
       yield pending.shift()!;
     }
     if (streamError) throw streamError;
+    if (ended) return;
+    await new Promise<void>((resolve) => {
+      notify = resolve;
+    });
   }
 }
 

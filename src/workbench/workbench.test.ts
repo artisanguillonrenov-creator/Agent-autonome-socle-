@@ -376,6 +376,71 @@ test("spreadsheet: EOCD falsifié et totalEntries sous-déclaré ne masquent pas
   await assert.rejects(() => listSheets(workspaces, workspaceId, "lying-eocd.xlsx"), /SPREADSHEET_XLSX_EXPANSION_LIMIT/);
 });
 
+// Régression Node 22 / ExcelJS #3064 : WorkbookReader.iterate-stream.js pausait le flux juste avant
+// chaque yield, ce qui pouvait faire manquer une entrée (typiquement xl/workbook.xml, toujours
+// écrite en dernier par ExcelJS) et lever "Cannot read properties of undefined (reading 'sheets')"
+// — reproduit localement à ~85-90% d'échec sur un classeur à 5 feuilles avant correctif. Corrigé à
+// la fois dans notre propre xlsxZipGuard.ts (voir iterateZipEntries) et dans ExcelJS lui-même via
+// patches/exceljs+4.4.0.patch (appliqué déterministiquement à chaque `npm install`, CI incluse).
+test("spreadsheet: XLSX à 5 feuilles — 10 lectures complètes successives retournent systématiquement les 5 feuilles avec les bons noms et données", async () => {
+  const { workspaces, workspaceId } = setup();
+  const sheetNames = ["Ventes", "Clients", "Stock", "Factures", "Notes"];
+  const buf = await xlsxBuffer((wb) => {
+    for (const name of sheetNames) {
+      const sheet = wb.addWorksheet(name);
+      sheet.addRow(["a", "b"]);
+      sheet.addRow([`${name}-1`, 1]);
+      sheet.addRow([`${name}-2`, 2]);
+    }
+  });
+  workspaces.writeFile(workspaceId, "multi.xlsx", buf);
+
+  for (let i = 0; i < 10; i++) {
+    const sheets = await listSheets(workspaces, workspaceId, "multi.xlsx");
+    assert.deepEqual(
+      sheets.sheets.map((s) => s.name),
+      sheetNames,
+      `itération ${i} : noms de feuilles`,
+    );
+    for (const name of sheetNames) {
+      const range = await readRange(workspaces, workspaceId, "multi.xlsx", { sheet: name, startRow: 0 });
+      assert.deepEqual(
+        range.rows,
+        [
+          ["a", "b"],
+          [`${name}-1`, 1],
+          [`${name}-2`, 2],
+        ],
+        `itération ${i} : données de la feuille ${name}`,
+      );
+    }
+  }
+});
+
+test("spreadsheet: le garde XLSX ne saute jamais une entrée-bombe malgré plusieurs entrées bénignes précédentes, même répété", async () => {
+  const { workspaces, workspaceId } = setup();
+  const benign = [1, 2, 3, 4].map((i) => buildRawZipEntry(`benign${i}.xml`, Buffer.from(`<xml>contenu ${i}</xml>`)));
+  const bombData = Buffer.alloc(WORKBENCH_LIMITS.SPREADSHEET_XLSX_MAX_ENTRY_UNCOMPRESSED_BYTES + 10 * 1024 * 1024, 0);
+  const bomb = buildRawZipEntry("xl/sharedStrings.xml", bombData);
+  const eocd = buildFakeEocd(
+    Buffer.alloc(0),
+    benign.length + 1,
+    0,
+    benign.reduce((n, e) => n + e.length, 0) + bomb.length,
+  );
+  const zipBytes = Buffer.concat([...benign, bomb, eocd]);
+  assert.ok(zipBytes.length < WORKBENCH_LIMITS.INPUT_FILE_MAX_BYTES);
+  workspaces.writeFile(workspaceId, "benign-then-bomb.xlsx", zipBytes);
+
+  for (let i = 0; i < 10; i++) {
+    await assert.rejects(
+      () => listSheets(workspaces, workspaceId, "benign-then-bomb.xlsx"),
+      /SPREADSHEET_XLSX_EXPANSION_LIMIT/,
+      `itération ${i} : l'entrée-bombe doit toujours être détectée, jamais sautée`,
+    );
+  }
+});
+
 test("spreadsheet: >200 colonnes bornées avec warning", async () => {
   const { workspaces, workspaceId } = setup();
   const header = Array.from({ length: 250 }, (_, i) => `c${i}`).join(",");
