@@ -1,13 +1,20 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { Octokit } from "@octokit/rest";
 import { CONTRACT_SCHEMA_VERSION, type TaskRequest, type ServiceEvent } from "../orchestration/contract.js";
-import { config } from "../config.js";
+import { config, type LLMProviderName } from "../config.js";
+import { createLLMProvider } from "../llm/providers/index.js";
+import type { LLMProvider } from "../llm/provider.js";
+import type { ChatMessage } from "../types.js";
 
 export interface SoftwareFactoryConfig {
   githubToken?: string;
   octokitClient?: Octokit;
-  openrouterApiKey?: string;
-  openrouterModel?: string;
+  /** Fournisseur LLM déjà instancié (essentiellement pour les tests). */
+  llmProvider?: LLMProvider;
+  /** Provider/modèle explicites de la Software Factory, indépendants de Jarvis (config.llm.*). */
+  softwareFactoryProvider?: LLMProviderName;
+  softwareFactoryModel?: string;
+  softwareFactoryMaxTokens?: number;
   maxRetries?: number;
 }
 
@@ -127,18 +134,41 @@ export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
   return { owner, repo, filePath, instructions, exactContent, targetBranch, targetPr };
 }
 
+/**
+ * Nettoie la sortie brute d'un LLM avant commit : retire les balises de raisonnement
+ * <think>...</think> (modèles "thinking") puis les éventuels blocs de code Markdown ```.
+ */
+export function cleanLLMCodeOutput(rawOutput: string): string {
+  let cleaned = rawOutput.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+
+  const codeBlockMatch = cleaned.match(/```(?:[a-z0-9_-]+)?\r?\n([\s\S]*?)\r?\n```/i);
+  if (codeBlockMatch && codeBlockMatch[1]) {
+    cleaned = codeBlockMatch[1].trim();
+  }
+
+  return cleaned.trim();
+}
+
 export class SoftwareFactoryService {
   private octokit: Octokit;
-  private openrouterApiKey: string;
-  private openrouterModel: string;
   private githubToken: string;
+  private llmProvider: LLMProvider;
+  private softwareFactoryMaxTokens: number;
   public readonly maxRetries: number;
 
   constructor(configObj: SoftwareFactoryConfig = {}) {
     this.githubToken = process.env.GITHUB_FACTORY_TOKEN || configObj.githubToken || process.env.GITHUB_TOKEN || "";
     this.octokit = configObj.octokitClient || new Octokit({ auth: this.githubToken || undefined });
-    this.openrouterApiKey = configObj.openrouterApiKey || process.env.OPENROUTER_API_KEY || "";
-    this.openrouterModel = configObj.openrouterModel || process.env.SOFTWARE_FACTORY_MODEL || "google/gemini-2.0-flash-lite-preview-02-05:free";
+
+    // Provider/modèle explicitement résolus ici : jamais laissés vides, donc createLLMProvider
+    // ne retombe jamais sur le provider actif de Jarvis ni sur la sélection persistée
+    // (llm_active_model). La Software Factory reste ainsi strictement indépendante.
+    const softwareFactoryProvider = configObj.softwareFactoryProvider || config.softwareFactory.provider;
+    const softwareFactoryModel = configObj.softwareFactoryModel || config.softwareFactory.model;
+    this.softwareFactoryMaxTokens = configObj.softwareFactoryMaxTokens ?? config.softwareFactory.maxTokens;
+    this.llmProvider =
+      configObj.llmProvider || createLLMProvider({ provider: softwareFactoryProvider, model: softwareFactoryModel });
+
     this.maxRetries = configObj.maxRetries ?? 3;
   }
 
@@ -181,82 +211,55 @@ export class SoftwareFactoryService {
   }
 
   /**
-   * Génère la mise à jour de code via OpenRouter (modèles gratuits).
-   * Échoue explicitement si l'accès au LLM n'est pas disponible sans fabriquer de faux commentaires.
+   * Génère la mise à jour de code via le provider LLM de la Software Factory
+   * (Infermatic par défaut, config.softwareFactory.*), indépendant du LLM de Jarvis.
+   * Échoue explicitement si l'accès au LLM n'est pas disponible ou si la génération
+   * échoue, sans jamais retomber silencieusement sur un autre fournisseur.
    */
   async generateCodeUpdate(
     existingContent: string,
     filePath: string,
     instructions: string,
   ): Promise<string> {
-    if (!this.openrouterApiKey) {
-      throw new Error("LLM_NOT_CONFIGURED: Variable OPENROUTER_API_KEY manquante pour la Software Factory.");
+    const messages: ChatMessage[] = [
+      {
+        role: "system",
+        content:
+          "You are Jarvis Software Factory. Modify the provided file according to the instructions. Return only the complete updated file content, without explanation.",
+      },
+      {
+        role: "user",
+        content: `File: ${filePath}\n\nCurrent content:\n\`\`\`\n${existingContent}\n\`\`\`\n\nInstructions:\n${instructions}\n\nUpdated code:`,
+      },
+    ];
+
+    let rawOutput: string | null;
+    try {
+      const result = await this.llmProvider.complete(messages, {
+        temperature: 0.2,
+        maxTokens: this.softwareFactoryMaxTokens,
+      });
+      rawOutput = result.content?.trim() ?? null;
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`CODE_GENERATION_FAILED: ${message}`);
     }
 
-    const freeModels = [
-      this.openrouterModel,
-      "google/gemini-2.0-flash-lite-preview-02-05:free",
-      "meta-llama/llama-3.3-70b-instruct:free",
-      "openrouter/auto",
-    ].filter((v, i, a) => v && a.indexOf(v) === i);
-
-    let lastError: Error | null = null;
-
-    for (const model of freeModels) {
-      try {
-        const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            authorization: `Bearer ${this.openrouterApiKey}`,
-          },
-          body: JSON.stringify({
-            model,
-            messages: [
-              {
-                role: "system",
-                content:
-                  "Vous êtes Jarvis Software Factory. Votre rôle est de modifier le code du fichier fourni selon les instructions. Renvoyez UNIQUEMENT le code complet mis à jour sans explications supplémentaires.",
-              },
-              {
-                role: "user",
-                content: `Fichier: ${filePath}\n\nContenu actuel:\n\`\`\`\n${existingContent}\n\`\`\`\n\nInstructions:\n${instructions}\n\nCode mis à jour:`,
-              },
-            ],
-            temperature: 0.2,
-          }),
-        });
-
-        if (!res.ok) {
-          throw new Error(`OpenRouter HTTP ${res.status}: ${await res.text()}`);
-        }
-
-        const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-        const rawOutput = data.choices?.[0]?.message?.content?.trim();
-
-        if (rawOutput) {
-          let cleanCode = rawOutput;
-          const codeBlockMatch = rawOutput.match(/```(?:[a-z0-9_-]+)?\n([\s\S]*?)\n```/i);
-          if (codeBlockMatch && codeBlockMatch[1]) {
-            cleanCode = codeBlockMatch[1].trim();
-          }
-
-          if (!cleanCode.trim()) {
-            throw new Error("NO_CHANGES_GENERATED: Le code généré est vide.");
-          }
-
-          if (existingContent && existingContent.trim() === cleanCode.trim()) {
-            throw new Error("NO_CHANGES_GENERATED: Le code généré est identique au contenu existant.");
-          }
-
-          return cleanCode;
-        }
-      } catch (err: unknown) {
-        lastError = err instanceof Error ? err : new Error(String(err));
-      }
+    if (!rawOutput) {
+      throw new Error("NO_CHANGES_GENERATED: Le code généré est vide.");
     }
 
-    throw new Error(`CODE_GENERATION_FAILED: ${lastError?.message || "Échec de génération de code via OpenRouter"}`);
+    const cleanCode = cleanLLMCodeOutput(rawOutput);
+
+    if (!cleanCode) {
+      throw new Error("NO_CHANGES_GENERATED: Le code généré est vide.");
+    }
+
+    if (existingContent && existingContent.trim() === cleanCode.trim()) {
+      throw new Error("NO_CHANGES_GENERATED: Le code généré est identique au contenu existant.");
+    }
+
+    return cleanCode;
   }
 
   /**
