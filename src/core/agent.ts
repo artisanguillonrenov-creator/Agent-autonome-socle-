@@ -244,7 +244,11 @@ export class Agent {
    * n'exécute aucun skill et ne fournit volontairement aucune définition d'outil.
    */
   async regenerateLastResponse(): Promise<{ response: string }> {
-    const history = this.memory.working.all();
+    // allEntries()/restoreEntries() (plutôt que all()/restore()) : préserve le workspaceId
+    // d'origine de chaque tour — une régénération ne doit jamais faire perdre son scope à
+    // l'historique de travail (projects.projectIsolation).
+    const entries = this.memory.working.allEntries();
+    const history = entries.map((e) => e.message);
     let lastAssistantIndex = -1;
     for (let index = history.length - 1; index >= 0; index--) {
       if (history[index].role === "assistant" && !history[index].toolCalls?.length) {
@@ -268,8 +272,8 @@ export class Agent {
     const response = completion.content?.trim();
     if (!response) throw new Error("EMPTY_REGENERATION_RESPONSE");
 
-    history[lastAssistantIndex] = { role: "assistant", content: response };
-    this.memory.working.restore(history);
+    entries[lastAssistantIndex] = { ...entries[lastAssistantIndex], message: { role: "assistant", content: response } };
+    this.memory.working.restoreEntries(entries);
     return { response };
   }
 

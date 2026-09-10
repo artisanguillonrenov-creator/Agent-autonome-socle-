@@ -12,6 +12,7 @@ const { LocalHashingEmbeddingProvider } = await import("../llm/embeddings.js");
 const { MockProvider } = await import("../llm/providers/mock.js");
 const { builtinSkills } = await import("../skills/builtin/index.js");
 const { selectRecentMessages } = await import("../memory/selectRecentMessages.js");
+const { config } = await import("../config.js");
 
 const ordinaryMessage = (content: string): ChatMessage => ({ role: "user", content });
 const toolBlock = (...ids: string[]): ChatMessage[] => [
@@ -393,4 +394,177 @@ test("Agent.setLLMProvider() est le point d'entrée unique : la boucle principal
   await agent.step("Second message, après bascule vers le nouveau provider.");
   assert.equal(calls.a, aCallsBeforeSwitch, "l'ancien provider ne doit plus jamais être sollicité après setLLMProvider");
   assert.ok(calls.b >= 1, "la boucle principale ET la réflexion automatique doivent utiliser le nouveau provider");
+});
+
+// ---------------------------------------------------------------------------
+// CORRECTION BLOQUANTE (audit PR #59) : projects.projectIsolation=true ne
+// filtrait que VectorMemory — WorkingMemory (recentMessages) et FactStore
+// restaient globaux, fuitant le contexte d'un projet vers un autre.
+// ---------------------------------------------------------------------------
+
+test("ISOLATION: projectIsolation=true empêche toute fuite inter-projets (messages récents, souvenirs vectoriels, facts) dans Agent.step", async () => {
+  const previousIsolation = config.projects.projectIsolation;
+  config.projects.projectIsolation = true;
+  try {
+    let lastMessages: ChatMessage[] = [];
+    const replies = ["Réponse assistant du projet A", "Réponse assistant du projet B"];
+    let replyIndex = 0;
+    const spy: LLMProvider = {
+      name: "isolation-spy",
+      async complete(messages: ChatMessage[]) {
+        lastMessages = messages;
+        return { content: replies[replyIndex++] ?? "ok" };
+      },
+    };
+    const agent = new Agent({ llm: spy, embeddings: new LocalHashingEmbeddingProvider() });
+
+    // Workspace A : message utilisateur A + réponse assistant A
+    await agent.step("Message confidentiel du projet A", "workspace-a");
+
+    // Un fait mémorisé pendant l'échange du projet A (rememberFact n'est aujourd'hui pas
+    // scopé par workspace : la garantie doit donc venir de l'exclusion des facts du
+    // contexte isolé, pas d'un faux scope).
+    agent.memory.facts.set("projet_a_client", "nom", "Client Confidentiel A");
+
+    // Workspace B : message utilisateur B
+    await agent.step("Message du projet B", "workspace-b");
+
+    // Rien du projet A n'a atteint les messages réellement envoyés au LLM pour le tour B.
+    const sentToLLMForB = lastMessages.map((m) => String(m.content ?? "")).join("\n");
+    assert.equal(sentToLLMForB.includes("Message confidentiel du projet A"), false, "aucun message A dans les messages envoyés au LLM pour B");
+    assert.equal(sentToLLMForB.includes("Réponse assistant du projet A"), false, "aucun souvenir A dans les messages envoyés au LLM pour B");
+    assert.equal(sentToLLMForB.includes("Client Confidentiel A"), false, "aucun fait A dans les messages envoyés au LLM pour B");
+    assert.ok(sentToLLMForB.includes("Message du projet B"), "le message B doit être présent dans son propre contexte");
+
+    // Vérification directe au niveau de la façade mémoire (le contrat testé par l'audit).
+    const retrievedForB = await agent.memory.retrieve("Message du projet B", 5, "workspace-b");
+    assert.equal(
+      retrievedForB.recentMessages.some((m) => String(m.content ?? "").includes("projet A")),
+      false,
+      "aucun message A n'apparaît dans recentMessages de B",
+    );
+    assert.equal(
+      retrievedForB.relevantMemories.some((m) => m.text.includes("projet A")),
+      false,
+      "aucun souvenir A n'apparaît dans relevantMemories de B",
+    );
+    assert.equal(retrievedForB.facts.length, 0, "aucun fact (globaux par conception) n'apparaît dans le contexte isolé de B");
+    assert.ok(
+      retrievedForB.recentMessages.some((m) => String(m.content ?? "").includes("Message du projet B")),
+      "les messages de B sont bien présents",
+    );
+
+    // Le workspace A garde lui-même l'accès à son propre contexte (l'isolation n'efface rien).
+    const retrievedForA = await agent.memory.retrieve("Message confidentiel du projet A", 5, "workspace-a");
+    assert.ok(
+      retrievedForA.recentMessages.some((m) => String(m.content ?? "").includes("Message confidentiel du projet A")),
+      "le workspace A conserve son propre historique",
+    );
+  } finally {
+    config.projects.projectIsolation = previousIsolation;
+  }
+});
+
+test("ISOLATION: projectIsolation=false conserve le comportement global historique (aucune régression)", async () => {
+  const previousIsolation = config.projects.projectIsolation;
+  config.projects.projectIsolation = false;
+  try {
+    let lastMessages: ChatMessage[] = [];
+    const replies = ["Réponse A", "Réponse B"];
+    let replyIndex = 0;
+    const spy: LLMProvider = {
+      name: "global-spy",
+      async complete(messages: ChatMessage[]) {
+        lastMessages = messages;
+        return { content: replies[replyIndex++] ?? "ok" };
+      },
+    };
+    const agent = new Agent({ llm: spy, embeddings: new LocalHashingEmbeddingProvider() });
+
+    await agent.step("Premier message global", "workspace-a");
+    await agent.step("Second message global", "workspace-b");
+
+    // Isolation désactivée : l'historique global reste visible même à travers des
+    // workspaceId différents — comportement historique inchangé.
+    const sentToLLM = lastMessages.map((m) => String(m.content ?? "")).join("\n");
+    assert.ok(sentToLLM.includes("Premier message global"), "sans isolation, l'historique global reste accessible entre workspaces");
+
+    const retrieved = await agent.memory.retrieve("Second message global", 5, "workspace-b");
+    assert.ok(
+      retrieved.recentMessages.some((m) => String(m.content ?? "").includes("Premier message global")),
+      "sans isolation, les messages d'un autre workspace restent dans recentMessages (comportement historique)",
+    );
+  } finally {
+    config.projects.projectIsolation = previousIsolation;
+  }
+});
+
+test("ISOLATION: sans workspaceId fourni, comportement global sûr (pas de crash, pas de filtrage ambigu)", async () => {
+  const previousIsolation = config.projects.projectIsolation;
+  config.projects.projectIsolation = true;
+  try {
+    const agent = new Agent({ llm: new MockProvider(), embeddings: new LocalHashingEmbeddingProvider() });
+    const result = await agent.step("Message sans workspace précisé");
+    assert.match(result.response, /mock/);
+
+    const retrieved = await agent.memory.retrieve("Message sans workspace précisé");
+    assert.ok(
+      retrieved.recentMessages.some((m) => String(m.content ?? "").includes("Message sans workspace précisé")),
+      "sans workspaceId, le tour reste visible (pas de filtrage impossible à satisfaire)",
+    );
+  } finally {
+    config.projects.projectIsolation = previousIsolation;
+  }
+});
+
+test("ISOLATION: le protocole assistant -> tool_calls -> tool results reste correct avec projectIsolation=true", async () => {
+  const previousIsolation = config.projects.projectIsolation;
+  config.projects.projectIsolation = true;
+  try {
+    let calls = 0;
+    let receivedToolCallIdInSecondCall = "";
+    const nativeProvider: LLMProvider = {
+      name: "native_llm_isolated",
+      supportsNativeTools() {
+        return true;
+      },
+      async complete(messages: ChatMessage[], options?: CompletionOptions) {
+        calls += 1;
+        if (calls === 1) {
+          assert.ok(options?.tools && options.tools.length > 0);
+          return {
+            content: null,
+            toolCalls: [
+              {
+                id: "call_isolated_web_search",
+                type: "function",
+                function: { name: "web_search", arguments: '{"query":"actualités isolées"}' },
+              },
+            ],
+          };
+        }
+        const toolMsg = messages.find((m) => m.role === "tool" && m.name === "web_search");
+        if (toolMsg) receivedToolCallIdInSecondCall = toolMsg.toolCallId || "";
+        return { content: "Résultat trouvé pour le projet isolé." };
+      },
+    };
+
+    const agent = new Agent({ llm: nativeProvider, embeddings: new LocalHashingEmbeddingProvider() });
+    for (const skill of builtinSkills) agent.skills.register(skill);
+
+    const result = await agent.step("Cherche des actualités sur internet", "workspace-tools");
+
+    assert.equal(calls, 2, "le cycle assistant -> tool_calls -> tool results doit s'exécuter normalement sous isolation");
+    assert.equal(receivedToolCallIdInSecondCall, "call_isolated_web_search");
+    assert.match(result.response, /Résultat trouvé/);
+
+    // Le bloc assistant/tool_calls + tool doit rester intact dans le contexte du même workspace.
+    const retrieved = await agent.memory.retrieve("Cherche des actualités sur internet", 5, "workspace-tools");
+    const hasAssistantToolCall = retrieved.recentMessages.some((m) => m.role === "assistant" && m.toolCalls?.some((tc) => tc.id === "call_isolated_web_search"));
+    const hasToolResult = retrieved.recentMessages.some((m) => m.role === "tool" && m.toolCallId === "call_isolated_web_search");
+    assert.ok(hasAssistantToolCall, "le message assistant avec tool_calls reste présent pour son propre workspace");
+    assert.ok(hasToolResult, "le résultat de l'outil associé reste présent pour son propre workspace");
+  } finally {
+    config.projects.projectIsolation = previousIsolation;
+  }
 });
