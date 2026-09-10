@@ -209,7 +209,7 @@ async function loadRawRowsForPath(workspaces: WorkspaceStore, workspaceId: strin
   const { absolutePath, size } = workspaces.resolveExistingFile(workspaceId, path);
   if (size > WORKBENCH_LIMITS.INPUT_FILE_MAX_BYTES) throw workbenchError("SPREADSHEET_FILE_TOO_LARGE");
   if (format === "xlsx") {
-    assertXlsxDecompressionSafe(absolutePath);
+    await assertXlsxDecompressionSafe(absolutePath);
     return loadXlsxRawRows(absolutePath, req);
   }
   const text = readFileSync(absolutePath, "utf8");
@@ -226,7 +226,7 @@ export async function listSheets(workspaces: WorkspaceStore, workspaceId: string
   const { absolutePath, size } = workspaces.resolveExistingFile(workspaceId, path);
   if (size > WORKBENCH_LIMITS.INPUT_FILE_MAX_BYTES) throw workbenchError("SPREADSHEET_FILE_TOO_LARGE");
   if (format !== "xlsx") return { path, format, sheets: [{ name: "Sheet1", index: 0 }] };
-  assertXlsxDecompressionSafe(absolutePath);
+  await assertXlsxDecompressionSafe(absolutePath);
 
   const reader = new ExcelJS.stream.xlsx.WorkbookReader(absolutePath, {
     worksheets: "emit",

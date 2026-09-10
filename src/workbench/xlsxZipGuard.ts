@@ -1,85 +1,156 @@
-import { readFileSync } from "node:fs";
+import { createReadStream } from "node:fs";
+import { once } from "node:events";
+import * as unzipper from "unzipper";
 import { WORKBENCH_LIMITS, workbenchError } from "./limits.js";
 
-const EOCD_SIGNATURE = 0x06054b50;
-const CENTRAL_DIRECTORY_SIGNATURE = 0x02014b50;
-const EOCD_MIN_SIZE = 22;
-const CENTRAL_DIRECTORY_HEADER_SIZE = 46;
-const MAX_ZIP_COMMENT_BYTES = 65535;
-const ZIP64_SENTINEL_32 = 0xffffffff;
-const ZIP64_SENTINEL_16 = 0xffff;
+/**
+ * Contrôle préflight anti zip-bomb du conteneur XLSX, AVANT qu'ExcelJS ne consomme le fichier.
+ *
+ * ExcelJS's `WorkbookReader` (`sharedStrings: "cache"` inclus) décompresse en interne via
+ * `unzipper.Parse({ forceStream: true })`, un parseur ZIP *séquentiel* (lecture des Local File
+ * Headers dans l'ordre du flux, sans jamais s'appuyer sur l'EOCD/Central Directory pour localiser
+ * les entrées — c'est justement ce qui lui permet de fonctionner en flux).
+ *
+ * Une première version de ce garde réimplémentait sa propre lecture EOCD/Central Directory et ne
+ * validait que les tailles *déclarées*. Deux failles en découlaient :
+ *  1. Un second parseur ZIP écrit à la main peut structurellement diverger du parseur réel
+ *     (EOCD falsifié dans le commentaire, totalEntries sous-déclaré, Central Directory
+ *     incohérent avec les Local File Headers...) — la garde voit alors un fichier différent de
+ *     celui qu'ExcelJS traitera réellement.
+ *  2. Une taille déclarée reste une affirmation de l'attaquant, jamais une preuve du volume
+ *     réellement produit par l'inflation.
+ *
+ * La correction : ne PAS réécrire un second parseur ZIP à faire concorder avec le premier — mais
+ * réutiliser le MÊME parseur (`unzipper.Parse({ forceStream: true })`), avec les mêmes options que
+ * `ExcelJS.stream.xlsx.WorkbookReader`, et décompresser réellement chaque entrée nous-mêmes en
+ * comptant les octets effectivement produits, coupant immédiatement dès qu'une limite est
+ * dépassée. Comme il s'agit littéralement du même parseur, il n'existe plus de fichier que la
+ * garde et ExcelJS interpréteraient différemment.
+ */
 
-function findEndOfCentralDirectory(buf: Buffer): number {
-  if (buf.length < EOCD_MIN_SIZE) throw workbenchError("SPREADSHEET_XLSX_MALFORMED");
-  const searchStart = Math.max(0, buf.length - EOCD_MIN_SIZE - MAX_ZIP_COMMENT_BYTES);
-  for (let i = buf.length - EOCD_MIN_SIZE; i >= searchStart; i--) {
-    if (buf.readUInt32LE(i) === EOCD_SIGNATURE) return i;
-  }
-  throw workbenchError("SPREADSHEET_XLSX_MALFORMED");
+interface EntryState {
+  totalUncompressed: number;
 }
 
 /**
- * Contrôle préflight du conteneur ZIP d'un .xlsx, AVANT toute ouverture par
- * `ExcelJS.stream.xlsx.WorkbookReader` — donc avant toute décompression, y
- * compris de `xl/sharedStrings.xml` (mis en cache intégral en mémoire par
- * l'option `sharedStrings: "cache"`).
- *
- * Lit uniquement les métadonnées du répertoire central (tailles compressée
- * et décompressée déclarées par entrée) sans jamais inflater quoi que ce
- * soit, et rejette le fichier si :
- *  - une entrée déclare une taille décompressée individuellement excessive ;
- *  - la somme des tailles décompressées déclarées dépasse la limite globale ;
- *  - le ratio décompressé/compressé d'une entrée dépasse le seuil autorisé.
- *
- * Toute utilisation d'un champ ZIP64 (sentinelle 0xFFFF/0xFFFFFFFF) est
- * traitée comme suspecte et rejetée : un .xlsx légitime sous
- * INPUT_FILE_MAX_BYTES n'a jamais besoin de ZIP64.
+ * Reproduit fidèlement `exceljs/lib/utils/iterate-stream.js` (non exporté par le paquet) : c'est
+ * exactement ainsi qu'ExcelJS consomme le flux `unzipper.Parse({ forceStream: true })`, pause/
+ * reprise incluses. Réutiliser ce même protocole de consommation, plutôt que l'itération
+ * asynchrone native du stream, garantit qu'aucun octet n'est vu différemment par la garde et par
+ * le lecteur réel.
  */
-export function assertXlsxDecompressionSafe(absolutePath: string): void {
-  const buf = readFileSync(absolutePath);
-  const eocdOffset = findEndOfCentralDirectory(buf);
+async function* iterateZipEntries(stream: unzipper.ParseStream): AsyncGenerator<unzipper.Entry> {
+  const pending: unzipper.Entry[] = [];
+  stream.on("data", (entry: unzipper.Entry) => pending.push(entry));
 
-  const totalEntries = buf.readUInt16LE(eocdOffset + 10);
-  const centralDirectorySize = buf.readUInt32LE(eocdOffset + 12);
-  const centralDirectoryOffset = buf.readUInt32LE(eocdOffset + 16);
-  if (
-    totalEntries === ZIP64_SENTINEL_16 ||
-    centralDirectorySize === ZIP64_SENTINEL_32 ||
-    centralDirectoryOffset === ZIP64_SENTINEL_32
-  ) {
-    throw workbenchError("SPREADSHEET_XLSX_EXPANSION_LIMIT");
+  let ended = false;
+  let resolveEnded!: () => void;
+  const endedPromise = new Promise<void>((resolve) => {
+    resolveEnded = resolve;
+  });
+  stream.on("end", () => {
+    ended = true;
+    resolveEnded();
+  });
+
+  let streamError: Error | false = false;
+  stream.on("error", (err: Error) => {
+    streamError = err;
+    resolveEnded();
+  });
+
+  while (!ended || pending.length > 0) {
+    if (pending.length === 0) {
+      stream.resume();
+      await Promise.race([once(stream, "data"), endedPromise]);
+    } else {
+      stream.pause();
+      yield pending.shift()!;
+    }
+    if (streamError) throw streamError;
   }
-  if (centralDirectoryOffset + centralDirectorySize > buf.length) throw workbenchError("SPREADSHEET_XLSX_MALFORMED");
+}
 
-  let pos = centralDirectoryOffset;
-  let totalUncompressed = 0;
-  for (let i = 0; i < totalEntries; i++) {
-    if (pos + CENTRAL_DIRECTORY_HEADER_SIZE > buf.length || buf.readUInt32LE(pos) !== CENTRAL_DIRECTORY_SIGNATURE) {
-      throw workbenchError("SPREADSHEET_XLSX_MALFORMED");
-    }
-    const compressedSize = buf.readUInt32LE(pos + 20);
-    const uncompressedSize = buf.readUInt32LE(pos + 24);
-    const nameLength = buf.readUInt16LE(pos + 28);
-    const extraLength = buf.readUInt16LE(pos + 30);
-    const commentLength = buf.readUInt16LE(pos + 32);
+/** Draine une entrée "Directory" (jamais de contenu réel à inflater) sans jamais en dépendre. */
+function drainDirectoryEntry(entry: unzipper.Entry): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const drain = entry.autodrain();
+    drain.on("finish", resolve);
+    drain.on("error", reject);
+  });
+}
 
-    if (compressedSize === ZIP64_SENTINEL_32 || uncompressedSize === ZIP64_SENTINEL_32) {
-      throw workbenchError("SPREADSHEET_XLSX_EXPANSION_LIMIT");
-    }
-    if (uncompressedSize > WORKBENCH_LIMITS.SPREADSHEET_XLSX_MAX_ENTRY_UNCOMPRESSED_BYTES) {
-      throw workbenchError("SPREADSHEET_XLSX_EXPANSION_LIMIT");
-    }
-    // Le ratio n'est évalué qu'au-delà d'un plancher : un minuscule fichier stocké peut
-    // légitimement avoir un ratio élevé (ex: XML vide) sans être un zip-bomb.
-    if (uncompressedSize > 1024 && uncompressedSize / Math.max(compressedSize, 1) > WORKBENCH_LIMITS.SPREADSHEET_XLSX_MAX_COMPRESSION_RATIO) {
-      throw workbenchError("SPREADSHEET_XLSX_EXPANSION_LIMIT");
-    }
+const RATIO_MIN_SAMPLE_BYTES = 4096;
 
-    totalUncompressed += uncompressedSize;
-    if (totalUncompressed > WORKBENCH_LIMITS.SPREADSHEET_XLSX_MAX_TOTAL_UNCOMPRESSED_BYTES) {
-      throw workbenchError("SPREADSHEET_XLSX_EXPANSION_LIMIT");
-    }
+/**
+ * Décompresse réellement une entrée en comptant chaque octet produit — jamais la taille déclarée
+ * dans le Local File Header — et coupe immédiatement (destroy) dès qu'une limite réelle est
+ * dépassée : taille par entrée, total cumulé, ou ratio décompressé/compressé (heuristique
+ * d'arrêt anticipé, la taille réelle restant l'unique garantie contraignante).
+ */
+function consumeEntryBounded(entry: unzipper.Entry, state: EntryState): Promise<void> {
+  const declaredCompressed = Math.max(entry.vars?.compressedSize ?? 0, 0);
+  let entryBytes = 0;
 
-    pos += CENTRAL_DIRECTORY_HEADER_SIZE + nameLength + extraLength + commentLength;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      entry.destroy(err);
+      reject(err);
+    };
+    const succeed = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+
+    entry.on("data", (chunk: Buffer) => {
+      if (settled) return;
+      entryBytes += chunk.length;
+      state.totalUncompressed += chunk.length;
+      if (entryBytes > WORKBENCH_LIMITS.SPREADSHEET_XLSX_MAX_ENTRY_UNCOMPRESSED_BYTES) {
+        fail(workbenchError("SPREADSHEET_XLSX_EXPANSION_LIMIT"));
+        return;
+      }
+      if (state.totalUncompressed > WORKBENCH_LIMITS.SPREADSHEET_XLSX_MAX_TOTAL_UNCOMPRESSED_BYTES) {
+        fail(workbenchError("SPREADSHEET_XLSX_EXPANSION_LIMIT"));
+        return;
+      }
+      if (
+        declaredCompressed > 0 &&
+        entryBytes > RATIO_MIN_SAMPLE_BYTES &&
+        entryBytes / declaredCompressed > WORKBENCH_LIMITS.SPREADSHEET_XLSX_MAX_COMPRESSION_RATIO
+      ) {
+        fail(workbenchError("SPREADSHEET_XLSX_EXPANSION_LIMIT"));
+      }
+    });
+    entry.on("end", succeed);
+    entry.on("error", (err: Error) => fail(err instanceof Error ? err : new Error(String(err))));
+  });
+}
+
+export async function assertXlsxDecompressionSafe(absolutePath: string): Promise<void> {
+  const fileStream = createReadStream(absolutePath);
+  const zip = unzipper.Parse({ forceStream: true });
+  fileStream.on("error", (err) => zip.destroy(err));
+  fileStream.pipe(zip);
+
+  const state: EntryState = { totalUncompressed: 0 };
+  try {
+    for await (const entry of iterateZipEntries(zip)) {
+      if (entry.type === "Directory") {
+        await drainDirectoryEntry(entry);
+        continue;
+      }
+      await consumeEntryBounded(entry, state);
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message === "SPREADSHEET_XLSX_EXPANSION_LIMIT") throw err;
+    throw workbenchError("SPREADSHEET_XLSX_MALFORMED");
+  } finally {
+    fileStream.destroy();
+    zip.destroy();
   }
 }

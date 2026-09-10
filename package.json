@@ -25,12 +25,14 @@
     "dotenv": "^16.4.5",
     "exceljs": "^4.4.0",
     "pdf-parse": "^2.4.5",
-    "pg": "^8.23.0"
+    "pg": "^8.23.0",
+    "unzipper": "^0.10.14"
   },
   "devDependencies": {
     "@capacitor/cli": "^8.5.1",
     "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^20.14.0",
+    "@types/unzipper": "^0.10.11",
     "tsx": "^4.19.0",
     "typescript": "^5.5.4"
   }

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, symlinkSync, readFileSync as fsReadFileSync } from "node:fs";
+import { deflateRawSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -51,43 +52,46 @@ async function xlsxBuffer(build: (wb: ExcelJS.Workbook) => void): Promise<Buffer
   return Buffer.from(await wb.xlsx.writeBuffer());
 }
 
+const ZIP_LOCAL_FILE_HEADER_SIGNATURE = 0x04034b50;
 const ZIP_EOCD_SIGNATURE = 0x06054b50;
-const ZIP_CENTRAL_DIRECTORY_SIGNATURE = 0x02014b50;
-
-function findZipEocd(buf: Buffer): number {
-  for (let i = buf.length - 22; i >= 0; i--) {
-    if (buf.readUInt32LE(i) === ZIP_EOCD_SIGNATURE) return i;
-  }
-  throw new Error("EOCD introuvable dans le fixture de test");
-}
-
-function countZipEntries(buf: Buffer): number {
-  return buf.readUInt16LE(findZipEocd(buf) + 10);
-}
 
 /**
- * Falsifie, dans le répertoire central du ZIP, les tailles compressée/décompressée déclarées de
- * chaque entrée — sans toucher aux données réellement compressées — pour simuler un conteneur XLSX
- * qui reste petit sur disque mais ment sur ce qu'il prétend décompresser.
+ * Construit une entrée ZIP "Local File Header" brute (deflate), avec des tailles réellement
+ * compressées/décompressées maîtrisées par le test — et, via `declaredUncompressedSize`, une
+ * taille déclarée éventuellement mensongère (par défaut : honnête). C'est le format que
+ * `unzipper.Parse({ forceStream: true })` — et donc le garde XLSX comme ExcelJS lui-même — lit
+ * réellement, séquentiellement, indépendamment de tout Central Directory.
  */
-function tamperXlsxDeclaredSizes(
-  buf: Buffer,
-  mutate: (out: Buffer, entryIndex: number, uncompressedSizeOffset: number, compressedSizeOffset: number) => void,
-): Buffer {
-  const out = Buffer.from(buf);
-  const eocd = findZipEocd(out);
-  const totalEntries = out.readUInt16LE(eocd + 10);
-  const cdOffset = out.readUInt32LE(eocd + 16);
-  let pos = cdOffset;
-  for (let i = 0; i < totalEntries; i++) {
-    if (out.readUInt32LE(pos) !== ZIP_CENTRAL_DIRECTORY_SIGNATURE) throw new Error("entrée de répertoire central inattendue dans le fixture");
-    mutate(out, i, pos + 24, pos + 20);
-    const nameLength = out.readUInt16LE(pos + 28);
-    const extraLength = out.readUInt16LE(pos + 30);
-    const commentLength = out.readUInt16LE(pos + 32);
-    pos += 46 + nameLength + extraLength + commentLength;
-  }
-  return out;
+function buildRawZipEntry(fileName: string, realData: Buffer, declaredUncompressedSize = realData.length): Buffer {
+  const compressed = deflateRawSync(realData, { level: 6 });
+  const header = Buffer.alloc(30);
+  header.writeUInt32LE(ZIP_LOCAL_FILE_HEADER_SIGNATURE, 0);
+  header.writeUInt16LE(20, 4); // version needed
+  header.writeUInt16LE(0, 6); // flags
+  header.writeUInt16LE(8, 8); // compression method = deflate
+  header.writeUInt16LE(0, 10); // time
+  header.writeUInt16LE(0, 12); // date
+  header.writeUInt32LE(0, 14); // crc32 (non vérifié avant l'abandon du garde)
+  header.writeUInt32LE(compressed.length, 18); // compressed size (réelle, sincère)
+  header.writeUInt32LE(declaredUncompressedSize, 22); // uncompressed size — potentiellement mensongère
+  const nameBuf = Buffer.from(fileName, "utf8");
+  header.writeUInt16LE(nameBuf.length, 26);
+  header.writeUInt16LE(0, 28); // extra field length
+  return Buffer.concat([header, nameBuf, compressed]);
+}
+
+/** Construit un EOCD (fin de répertoire central) arbitraire — y compris mensonger — pour les tests. */
+function buildFakeEocd(comment: Buffer, totalEntries: number, centralDirectoryOffset: number, centralDirectorySize: number): Buffer {
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(ZIP_EOCD_SIGNATURE, 0);
+  eocd.writeUInt16LE(0, 4); // disk number
+  eocd.writeUInt16LE(0, 6); // disk with CD start
+  eocd.writeUInt16LE(totalEntries, 8);
+  eocd.writeUInt16LE(totalEntries, 10);
+  eocd.writeUInt32LE(centralDirectorySize, 12);
+  eocd.writeUInt32LE(centralDirectoryOffset, 16);
+  eocd.writeUInt16LE(comment.length, 20);
+  return Buffer.concat([eocd, comment]);
 }
 
 function buildMinimalPdf(includeText: boolean): Buffer {
@@ -291,59 +295,85 @@ test("spreadsheet: fichier >25 MiB rejeté avant même listSheets", async () => 
   await assert.rejects(() => listSheets(workspaces, workspaceId, "huge.csv"), /SPREADSHEET_FILE_TOO_LARGE/);
 });
 
-test("spreadsheet: XLSX zip-bomb (entrée individuelle) rejeté avant toute décompression, via LIST_SHEETS", async () => {
+// Ces tests construisent des ZIP bruts, octet par octet, avec de VRAIES données déflatées (pas
+// seulement des tailles déclarées maquillées) : le garde ne fait plus confiance à aucune métadonnée
+// ZIP (EOCD, Central Directory, ou même le champ "uncompressed size" du Local File Header) — il
+// compte les octets réellement produits par l'inflation, via le même parseur séquentiel
+// (`unzipper.Parse({ forceStream: true })`) qu'ExcelJS utilise en interne. Chacun de ces tests
+// aurait trompé le garde de la version précédente (commit 0bd7d175), qui ne validait que des
+// tailles déclarées dans le Central Directory.
+
+test("spreadsheet: XLSX zip-bomb réel (une entrée) rejeté avant toute décompression complète, via LIST_SHEETS", async () => {
   const { workspaces, workspaceId } = setup();
-  const base = await xlsxBuffer((wb) => {
-    const sheet = wb.addWorksheet("S");
-    sheet.addRow(["a", "b"]);
-    sheet.addRow([1, 2]);
-  });
-  const bomb = tamperXlsxDeclaredSizes(base, (out, entryIndex, uncompressedOffset) => {
-    if (entryIndex === 0) out.writeUInt32LE(WORKBENCH_LIMITS.SPREADSHEET_XLSX_MAX_ENTRY_UNCOMPRESSED_BYTES + 1, uncompressedOffset);
-  });
-  assert.ok(bomb.length < WORKBENCH_LIMITS.INPUT_FILE_MAX_BYTES);
-  workspaces.writeFile(workspaceId, "bomb-entry.xlsx", bomb);
+  const bombData = Buffer.alloc(WORKBENCH_LIMITS.SPREADSHEET_XLSX_MAX_ENTRY_UNCOMPRESSED_BYTES + 10 * 1024 * 1024, 0);
+  const entry = buildRawZipEntry("xl/sharedStrings.xml", bombData);
+  const eocd = buildFakeEocd(Buffer.alloc(0), 1, 0, entry.length);
+  const zipBytes = Buffer.concat([entry, eocd]);
+  assert.ok(zipBytes.length < WORKBENCH_LIMITS.INPUT_FILE_MAX_BYTES);
+  workspaces.writeFile(workspaceId, "bomb-entry.xlsx", zipBytes);
   await assert.rejects(() => listSheets(workspaces, workspaceId, "bomb-entry.xlsx"), /SPREADSHEET_XLSX_EXPANSION_LIMIT/);
 });
 
-test("spreadsheet: XLSX zip-bomb (total décompressé) rejeté via READ_RANGE", async () => {
+test("spreadsheet: XLSX zip-bomb réel (total décompressé cumulé) rejeté via READ_RANGE, sans dépasser le plafond par entrée", async () => {
   const { workspaces, workspaceId } = setup();
-  const base = await xlsxBuffer((wb) => {
-    const sheet = wb.addWorksheet("S");
-    sheet.addRow(["a", "b"]);
-    sheet.addRow([1, 2]);
-  });
-  const entryCount = countZipEntries(base);
-  const perEntryDeclared = Math.min(
-    WORKBENCH_LIMITS.SPREADSHEET_XLSX_MAX_ENTRY_UNCOMPRESSED_BYTES - 1,
-    Math.ceil((WORKBENCH_LIMITS.SPREADSHEET_XLSX_MAX_TOTAL_UNCOMPRESSED_BYTES * 2) / entryCount),
+  const perEntrySize = 200 * 1024 * 1024;
+  assert.ok(perEntrySize < WORKBENCH_LIMITS.SPREADSHEET_XLSX_MAX_ENTRY_UNCOMPRESSED_BYTES);
+  const entries = [1, 2, 3].map((i) => buildRawZipEntry(`part${i}.xml`, Buffer.alloc(perEntrySize, 0)));
+  assert.ok(entries.length * perEntrySize > WORKBENCH_LIMITS.SPREADSHEET_XLSX_MAX_TOTAL_UNCOMPRESSED_BYTES);
+  const eocd = buildFakeEocd(
+    Buffer.alloc(0),
+    entries.length,
+    0,
+    entries.reduce((n, e) => n + e.length, 0),
   );
-  const bomb = tamperXlsxDeclaredSizes(base, (out, _entryIndex, uncompressedOffset) => out.writeUInt32LE(perEntryDeclared, uncompressedOffset));
-  assert.ok(bomb.length < WORKBENCH_LIMITS.INPUT_FILE_MAX_BYTES);
-  assert.ok(perEntryDeclared * entryCount > WORKBENCH_LIMITS.SPREADSHEET_XLSX_MAX_TOTAL_UNCOMPRESSED_BYTES);
-  workspaces.writeFile(workspaceId, "bomb-total.xlsx", bomb);
+  const zipBytes = Buffer.concat([...entries, eocd]);
+  assert.ok(zipBytes.length < WORKBENCH_LIMITS.INPUT_FILE_MAX_BYTES);
+  workspaces.writeFile(workspaceId, "bomb-total.xlsx", zipBytes);
   await assert.rejects(() => readRange(workspaces, workspaceId, "bomb-total.xlsx", { startRow: 0 }), /SPREADSHEET_XLSX_EXPANSION_LIMIT/);
 });
 
-test("spreadsheet: XLSX zip-bomb (ratio de compression) rejeté, y compris via data_analysis", async () => {
+test("spreadsheet: XLSX zip-bomb réel (ratio) rejeté avant les plafonds absolus, y compris via data_analysis", async () => {
   const { workspaces, workspaceId } = setup();
-  const base = await xlsxBuffer((wb) => {
-    const sheet = wb.addWorksheet("S");
-    sheet.addRow(["v"]);
-    sheet.addRow([1]);
-  });
-  const bomb = tamperXlsxDeclaredSizes(base, (out, entryIndex, uncompressedOffset, compressedOffset) => {
-    if (entryIndex === 0) {
-      out.writeUInt32LE(5 * 1024 * 1024, uncompressedOffset); // 5 MiB déclarés, sous les deux plafonds
-      out.writeUInt32LE(4, compressedOffset); // ...pour 4 octets compressés déclarés : ratio ~1.3M
-    }
-  });
-  assert.ok(bomb.length < WORKBENCH_LIMITS.INPUT_FILE_MAX_BYTES);
-  workspaces.writeFile(workspaceId, "bomb-ratio.xlsx", bomb);
+  const data = Buffer.alloc(5 * 1024 * 1024, 0); // 5 MiB réels, largement sous les deux plafonds absolus
+  const entry = buildRawZipEntry("xl/worksheets/sheet1.xml", data);
+  const eocd = buildFakeEocd(Buffer.alloc(0), 1, 0, entry.length);
+  const zipBytes = Buffer.concat([entry, eocd]);
+  assert.ok(zipBytes.length < WORKBENCH_LIMITS.INPUT_FILE_MAX_BYTES);
+  workspaces.writeFile(workspaceId, "bomb-ratio.xlsx", zipBytes);
   await assert.rejects(
     () => runDataAnalysis(workspaces, { workspaceId, path: "bomb-ratio.xlsx", action: "COUNT" }),
     /SPREADSHEET_XLSX_EXPANSION_LIMIT/,
   );
+});
+
+test("spreadsheet: taille décompressée déclarée mensongèrement sûre (Local File Header) n'empêche pas la détection", async () => {
+  const { workspaces, workspaceId } = setup();
+  const bombData = Buffer.alloc(WORKBENCH_LIMITS.SPREADSHEET_XLSX_MAX_ENTRY_UNCOMPRESSED_BYTES + 10 * 1024 * 1024, 0);
+  // Le Local File Header ment : il annonce 42 octets décompressés alors que les données
+  // compressées, une fois réellement inflatées, en produisent des centaines de millions.
+  const entry = buildRawZipEntry("xl/sharedStrings.xml", bombData, 42);
+  const eocd = buildFakeEocd(Buffer.alloc(0), 1, 0, entry.length);
+  const zipBytes = Buffer.concat([entry, eocd]);
+  assert.ok(zipBytes.length < WORKBENCH_LIMITS.INPUT_FILE_MAX_BYTES);
+  workspaces.writeFile(workspaceId, "lying-size.xlsx", zipBytes);
+  await assert.rejects(() => listSheets(workspaces, workspaceId, "lying-size.xlsx"), /SPREADSHEET_XLSX_EXPANSION_LIMIT/);
+});
+
+test("spreadsheet: EOCD falsifié et totalEntries sous-déclaré ne masquent pas une entrée-bombe", async () => {
+  const { workspaces, workspaceId } = setup();
+  const legit = buildRawZipEntry("small.txt", Buffer.from("hello"));
+  const bombData = Buffer.alloc(WORKBENCH_LIMITS.SPREADSHEET_XLSX_MAX_ENTRY_UNCOMPRESSED_BYTES + 10 * 1024 * 1024, 0);
+  const bomb = buildRawZipEntry("xl/sharedStrings.xml", bombData);
+  // Un faux EOCD "précoce" est glissé dans le commentaire du vrai EOCD, et celui-ci ment sur le
+  // nombre d'entrées (1 au lieu de 2). Le garde ne lit ni l'un ni l'autre : il suit le flux
+  // séquentiel des Local File Headers, exactement comme ExcelJS le fera ensuite, et rencontre
+  // donc forcément l'entrée-bombe quoi que prétendent l'EOCD ou son commentaire.
+  const fakeInnerEocd = buildFakeEocd(Buffer.alloc(0), 0, 0, 0);
+  const realEocd = buildFakeEocd(fakeInnerEocd, 1, 0, legit.length + bomb.length);
+  const zipBytes = Buffer.concat([legit, bomb, realEocd]);
+  assert.ok(zipBytes.length < WORKBENCH_LIMITS.INPUT_FILE_MAX_BYTES);
+  workspaces.writeFile(workspaceId, "lying-eocd.xlsx", zipBytes);
+  await assert.rejects(() => listSheets(workspaces, workspaceId, "lying-eocd.xlsx"), /SPREADSHEET_XLSX_EXPANSION_LIMIT/);
 });
 
 test("spreadsheet: >200 colonnes bornées avec warning", async () => {
