@@ -17,13 +17,11 @@ export const WORKBENCH_ERRORS = {
   DATABASE_NOT_FOUND: "DATABASE_NOT_FOUND",
   DATABASE_QUERY_NOT_READ_ONLY: "DATABASE_QUERY_NOT_READ_ONLY",
   DATABASE_QUERY_INVALID: "DATABASE_QUERY_INVALID",
-  DATABASE_QUERY_TIMEOUT: "DATABASE_QUERY_TIMEOUT",
   REPORT_GENERATION_FAILED: "REPORT_GENERATION_FAILED",
 } as const;
 
 export type WorkbenchErrorCode = keyof typeof WORKBENCH_ERRORS;
 
-// Path sandbox helper
 export function resolveWorkspacePath(
   workspaceStore: WorkspaceStore,
   workspaceId: string,
@@ -40,7 +38,6 @@ export function resolveWorkspacePath(
 
   const trimmed = relativePath.trim();
 
-  // Reject file:// or URL schemes or absolute paths
   if (
     trimmed.startsWith("file://") ||
     trimmed.startsWith("http://") ||
@@ -51,7 +48,6 @@ export function resolveWorkspacePath(
     throw new Error(WORKBENCH_ERRORS.WORKBENCH_PATH_OUTSIDE_WORKSPACE);
   }
 
-  // Check workspace exists
   const workspace = workspaceStore.get(workspaceId);
   if (!workspace) {
     throw new Error(WORKBENCH_ERRORS.WORKBENCH_PATH_OUTSIDE_WORKSPACE);
@@ -59,7 +55,6 @@ export function resolveWorkspacePath(
 
   const workspaceRoot = resolve(workspaceStore.root, workspaceId);
 
-  // Normalize path
   const normalizedRel = normalize(trimmed).replace(/\\/g, "/");
   if (
     normalizedRel.startsWith("../") ||
@@ -83,7 +78,6 @@ export function resolveWorkspacePath(
     throw new Error(WORKBENCH_ERRORS.WORKBENCH_PATH_OUTSIDE_WORKSPACE);
   }
 
-  // Symlink and existence check
   try {
     let cursor = workspaceRoot;
     const parts = relCheck.split(sep);
@@ -313,6 +307,31 @@ export interface TimeSeriesResult {
   valueColumn?: string;
   granularity: TimeSeriesGranularity;
   points: TimeSeriesPoint[];
+  truncated: boolean;
+  totalResults: number;
+  returnedResults: number;
+}
+
+export interface GroupByResult {
+  rows: Record<string, unknown>[];
+  truncated: boolean;
+  totalResults: number;
+  returnedResults: number;
+}
+
+export interface DistributionResult {
+  column: string;
+  distribution: { value: string; count: number; percentage: number }[];
+  truncated: boolean;
+  totalResults: number;
+  returnedResults: number;
+}
+
+export interface BoundedDatasetResult {
+  rows: Record<string, unknown>[];
+  truncated: boolean;
+  totalResults: number;
+  returnedResults: number;
 }
 
 // Database Query Engine Types

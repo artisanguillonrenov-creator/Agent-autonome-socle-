@@ -1,8 +1,11 @@
 import {
+  BoundedDatasetResult,
   CorrelationResult,
   DateDescribe,
   DescribeResult,
+  DistributionResult,
   DuplicateResult,
+  GroupByResult,
   MissingValueResult,
   NumericDescribe,
   OutlierResult,
@@ -156,9 +159,12 @@ export class DataAnalysisEngine {
   }
 
   count(rows: Record<string, unknown>[], mode: "COUNT_ROWS" | "COUNT_NON_NULL" = "COUNT_ROWS", column?: string): number {
-    this.validateDataset(rows);
+    const columns = this.validateDataset(rows);
     if (mode === "COUNT_ROWS") return rows.length;
-    if (!column) return rows.length;
+
+    if (!column || !columns.includes(column)) {
+      throw new Error(WORKBENCH_ERRORS.DATA_COLUMN_NOT_FOUND);
+    }
     return rows.filter((r) => r[column] !== null && r[column] !== undefined && r[column] !== "").length;
   }
 
@@ -223,7 +229,7 @@ export class DataAnalysisEngine {
     groupColumn: string,
     valueColumn?: string,
     fn: "COUNT" | "SUM" | "MEAN" | "MIN" | "MAX" = "COUNT"
-  ): Record<string, unknown>[] {
+  ): GroupByResult {
     const columns = this.validateDataset(rows);
     if (!columns.includes(groupColumn)) {
       throw new Error(WORKBENCH_ERRORS.DATA_COLUMN_NOT_FOUND);
@@ -242,10 +248,10 @@ export class DataAnalysisEngine {
       groups.get(key)!.push(r);
     }
 
-    const results: Record<string, unknown>[] = [];
-    for (const [key, groupRows] of groups.entries()) {
-      if (results.length >= DATASET_LIMITS.maxResultRows) break;
+    const totalResults = groups.size;
+    const allResults: Record<string, unknown>[] = [];
 
+    for (const [key, groupRows] of groups.entries()) {
       let val: number = 0;
       if (fn === "COUNT") {
         val = groupRows.length;
@@ -256,16 +262,24 @@ export class DataAnalysisEngine {
         else if (fn === "MAX") val = this.max(groupRows, valueColumn);
       }
 
-      results.push({
+      allResults.push({
         [groupColumn]: key,
         [valueColumn ? `${valueColumn}_${fn.toLowerCase()}` : fn.toLowerCase()]: val
       });
     }
 
-    return results;
+    const truncated = totalResults > DATASET_LIMITS.maxResultRows;
+    const returnedRows = allResults.slice(0, DATASET_LIMITS.maxResultRows);
+
+    return {
+      rows: returnedRows,
+      truncated,
+      totalResults,
+      returnedResults: returnedRows.length
+    };
   }
 
-  topN(rows: Record<string, unknown>[], column: string, n = 10): Record<string, unknown>[] {
+  topN(rows: Record<string, unknown>[], column: string, n = 10): BoundedDatasetResult {
     const columns = this.validateDataset(rows);
     if (!columns.includes(column)) {
       throw new Error(WORKBENCH_ERRORS.DATA_COLUMN_NOT_FOUND);
@@ -275,7 +289,9 @@ export class DataAnalysisEngine {
       throw new Error(WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED);
     }
 
-    const cap = Math.min(n, DATASET_LIMITS.maxResultRows);
+    const requestedCap = Math.min(n, DATASET_LIMITS.maxResultRows);
+    const totalResults = rows.length;
+
     const sorted = [...rows].sort((a, b) => {
       const rawA = a[column];
       const rawB = b[column];
@@ -293,10 +309,18 @@ export class DataAnalysisEngine {
       return String(rawB).localeCompare(String(rawA));
     });
 
-    return sorted.slice(0, cap);
+    const returnedRows = sorted.slice(0, requestedCap);
+    const truncated = n > DATASET_LIMITS.maxResultRows || totalResults > requestedCap;
+
+    return {
+      rows: returnedRows,
+      truncated,
+      totalResults,
+      returnedResults: returnedRows.length
+    };
   }
 
-  bottomN(rows: Record<string, unknown>[], column: string, n = 10): Record<string, unknown>[] {
+  bottomN(rows: Record<string, unknown>[], column: string, n = 10): BoundedDatasetResult {
     const columns = this.validateDataset(rows);
     if (!columns.includes(column)) {
       throw new Error(WORKBENCH_ERRORS.DATA_COLUMN_NOT_FOUND);
@@ -306,7 +330,9 @@ export class DataAnalysisEngine {
       throw new Error(WORKBENCH_ERRORS.DATA_TYPE_UNSUPPORTED);
     }
 
-    const cap = Math.min(n, DATASET_LIMITS.maxResultRows);
+    const requestedCap = Math.min(n, DATASET_LIMITS.maxResultRows);
+    const totalResults = rows.length;
+
     const sorted = [...rows].sort((a, b) => {
       const rawA = a[column];
       const rawB = b[column];
@@ -324,10 +350,18 @@ export class DataAnalysisEngine {
       return String(rawA).localeCompare(String(rawB));
     });
 
-    return sorted.slice(0, cap);
+    const returnedRows = sorted.slice(0, requestedCap);
+    const truncated = n > DATASET_LIMITS.maxResultRows || totalResults > requestedCap;
+
+    return {
+      rows: returnedRows,
+      truncated,
+      totalResults,
+      returnedResults: returnedRows.length
+    };
   }
 
-  distribution(rows: Record<string, unknown>[], column: string): { value: string; count: number; percentage: number }[] {
+  distribution(rows: Record<string, unknown>[], column: string): DistributionResult {
     const columns = this.validateDataset(rows);
     if (!columns.includes(column)) {
       throw new Error(WORKBENCH_ERRORS.DATA_COLUMN_NOT_FOUND);
@@ -340,6 +374,8 @@ export class DataAnalysisEngine {
     }
 
     const total = rows.length;
+    const totalResults = counts.size;
+
     const sorted = Array.from(counts.entries())
       .map(([value, cnt]) => ({
         value,
@@ -348,7 +384,16 @@ export class DataAnalysisEngine {
       }))
       .sort((a, b) => b.count - a.count);
 
-    return sorted.slice(0, DATASET_LIMITS.maxResultRows);
+    const truncated = totalResults > DATASET_LIMITS.maxResultRows;
+    const returnedList = sorted.slice(0, DATASET_LIMITS.maxResultRows);
+
+    return {
+      column,
+      distribution: returnedList,
+      truncated,
+      totalResults,
+      returnedResults: returnedList.length
+    };
   }
 
   missingValues(rows: Record<string, unknown>[]): MissingValueResult[] {
@@ -592,8 +637,10 @@ export class DataAnalysisEngine {
       }
     }
 
-    const points: TimeSeriesPoint[] = [];
     const sortedKeys = Array.from(groups.keys()).sort();
+    const totalResults = sortedKeys.length;
+
+    const allPoints: TimeSeriesPoint[] = [];
 
     for (const period of sortedKeys) {
       const vals = groups.get(period)!;
@@ -606,20 +653,26 @@ export class DataAnalysisEngine {
           const min = Math.min(...vals);
           const max = Math.max(...vals);
 
-          points.push({ period, count, sum, mean, min, max });
+          allPoints.push({ period, count, sum, mean, min, max });
         } else {
-          points.push({ period, count: 0 });
+          allPoints.push({ period, count: 0 });
         }
       } else {
-        points.push({ period, count });
+        allPoints.push({ period, count });
       }
     }
+
+    const truncated = totalResults > DATASET_LIMITS.maxResultRows;
+    const returnedPoints = allPoints.slice(0, DATASET_LIMITS.maxResultRows);
 
     return {
       dateColumn,
       valueColumn,
       granularity,
-      points
+      points: returnedPoints,
+      truncated,
+      totalResults,
+      returnedResults: returnedPoints.length
     };
   }
 }

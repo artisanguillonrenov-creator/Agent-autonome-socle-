@@ -16,6 +16,7 @@ export const DOCUMENT_LIMITS = {
   maxInputBytes: 25 * 1024 * 1024, // 25 MB
   maxExtractedCharacters: 2_000_000,
   maxSearchResults: 100,
+  maxContextChars: 2000,
   maxSections: 500
 };
 
@@ -182,7 +183,6 @@ export class DocumentEngine {
       ? pdfPageSections
       : this.extractSections(fullText, format);
 
-    // Filter and clamp sections to strictly stay within fullText.length
     sections = sections
       .filter((s) => s.startOffset === undefined || s.startOffset < fullText.length)
       .map((s) => {
@@ -274,8 +274,22 @@ export class DocumentEngine {
   }
 
   searchDocument(document: DocumentResult, options: DocumentSearchOptions): DocumentSearchMatch[] {
-    const { query, caseSensitive = false, maxResults = DOCUMENT_LIMITS.maxSearchResults, contextChars = 40 } = options;
+    const { query, caseSensitive = false } = options;
     if (!query || !document.text) return [];
+
+    // Sanitize and clamp maxResults
+    let rawMax = options.maxResults;
+    if (typeof rawMax !== "number" || isNaN(rawMax) || !isFinite(rawMax) || rawMax <= 0) {
+      rawMax = DOCUMENT_LIMITS.maxSearchResults;
+    }
+    const maxResults = Math.min(Math.max(1, Math.floor(rawMax)), DOCUMENT_LIMITS.maxSearchResults);
+
+    // Sanitize and clamp contextChars
+    let rawContext = options.contextChars;
+    if (typeof rawContext !== "number" || isNaN(rawContext) || !isFinite(rawContext) || rawContext < 0) {
+      rawContext = 40;
+    }
+    const contextChars = Math.min(Math.max(0, Math.floor(rawContext)), DOCUMENT_LIMITS.maxContextChars);
 
     const normText = this.normalizeSearchString(document.text, caseSensitive);
     const normQuery = this.normalizeSearchString(query, caseSensitive);
