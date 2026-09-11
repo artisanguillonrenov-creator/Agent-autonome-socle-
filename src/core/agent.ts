@@ -19,7 +19,7 @@ import { executeMissionMetadata } from "../skills/catalog.js";
 import { ActivityStore } from "../observability/activityStore.js";
 import type { GithubReadOnlyClient } from "../repository/githubReadOnlyClient.js";
 import { withGenerationDefaults } from "../llm/generationDefaults.js";
-import { completeWithFallback } from "../llm/fallbackChain.js";
+import { completeWithLocalPriority } from "../llm/localModelPriority.js";
 import { providerForRole } from "../llm/modelRouter.js";
 import { resolveEffectiveInputBudget } from "../llm/contextWindow.js";
 
@@ -88,6 +88,7 @@ export class Agent {
     let iterations = 0;
     let finalResponse = "";
     let lastActionOrStep = "Initialisation du cycle";
+    let pendingAction: AgentStepResult["pendingAction"];
 
     while (iterations < this.maxIterations) {
       iterations++;
@@ -144,7 +145,7 @@ export class Agent {
           : undefined;
       const roleProvider = role ? providerForRole(role, this.llm) : this.llm;
 
-      const completionResult = await completeWithFallback(
+      const completionResult = await completeWithLocalPriority(
         roleProvider,
         messages,
         withGenerationDefaults({
@@ -206,6 +207,8 @@ export class Agent {
             toolCallId:toolCall.id,
           };
           const result = await this.skills.execute(skillName, parsedInput, context);
+          const exactPending = this.pendingActionFromToolResult(result);
+          if (exactPending) pendingAction = exactPending;
 
           const formattedToolOutput = `[Résultat de l'outil '${skillName}']: ${result}`;
 
@@ -236,6 +239,34 @@ export class Agent {
     return {
       response: finalResponse,
       iterations,
+      ...(pendingAction ? { pendingAction } : {}),
+    };
+  }
+
+  /**
+   * Le taskId est capturé depuis LE résultat du tool effectivement exécuté, jamais en
+   * cherchant "la dernière opération" globale. Le store n'est relu que pour enrichir
+   * ce taskId exact avec le niveau de risque persistant.
+   */
+  private pendingActionFromToolResult(result: string): AgentStepResult["pendingAction"] | undefined {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(result);
+    } catch {
+      return undefined;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    const data = parsed as Record<string, unknown>;
+    const status = data.status;
+    const taskId = typeof data.taskId === "string" ? data.taskId : undefined;
+    if (!taskId || (status !== "WAITING_PERMISSION" && status !== "WAITING_INPUT")) return undefined;
+
+    const operation = this.serviceOrchestrator.store.getOperation(taskId);
+    const risk = operation?.riskLevel;
+    return {
+      type: status === "WAITING_PERMISSION" ? "PERMISSION" : "INPUT",
+      taskId,
+      ...(risk === "LOW" || risk === "MEDIUM" || risk === "HIGH" || risk === "CRITICAL" ? { riskLevel: risk } : {}),
     };
   }
 
@@ -267,7 +298,7 @@ export class Agent {
       ...history.slice(0, lastAssistantIndex),
       { role: "user", content: `Réécris uniquement cette réponse finale :\n${previousResponse}` },
     ];
-    const completion = await completeWithFallback(this.llm, messages, withGenerationDefaults({ tools: undefined }));
+    const completion = await completeWithLocalPriority(this.llm, messages, withGenerationDefaults({ tools: undefined }));
     if (completion.toolCalls?.length) throw new Error("UNEXPECTED_TOOL_CALL_DURING_REGENERATION");
     const response = completion.content?.trim();
     if (!response) throw new Error("EMPTY_REGENERATION_RESPONSE");
