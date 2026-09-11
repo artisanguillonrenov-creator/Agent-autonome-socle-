@@ -3,6 +3,7 @@ package com.jarvis.commandcenter.voice;
 import android.Manifest;
 import android.content.Intent;
 import android.os.Build;
+import android.widget.Toast;
 
 import androidx.core.content.ContextCompat;
 
@@ -43,8 +44,13 @@ public class VoicePlugin extends Plugin {
 
     @PermissionCallback
     private void microphonePermissionCallback(PluginCall call) {
-        if (getPermissionState("microphone") == PermissionState.GRANTED) call.resolve();
-        else call.reject("MICROPHONE_PERMISSION_REQUIRED");
+        if (getPermissionState("microphone") == PermissionState.GRANTED) {
+            showUserFeedback("Micro autorisé");
+            call.resolve();
+        } else {
+            showUserFeedback("Autorisation microphone requise");
+            call.reject("MICROPHONE_PERMISSION_REQUIRED");
+        }
     }
 
     @PluginMethod
@@ -102,6 +108,7 @@ public class VoicePlugin extends Plugin {
         }
 
         if (getPermissionState("microphone") != PermissionState.GRANTED) {
+            showUserFeedback("Autorisation microphone requise");
             call.reject("MICROPHONE_PERMISSION_REQUIRED");
             return;
         }
@@ -114,6 +121,7 @@ public class VoicePlugin extends Plugin {
             ContextCompat.startForegroundService(getContext(), intent);
             call.resolve();
         } catch (RuntimeException error) {
+            showUserFeedback("Impossible de démarrer le service vocal");
             call.reject("VOICE_SERVICE_START_FAILED", error);
         }
     }
@@ -132,6 +140,7 @@ public class VoicePlugin extends Plugin {
     @PluginMethod
     public void startListening(PluginCall call) {
         if (getPermissionState("microphone") != PermissionState.GRANTED) {
+            showUserFeedback("Autorisation microphone requise");
             call.reject("MICROPHONE_PERMISSION_REQUIRED");
             return;
         }
@@ -141,8 +150,10 @@ public class VoicePlugin extends Plugin {
         if (workspaceId != null) intent.putExtra(VoiceForegroundService.EXTRA_WORKSPACE_ID, workspaceId);
         try {
             ContextCompat.startForegroundService(getContext(), intent);
+            showUserFeedback("Démarrage de l'écoute Jarvis…");
             call.resolve();
         } catch (RuntimeException error) {
+            showUserFeedback("Impossible de démarrer le microphone");
             call.reject("VOICE_SERVICE_START_FAILED", error);
         }
     }
@@ -160,6 +171,7 @@ public class VoicePlugin extends Plugin {
             ContextCompat.startForegroundService(getContext(), intent);
             call.resolve();
         } catch (RuntimeException error) {
+            showUserFeedback("Impossible de reprendre le service vocal");
             call.reject("VOICE_SERVICE_START_FAILED", error);
         }
     }
@@ -184,8 +196,7 @@ public class VoicePlugin extends Plugin {
             return;
         }
         if (getPermissionState("microphone") != PermissionState.GRANTED) {
-            // The only native service in Chantier 10 is microphone-typed; do not try to
-            // start it from the background without its required while-in-use permission.
+            showUserFeedback("Autorisation microphone requise");
             call.reject("MICROPHONE_PERMISSION_REQUIRED");
             return;
         }
@@ -196,6 +207,7 @@ public class VoicePlugin extends Plugin {
             ContextCompat.startForegroundService(getContext(), intent);
             call.resolve();
         } catch (RuntimeException error) {
+            showUserFeedback("Impossible de démarrer la synthèse vocale");
             call.reject("VOICE_SERVICE_START_FAILED", error);
         }
     }
@@ -220,6 +232,13 @@ public class VoicePlugin extends Plugin {
             getContext().startService(new Intent(getContext(), VoiceForegroundService.class).setAction(action));
         } catch (RuntimeException error) {
             VoicePlugin.emitVoiceError("VOICE_SERVICE_ACTION_FAILED");
+        }
+    }
+
+    private void showUserFeedback(String message) {
+        if (message == null || message.isEmpty()) return;
+        if (getActivity() != null) {
+            getActivity().runOnUiThread(() -> Toast.makeText(getContext(), message, Toast.LENGTH_SHORT).show());
         }
     }
 
@@ -258,8 +277,10 @@ public class VoicePlugin extends Plugin {
     static void emitVoiceError(String code) {
         VoicePlugin plugin = activePlugin.get();
         if (plugin == null) return;
+        String safeCode = code == null ? "VOICE_ERROR" : code;
         JSObject data = new JSObject();
-        data.put("code", code == null ? "VOICE_ERROR" : code);
+        data.put("code", safeCode);
         plugin.notifyListeners("voiceError", data, true);
+        plugin.showUserFeedback("Voix Jarvis : " + safeCode);
     }
 }
