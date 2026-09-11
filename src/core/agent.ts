@@ -262,7 +262,8 @@ export class Agent {
     if (!taskId || (status !== "WAITING_PERMISSION" && status !== "WAITING_INPUT")) return undefined;
 
     const operation = this.serviceOrchestrator.store.getOperation(taskId);
-    const risk = operation?.riskLevel;
+    if (!operation || operation.status !== status) return undefined;
+    const risk = operation.riskLevel;
     return {
       type: status === "WAITING_PERMISSION" ? "PERMISSION" : "INPUT",
       taskId,
