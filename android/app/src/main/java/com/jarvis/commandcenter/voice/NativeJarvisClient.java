@@ -53,9 +53,30 @@ public final class NativeJarvisClient {
         this.config = new SecureVoiceConfigStore(context);
     }
 
+    private synchronized String ensureConversationId(String workspaceId) throws Exception {
+        String existing = config.getActiveConversationId();
+        if (existing != null && !existing.trim().isEmpty()) return existing.trim();
+
+        JSONObject create = new JSONObject();
+        if (workspaceId != null && !workspaceId.trim().isEmpty()) create.put("workspaceId", workspaceId.trim());
+        HttpResult result = request("POST", "/api/conversations", create);
+        if (result.status != 200 && result.status != 201) throw httpError(result);
+        String conversationId = result.json.optString("conversationId", "").trim();
+        if (conversationId.isEmpty()) throw new IOException("CONVERSATION_CREATE_INVALID_RESPONSE");
+        config.setActiveConversationId(conversationId);
+        return conversationId;
+    }
+
+    private void rememberConversationFromResponse(JSONObject json) {
+        String conversationId = json.optString("conversationId", "").trim();
+        if (!conversationId.isEmpty()) config.setActiveConversationId(conversationId);
+    }
+
     public VoiceResponse executeVoiceCommand(String voiceCommandId, String message, String workspaceId) throws Exception {
+        String conversationId = ensureConversationId(workspaceId);
         JSONObject body = new JSONObject();
         body.put("voiceCommandId", voiceCommandId);
+        body.put("conversationId", conversationId);
         body.put("message", message);
         if (workspaceId != null && !workspaceId.trim().isEmpty()) body.put("workspaceId", workspaceId.trim());
 
@@ -63,6 +84,7 @@ public final class NativeJarvisClient {
         for (int attempt = 0; attempt < 2; attempt++) {
             try {
                 HttpResult result = request("POST", "/api/voice/command", body);
+                rememberConversationFromResponse(result.json);
                 if (result.status == 200) return parseVoiceResponse(result.json);
                 if (result.status == 202) return pollCommandUntilTerminal(voiceCommandId);
                 throw httpError(result);
@@ -72,8 +94,8 @@ public final class NativeJarvisClient {
                     VoiceResponse recovered = pollCommandUntilTerminal(voiceCommandId);
                     if (recovered != null) return recovered;
                 } catch (Exception ignored) {
-                    // Retry the exact same voiceCommandId once. The backend ingress store
-                    // provides at-most-once semantics even if the original POST succeeded.
+                    // Retry the exact same voiceCommandId once. conversation_turns provides
+                    // the canonical at-most-once semantics for Chantier 11A.
                 }
             }
         }
@@ -83,6 +105,7 @@ public final class NativeJarvisClient {
     public JSONObject getVoiceCommand(String voiceCommandId) throws Exception {
         HttpResult result = request("GET", "/api/voice/commands/" + encode(voiceCommandId), null);
         if (result.status != 200) throw httpError(result);
+        rememberConversationFromResponse(result.json);
         return result.json;
     }
 
@@ -123,6 +146,7 @@ public final class NativeJarvisClient {
                 throw new IOException("VOICE_COMMAND_NOT_FOUND");
             }
             if (result.status != 200) throw httpError(result);
+            rememberConversationFromResponse(result.json);
             String state = result.json.optString("status", "");
             if ("DONE".equals(state) || result.json.has("response")) return parseVoiceResponse(result.json);
             if ("RECOVERY_REQUIRED".equals(state)) throw new IOException("VOICE_COMMAND_RECOVERY_REQUIRED");
