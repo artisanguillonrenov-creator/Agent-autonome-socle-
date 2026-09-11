@@ -16,8 +16,8 @@ function stripTrailingSlash(url: string): string {
 
 export const config = {
   llm: {
-    provider: (process.env.LLM_PROVIDER as LLMProviderName) || "mock",
-    model: process.env.LLM_MODEL || "undi95/toppy-m-7b",
+    provider: (process.env.LLM_PROVIDER as LLMProviderName) || "infermatic",
+    model: process.env.LLM_MODEL || "Qwen-Qwen3.6-35B-A3B",
     anthropicApiKey: process.env.ANTHROPIC_API_KEY || "",
     openaiApiKey: process.env.OPENAI_API_KEY || "",
     openrouterApiKey: process.env.OPENROUTER_API_KEY || "",
