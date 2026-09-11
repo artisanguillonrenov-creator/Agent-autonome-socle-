@@ -36,6 +36,12 @@ export function applyAllEffectiveRuntimeSettings(agent: Agent, settingsStore = n
       config.locale.language = val as "fr" | "en";
     } else if (key === "settings.responseLength" && typeof val === "string") {
       config.locale.responseLength = val as "SHORT" | "NORMAL" | "DETAILED";
+    } else if (key === "settings.automaticVoiceReading" && typeof val === "boolean") {
+      config.voice.automaticVoiceReading = val;
+    } else if (key === "settings.voiceMode" && typeof val === "string") {
+      config.voice.mode = val as typeof config.voice.mode;
+    } else if (key === "settings.voiceResponseMode" && typeof val === "string") {
+      config.voice.responseMode = val as typeof config.voice.responseMode;
     } else if (key === "intelligence.temperature" && typeof val === "number") {
       config.llm.temperature = val;
     } else if (key === "intelligence.topP" && typeof val === "number") {
@@ -54,6 +60,8 @@ export function applyAllEffectiveRuntimeSettings(agent: Agent, settingsStore = n
       config.llm.researchModel = val;
     } else if (key === "intelligence.utilityModel" && typeof val === "string") {
       config.llm.utilityModel = val;
+    } else if (key === "intelligence.localModelPriority" && typeof val === "boolean") {
+      config.llm.localModelPriority = val;
     } else if (key === "autonomy.globalRiskLevel" && typeof val === "string") {
       config.autonomy.globalRiskLevel = val as typeof config.autonomy.globalRiskLevel;
     } else if (key === "autonomy.permissionMatrix" && typeof val === "string") {
@@ -76,6 +84,12 @@ export function applyAllEffectiveRuntimeSettings(agent: Agent, settingsStore = n
       config.activity.logLevel = val as typeof config.activity.logLevel;
     } else if (key === "activity.emailAlerts" && typeof val === "boolean") {
       config.activity.emailAlerts = val;
+    } else if (key === "activity.androidPush" && typeof val === "boolean") {
+      config.activity.androidPush = val;
+    } else if (key === "activity.smsAlerts" && typeof val === "boolean") {
+      config.activity.smsAlerts = val;
+    } else if (key === "activity.voiceAlerts" && typeof val === "boolean") {
+      config.activity.voiceAlerts = val;
     } else if (key === "automations.emailTriggers" && typeof val === "boolean") {
       config.automations.emailTriggers = val;
     } else if (key === "automations.crmTriggers" && typeof val === "boolean") {
