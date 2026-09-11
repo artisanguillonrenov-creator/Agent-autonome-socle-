@@ -9,7 +9,24 @@ const __dirname = dirname(__filename);
 const rootDir = join(__dirname, "..");
 const wwwDir = join(rootDir, "www");
 
-// 1. Target files to bundle
+// Chantier 11A continuity shim must also be present in the Capacitor/base index copied
+// by `npx cap sync android`. Ensure the generated build asset references it without
+// requiring a manual edit of the large legacy index.html.
+const indexPath = join(wwwDir, "index.html");
+const conversationBootstrapPath = join(wwwDir, "conversationPersistence.js");
+if (existsSync(indexPath) && existsSync(conversationBootstrapPath)) {
+  const tag = '<script src="conversationPersistence.js" data-jarvis-conversation-bootstrap="11a"></script>';
+  const indexHtml = readFileSync(indexPath, "utf-8");
+  if (!indexHtml.includes('data-jarvis-conversation-bootstrap="11a"')) {
+    writeFileSync(indexPath, indexHtml.replace("</body>", `  ${tag}\n</body>`), "utf-8");
+  }
+}
+
+// 1. Target files to bundle.
+// Keep the historical OTA contract intentionally limited to these three files.
+// conversationPersistence.js is a normal static www asset referenced by index.html;
+// fresh Web/Capacitor builds ship it with www, but it must not alter the OTA payload
+// shape/hash contract validated by otaClient.test.ts.
 const filesToBundle = ["index.html", "style.css", "app.js"];
 const bundleFilesMap = {};
 
@@ -29,13 +46,6 @@ writeFileSync(bundlePath, bundlePayload, "utf-8");
 // main, qui fait foi pour savoir si un bundle a réellement changé.
 const sha256 = createHash("sha256").update(bundlePayload).digest("hex");
 
-/**
- * Identifiant de build unique : dérivé du commit réellement déployé quand la
- * plateforme d'hébergement (Render) ou la CI (GitHub Actions) l'expose, sinon dérivé
- * du contenu du bundle lui-même. Jamais une valeur fixe : chaque changement de code
- * Web produit un buildId différent, ce qui permet au client de détecter une nouvelle
- * mise à jour sans dépendre d'un numéro de version bumpé manuellement.
- */
 function resolveBuildId() {
   const fromEnv =
     process.env.OTA_BUILD_ID ||

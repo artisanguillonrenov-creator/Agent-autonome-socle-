@@ -21,6 +21,7 @@ public final class SecureVoiceConfigStore {
     private static final String KEY_TOKEN = "credential";
     private static final String KEY_MODE = "voice_mode";
     private static final String KEY_RESPONSE_MODE = "voice_response_mode";
+    private static final String KEY_CONVERSATION_ID_PREFIX = "active_conversation_id.";
 
     private final SharedPreferences prefs;
 
@@ -81,6 +82,40 @@ public final class SecureVoiceConfigStore {
 
     public String getVoiceResponseMode() {
         return prefs.getString(KEY_RESPONSE_MODE, "AUTO");
+    }
+
+    private static String conversationKey(String workspaceId) {
+        String scope = workspaceId == null || workspaceId.trim().isEmpty()
+                ? "__global__"
+                : workspaceId.trim();
+        String encodedScope = Base64.encodeToString(
+                scope.getBytes(StandardCharsets.UTF_8),
+                Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING
+        );
+        return KEY_CONVERSATION_ID_PREFIX + encodedScope;
+    }
+
+    public void setActiveConversationId(String workspaceId, String conversationId) {
+        String key = conversationKey(workspaceId);
+        if (conversationId == null || conversationId.trim().isEmpty()) {
+            prefs.edit().remove(key).apply();
+        } else {
+            prefs.edit().putString(key, conversationId.trim()).apply();
+        }
+    }
+
+    public String getActiveConversationId(String workspaceId) {
+        return prefs.getString(conversationKey(workspaceId), "");
+    }
+
+    /** Legacy global-scope compatibility. */
+    public void setActiveConversationId(String conversationId) {
+        setActiveConversationId(null, conversationId);
+    }
+
+    /** Legacy global-scope compatibility. */
+    public String getActiveConversationId() {
+        return getActiveConversationId(null);
     }
 
     private SecretKey getOrCreateKey() throws Exception {
