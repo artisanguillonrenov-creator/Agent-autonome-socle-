@@ -87,17 +87,35 @@ public class VoicePlugin extends Plugin {
     @PluginMethod
     public void setVoiceMode(PluginCall call) {
         String mode = call.getString("mode", "OFF");
-        if (!"OFF".equals(mode) && getPermissionState("microphone") != PermissionState.GRANTED) {
+        SecureVoiceConfigStore store = new SecureVoiceConfigStore(getContext());
+
+        // OFF must never start the microphone foreground service. On Android 14+ / targetSdk 34+
+        // promoting a microphone-typed service without RECORD_AUDIO can throw SecurityException.
+        // This is especially dangerous immediately after a reinstall, where the WebView/settings
+        // may be restored before the runtime permission is granted. Persist OFF and stop any
+        // existing service instance instead of starting one just to tell it to stop.
+        if ("OFF".equals(mode)) {
+            store.setVoiceMode("OFF");
+            getContext().stopService(new Intent(getContext(), VoiceForegroundService.class));
+            call.resolve();
+            return;
+        }
+
+        if (getPermissionState("microphone") != PermissionState.GRANTED) {
             call.reject("MICROPHONE_PERMISSION_REQUIRED");
             return;
         }
-        new SecureVoiceConfigStore(getContext()).setVoiceMode(mode);
+
+        store.setVoiceMode(mode);
         Intent intent = new Intent(getContext(), VoiceForegroundService.class)
                 .setAction(VoiceForegroundService.ACTION_SET_MODE)
                 .putExtra(VoiceForegroundService.EXTRA_MODE, mode);
-        if ("OFF".equals(mode)) getContext().startService(intent);
-        else ContextCompat.startForegroundService(getContext(), intent);
-        call.resolve();
+        try {
+            ContextCompat.startForegroundService(getContext(), intent);
+            call.resolve();
+        } catch (RuntimeException error) {
+            call.reject("VOICE_SERVICE_START_FAILED", error);
+        }
     }
 
     @PluginMethod
@@ -121,8 +139,12 @@ public class VoicePlugin extends Plugin {
                 .setAction(VoiceForegroundService.ACTION_LISTEN);
         String workspaceId = call.getString("workspaceId");
         if (workspaceId != null) intent.putExtra(VoiceForegroundService.EXTRA_WORKSPACE_ID, workspaceId);
-        ContextCompat.startForegroundService(getContext(), intent);
-        call.resolve();
+        try {
+            ContextCompat.startForegroundService(getContext(), intent);
+            call.resolve();
+        } catch (RuntimeException error) {
+            call.reject("VOICE_SERVICE_START_FAILED", error);
+        }
     }
 
     @PluginMethod
@@ -134,8 +156,12 @@ public class VoicePlugin extends Plugin {
     @PluginMethod
     public void resumeVoice(PluginCall call) {
         Intent intent = new Intent(getContext(), VoiceForegroundService.class).setAction(VoiceForegroundService.ACTION_RESUME);
-        ContextCompat.startForegroundService(getContext(), intent);
-        call.resolve();
+        try {
+            ContextCompat.startForegroundService(getContext(), intent);
+            call.resolve();
+        } catch (RuntimeException error) {
+            call.reject("VOICE_SERVICE_START_FAILED", error);
+        }
     }
 
     @PluginMethod
@@ -166,8 +192,12 @@ public class VoicePlugin extends Plugin {
         Intent intent = new Intent(getContext(), VoiceForegroundService.class)
                 .setAction(VoiceForegroundService.ACTION_SPEAK)
                 .putExtra(VoiceForegroundService.EXTRA_TEXT, text);
-        ContextCompat.startForegroundService(getContext(), intent);
-        call.resolve();
+        try {
+            ContextCompat.startForegroundService(getContext(), intent);
+            call.resolve();
+        } catch (RuntimeException error) {
+            call.reject("VOICE_SERVICE_START_FAILED", error);
+        }
     }
 
     @PluginMethod
@@ -186,7 +216,11 @@ public class VoicePlugin extends Plugin {
     }
 
     private void sendAction(String action) {
-        getContext().startService(new Intent(getContext(), VoiceForegroundService.class).setAction(action));
+        try {
+            getContext().startService(new Intent(getContext(), VoiceForegroundService.class).setAction(action));
+        } catch (RuntimeException error) {
+            VoicePlugin.emitVoiceError("VOICE_SERVICE_ACTION_FAILED");
+        }
     }
 
     static void emitState(VoiceForegroundService.RuntimeSnapshot snapshot) {
