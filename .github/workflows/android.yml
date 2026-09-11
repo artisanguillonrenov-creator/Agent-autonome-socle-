@@ -11,6 +11,23 @@ jobs:
   build-android:
     name: Build Jarvis Command Center Android APK
     runs-on: ubuntu-latest
+    env:
+      TEST_DATABASE_URL: postgresql://jarvis:jarvis@127.0.0.1:5432/jarvis_test
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: jarvis
+          POSTGRES_PASSWORD: jarvis
+          POSTGRES_DB: jarvis_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U jarvis -d jarvis_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
 
     steps:
       - name: Checkout Repository
