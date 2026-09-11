@@ -9,21 +9,38 @@ const __dirname = dirname(__filename);
 const rootDir = join(__dirname, "..");
 const wwwDir = join(rootDir, "www");
 
-// The conversation manager must be present in fresh Web/Capacitor builds.
+// The conversation manager must be present in fresh Web/Capacitor builds AND in OTA
+// updates. Keep the historical OTA payload limited to index/style/app by embedding the
+// current manager directly into the generated index.html. This way the bundle remains an
+// exact snapshot of the files currently present in www/ and otaClient.test.ts can verify
+// its hash without any hidden post-processing.
 const indexPath = join(wwwDir, "index.html");
 const conversationBootstrapPath = join(wwwDir, "conversationPersistence.js");
 if (existsSync(indexPath) && existsSync(conversationBootstrapPath)) {
-  const tag = '<script src="conversationPersistence.js" data-jarvis-conversation-bootstrap="11b"></script>';
-  const indexHtml = readFileSync(indexPath, "utf-8");
-  if (!indexHtml.includes('data-jarvis-conversation-bootstrap=')) {
-    writeFileSync(indexPath, indexHtml.replace("</body>", `  ${tag}\n</body>`), "utf-8");
+  const beginMarker = "<!-- JARVIS_CONVERSATION_MANAGER_BEGIN -->";
+  const endMarker = "<!-- JARVIS_CONVERSATION_MANAGER_END -->";
+  const conversationManager = readFileSync(conversationBootstrapPath, "utf-8");
+  let indexHtml = readFileSync(indexPath, "utf-8");
+
+  // Idempotent rebuild: remove a previously generated inline block and any historical
+  // external 11A/11B script tag before writing the current source again.
+  indexHtml = indexHtml.replace(
+    /<!-- JARVIS_CONVERSATION_MANAGER_BEGIN -->[\s\S]*?<!-- JARVIS_CONVERSATION_MANAGER_END -->\s*/g,
+    "",
+  );
+  indexHtml = indexHtml.replace(
+    /<script\b[^>]*\bsrc=["']conversationPersistence\.js["'][^>]*><\/script>\s*/gi,
+    "",
+  );
+
+  const inlineBootstrap = `${beginMarker}\n<script data-jarvis-conversation-bootstrap="11b">\n${conversationManager}\n</script>\n${endMarker}`;
+  if (indexHtml.includes("</body>")) {
+    indexHtml = indexHtml.replace("</body>", `  ${inlineBootstrap}\n</body>`);
+    writeFileSync(indexPath, indexHtml, "utf-8");
   }
 }
 
-// 1. Historical OTA payload remains index/style/app. To make the separately maintained
-// conversation manager OTA-updatable without breaking that contract, append its source to
-// the bundled app.js. The manager has an idempotent boot guard, so the static script tag in
-// a fresh APK cannot execute it twice.
+// 1. Target files to bundle. The OTA contract intentionally remains these three files.
 const filesToBundle = ["index.html", "style.css", "app.js"];
 const bundleFilesMap = {};
 
@@ -32,11 +49,6 @@ for (const file of filesToBundle) {
   if (existsSync(filePath)) {
     bundleFilesMap[file] = readFileSync(filePath, "utf-8");
   }
-}
-
-if (typeof bundleFilesMap["app.js"] === "string" && existsSync(conversationBootstrapPath)) {
-  const conversationManager = readFileSync(conversationBootstrapPath, "utf-8");
-  bundleFilesMap["app.js"] += `\n\n/* Jarvis Conversation Manager — OTA bundled */\n${conversationManager}`;
 }
 
 // 2. Package bundle payload
