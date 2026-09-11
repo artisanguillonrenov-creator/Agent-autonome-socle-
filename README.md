@@ -7,14 +7,15 @@ en neuf briques communes.
 
 ## Principes
 
-- **LLM-agnostique** : Anthropic, OpenAI, OpenRouter, Ollama ou un fournisseur `mock`
+- **LLM-agnostique** : Anthropic, OpenAI, OpenRouter, Ollama, Infermatic ou un fournisseur `mock`
   (hors-ligne, sans clé API) sont interchangeables via `LLM_PROVIDER`. Aucun SDK
   propriétaire : les fournisseurs parlent en HTTP brut derrière l'interface `LLMProvider`.
-- **100% local par défaut** : stockage SQLite (fichier unique, `better-sqlite3`),
-  aucun service externe à faire tourner. La mémoire vectorielle utilise un
-  embedding local par feature hashing (déterministe, zéro dépendance) ; des
-  fournisseurs OpenAI/Voyage sont branchables si besoin de meilleure précision
-  sémantique (`EMBEDDING_PROVIDER`).
+- **Stockage et embeddings locaux par défaut** : stockage SQLite (fichier unique,
+  `better-sqlite3`) et mémoire vectorielle par feature hashing (déterministe, zéro
+  dépendance). Le LLM nominal de Jarvis est Infermatic avec
+  `Qwen-Qwen3.6-35B-A3B`, et nécessite donc une clé `INFERMATIC_API_KEY` valide.
+  Des fournisseurs OpenAI/Voyage restent branchables pour les embeddings si besoin
+  de meilleure précision sémantique (`EMBEDDING_PROVIDER`).
 
 ## Les 9 briques
 
@@ -38,12 +39,14 @@ cp .env.example .env
 npm run dev
 ```
 
-Par défaut (`LLM_PROVIDER=mock`, `EMBEDDING_PROVIDER=local`), tout tourne
-hors-ligne sans aucune clé API — utile pour explorer le socle avant de brancher
-un vrai fournisseur.
+Par défaut, Jarvis utilise `LLM_PROVIDER=infermatic` avec
+`LLM_MODEL=Qwen-Qwen3.6-35B-A3B`. Renseignez `INFERMATIC_API_KEY` dans `.env`
+avant de démarrer. Les embeddings restent locaux par défaut (`EMBEDDING_PROVIDER=local`).
 
-Pour utiliser Claude : `LLM_PROVIDER=anthropic`, `ANTHROPIC_API_KEY=...`,
-`LLM_MODEL=claude-sonnet-5` (voir `.env.example` pour toutes les options).
+Pour un fonctionnement de développement entièrement hors-ligne, remplacez le provider
+par `LLM_PROVIDER=mock`. Pour utiliser Claude : `LLM_PROVIDER=anthropic`,
+`ANTHROPIC_API_KEY=...`, `LLM_MODEL=claude-sonnet-5` (voir `.env.example` pour toutes
+les options).
 
 > Derrière un proxy HTTP(S) (ex: `HTTPS_PROXY` défini, environnements sandboxés) :
 > `npm run dev`/`npm start` activent déjà `NODE_USE_ENV_PROXY=1`, requis par le
