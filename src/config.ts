@@ -21,7 +21,7 @@ export const config = {
     anthropicApiKey: process.env.ANTHROPIC_API_KEY || "",
     openaiApiKey: process.env.OPENAI_API_KEY || "",
     openrouterApiKey: process.env.OPENROUTER_API_KEY || "",
-    ollamaBaseUrl: process.env.OLLAMA_BASE_URL || "http://localhost:11434",
+    ollamaBaseUrl: stripTrailingSlash(process.env.OLLAMA_BASE_URL || "http://localhost:11434"),
     infermaticApiKey: process.env.INFERMATIC_API_KEY || "",
     infermaticBaseUrl: stripTrailingSlash(process.env.INFERMATIC_BASE_URL || "https://api.totalgpt.ai/v1"),
     /**
@@ -39,6 +39,13 @@ export const config = {
     codingModel: "",
     researchModel: "",
     utilityModel: "",
+    /** Chantier 10 : candidat local distinct du provider nominal. V1 supporte Ollama. */
+    localModelPriority: false,
+    localProvider: ((process.env.LOCAL_LLM_PROVIDER as LLMProviderName) || "ollama") as LLMProviderName,
+    localModel: process.env.LOCAL_LLM_MODEL || "",
+    /** 0 = inconnu ; Ollama /api/show peut fournir la vraie fenêtre du modèle. */
+    localContextWindow: int(process.env.LOCAL_LLM_CONTEXT_WINDOW, 0),
+    localProbeTtlMs: int(process.env.LOCAL_LLM_PROBE_TTL_MS, 60_000),
   },
   embeddings: {
     provider: (process.env.EMBEDDING_PROVIDER as EmbeddingProviderName) || "local",
@@ -110,6 +117,19 @@ export const config = {
     /** Destinataire des alertes activity.emailAlerts — jamais inventé si absent. */
     alertTo: process.env.ALERT_EMAIL_TO || "",
   },
+  sms: {
+    /** Chantier 10 : passerelle HTTP externe, jamais la permission Android SEND_SMS. */
+    webhookUrl: process.env.SMS_WEBHOOK_URL || "",
+    webhookToken: process.env.SMS_WEBHOOK_TOKEN || "",
+    alertTo: process.env.ALERT_SMS_TO || "",
+  },
+  voice: {
+    automaticVoiceReading: false,
+    mode: "OFF" as "OFF" | "PUSH_TO_TALK" | "CONVERSATION" | "ALWAYS_LISTENING",
+    responseMode: "AUTO" as "AUTO" | "FULL" | "SUMMARY",
+    ingressTtlMs: int(process.env.VOICE_INGRESS_TTL_MS, 7 * 24 * 60 * 60 * 1000),
+    summaryThresholdChars: int(process.env.VOICE_SUMMARY_THRESHOLD_CHARS, 400),
+  },
   planning: { maxParallel: Math.min(int(process.env.PLAN_MAX_PARALLEL, 3), 8) },
   background: { maxConcurrent: Math.min(int(process.env.BACKGROUND_MAX_CONCURRENT, 3), 8) },
   reflection: {
@@ -142,5 +162,9 @@ export const config = {
   activity: {
     logLevel: "NORMAL" as "NORMAL" | "DETAILED" | "DEBUG",
     emailAlerts: false,
+    /** V1 : notification Android locale acheminée au runtime natif actif, pas un push distant FCM. */
+    androidPush: false,
+    smsAlerts: false,
+    voiceAlerts: false,
   },
 };
