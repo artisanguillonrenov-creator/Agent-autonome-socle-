@@ -1,11 +1,7 @@
 import type { AgentPendingAction } from "../types.js";
 import type { PersonalityTurnPolicy } from "./domain/types.js";
 
-export function refinePolicyForSelectedSkills(
-  policy: PersonalityTurnPolicy,
-  selectedSkillCount: number,
-): PersonalityTurnPolicy {
-  if (selectedSkillCount <= 0) return policy;
+export function refinePolicyForToolUse(policy: PersonalityTurnPolicy): PersonalityTurnPolicy {
   const certainty = policy.certainty === "UNKNOWN" ? "VERIFICATION_REQUIRED" : policy.certainty;
   return {
     ...policy,
