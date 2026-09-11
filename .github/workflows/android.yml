@@ -57,6 +57,9 @@ jobs:
       - name: Sync Capacitor Android
         run: npx cap sync android
 
+      - name: Bundle Jarvis SIWIS Voice
+        run: bash scripts/fetch-siwis-voice.sh
+
       - name: Grant Execute Permission for Gradlew
         run: chmod +x android/gradlew
 
