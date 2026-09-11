@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Agent } from "../../core/agent.js";
 import { PersonalityPolicyEngine } from "../../personality/personalityPolicyEngine.js";
-import type { PersonalityTurnPolicy } from "../../personality/domain/types.js";
+import type { PersonalityTurnContext, PersonalityTurnPolicy } from "../../personality/domain/types.js";
 import { loadCheckpoint } from "../checkpoint.js";
 import type { IConversationRepository } from "./conversationRepository.js";
 import { ConversationCoordinator } from "./conversationCoordinator.js";
@@ -11,6 +11,7 @@ import type {
   CompletedTurnPayload,
   ConversationPage,
   ConversationSession,
+  StoredConversationMessage,
   TurnExecutionResult,
   TurnIngressDto,
 } from "./types.js";
@@ -66,9 +67,14 @@ export class ConversationExecutionService {
         conversationId: dto.conversationId,
         clientRequestId: dto.clientRequestId,
         voiceCommandId: dto.voiceCommandId,
+        ...(dto.personalityContext ? { personalityContext: dto.personalityContext } : {}),
         payload: { message, ...(session.workspaceId ? { workspaceId: session.workspaceId } : {}) },
       };
-      fingerprint = computeRequestFingerprint("MESSAGE", { message, workspaceId: session.workspaceId });
+      fingerprint = computeRequestFingerprint("MESSAGE", {
+        message,
+        workspaceId: session.workspaceId,
+        personalityContext: dto.personalityContext ?? null,
+      });
     } else {
       const targetMessageId = dto.payload.targetMessageId.trim();
       if (!targetMessageId) throw new ConversationExecutionError("TARGET_MESSAGE_NOT_FOUND", 404);
@@ -76,9 +82,13 @@ export class ConversationExecutionService {
         requestKind: "REGENERATE",
         conversationId: dto.conversationId,
         clientRequestId: dto.clientRequestId,
+        ...(dto.personalityContext ? { personalityContext: dto.personalityContext } : {}),
         payload: { targetMessageId },
       };
-      fingerprint = computeRequestFingerprint("REGENERATE", { targetMessageId });
+      fingerprint = computeRequestFingerprint("REGENERATE", {
+        targetMessageId,
+        personalityContext: dto.personalityContext ?? null,
+      });
     }
 
     const accepted = await this.repository.acceptTurnIdempotently({
@@ -122,7 +132,10 @@ export class ConversationExecutionService {
       let dropRehydratedRegenerationWindow = false;
       try {
         await this.repository.markTurnRunning(turn.turnId);
-        const personalityPolicy = await this.preparePersonalityPolicy(session.conversationId);
+        const personalityPolicy = await this.preparePersonalityPolicy(
+          session.conversationId,
+          normalizedDto.personalityContext,
+        );
         const context: AgentExecutionContext = {
           conversationId: session.conversationId,
           turnId: turn.turnId,
@@ -205,7 +218,9 @@ export class ConversationExecutionService {
           completedPayload,
         );
         await this.agent.memory.replaceWithStoredRevision(target.messageId, storedRevision, context.workspaceId);
-        await this.commitPersonalityBestEffort(session.conversationId, regenerated.response, personalityPolicy);
+        // A revision replaces one ACTIVE final response. Reconcile from the authoritative
+        // transcript instead of treating REGENERATE as an extra stylistic turn.
+        await this.reconcilePersonalityBestEffort(session.conversationId);
         return {
           result: "NEW" as const,
           turnId: turn.turnId,
@@ -227,16 +242,45 @@ export class ConversationExecutionService {
     });
   }
 
-  private async preparePersonalityPolicy(conversationId: string): Promise<PersonalityTurnPolicy | undefined> {
+  private async preparePersonalityPolicy(
+    conversationId: string,
+    turnContext: PersonalityTurnContext = {},
+  ): Promise<PersonalityTurnPolicy | undefined> {
     if (!this.personalityPolicyEngine) return undefined;
     try {
-      const recent = await this.repository.getLastActiveMessages(conversationId, 20);
-      await this.personalityPolicyEngine.reconcileFromTranscript(conversationId, recent);
-      return await this.personalityPolicyEngine.generatePolicy(conversationId);
+      const recentFinals = await this.getRecentFinalAssistantMessages(conversationId, 3);
+      await this.personalityPolicyEngine.reconcileFromTranscript(conversationId, recentFinals);
+      return await this.personalityPolicyEngine.generatePolicy(conversationId, turnContext);
     } catch (error) {
       console.warn("[Personality] Policy preparation failed; continuing without personality state:", (error as Error).message);
       return undefined;
     }
+  }
+
+  private async getRecentFinalAssistantMessages(
+    conversationId: string,
+    limit: number,
+  ): Promise<StoredConversationMessage[]> {
+    const collected: StoredConversationMessage[] = [];
+    let beforeSequence: number | undefined;
+
+    while (collected.length < limit) {
+      const page = await this.repository.getMessagesPage(conversationId, 100, beforeSequence);
+      for (let index = page.items.length - 1; index >= 0 && collected.length < limit; index -= 1) {
+        const item = page.items[index];
+        if (
+          item.message.role === "assistant"
+          && !item.message.toolCalls?.length
+          && typeof item.message.content === "string"
+        ) {
+          collected.push(item);
+        }
+      }
+      if (page.nextBeforeSequence == null) break;
+      beforeSequence = page.nextBeforeSequence;
+    }
+
+    return collected.reverse();
   }
 
   private async commitPersonalityBestEffort(
@@ -252,6 +296,16 @@ export class ConversationExecutionService {
     }
   }
 
+  private async reconcilePersonalityBestEffort(conversationId: string): Promise<void> {
+    if (!this.personalityPolicyEngine) return;
+    try {
+      const recentFinals = await this.getRecentFinalAssistantMessages(conversationId, 3);
+      await this.personalityPolicyEngine.reconcileFromTranscript(conversationId, recentFinals);
+    } catch (error) {
+      console.warn("[Personality] State reconciliation failed; durable transcript remains authoritative:", (error as Error).message);
+    }
+  }
+
   async restoreCheckpointBranch(checkpointId: string, workspaceId: string | null = null): Promise<string> {
     return this.coordinator.executeExclusive(async () => {
       const state = loadCheckpoint(checkpointId);
@@ -261,6 +315,7 @@ export class ConversationExecutionService {
       this.agent.applyCheckpointRuntimeState(state, false);
       this.agent.memory.dropSession(session.conversationId);
       await this.agent.memory.getOrLoadSession(session.conversationId, this.repository, session.workspaceId ?? undefined);
+      await this.reconcilePersonalityBestEffort(session.conversationId);
       return session.conversationId;
     });
   }
