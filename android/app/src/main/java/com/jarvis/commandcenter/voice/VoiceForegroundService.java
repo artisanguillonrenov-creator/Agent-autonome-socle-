@@ -183,8 +183,6 @@ public final class VoiceForegroundService extends Service {
         if ("ALWAYS_LISTENING".equals(mode)) {
             beginWakeWord();
         } else {
-            // PUSH_TO_TALK/CONVERSATION idle: no microphone consumer until an explicit
-            // interaction starts; the state means the voice layer is ready for a trigger.
             machine.transition(VoiceStateMachine.State.WAITING_WAKE_WORD);
             publishState();
         }
@@ -279,9 +277,6 @@ public final class VoiceForegroundService extends Service {
         lastTranscription = transcript;
         VoicePlugin.emitTranscription(transcript, activeVoiceCommandId);
 
-        VoiceStateMachine.Snapshot snapshot = machine.snapshot();
-        // The state has normally just left TRANSCRIBING; pendingAction is the authoritative
-        // marker for an approval interaction, not the literal word "yes".
         if (pendingAction != null && "PERMISSION".equals(pendingAction.type) && isExplicitApproval(transcript)) {
             if ("CRITICAL".equals(pendingAction.riskLevel)) {
                 VoicePlugin.emitVoiceError("CRITICAL_APPROVAL_REQUIRES_UNLOCKED_UI");
@@ -304,8 +299,6 @@ public final class VoiceForegroundService extends Service {
             return;
         }
 
-        // WAITING_INPUT intentionally starts a NEW Agent interaction. The previous
-        // service operation is not resumed because service continuation is unsupported.
         pendingAction = null;
         final String commandId = activeVoiceCommandId == null ? UUID.randomUUID().toString() : activeVoiceCommandId;
         machine.transition(VoiceStateMachine.State.PROCESSING);
@@ -522,57 +515,51 @@ public final class VoiceForegroundService extends Service {
     }
 
     private void pollNativeAlertsSafely() {
-        if ("OFF".equals(voiceMode)) return;
-        VoiceStateMachine.State current = machine.snapshot().state;
-        if (current != VoiceStateMachine.State.WAITING_WAKE_WORD && current != VoiceStateMachine.State.PAUSED) return;
         try {
-            JSONArray alerts = client.getPendingNativeAlerts();
-            for (int index = 0; index < alerts.length(); index++) {
-                JSONObject alert = alerts.getJSONObject(index);
-                String id = alert.optString("notificationId", "");
-                if (id.isEmpty()) continue;
-                boolean android = alert.optBoolean("android", false);
-                boolean voice = alert.optBoolean("voice", false);
-                if (android) showNativeAlert(alert);
+            JSONArray items = client.getPendingNativeAlerts();
+            for (int i = 0; i < items.length(); i++) {
+                JSONObject item = items.optJSONObject(i);
+                if (item == null) continue;
+                String id = item.optString("id", "");
+                String title = item.optString("title", "Alerte Jarvis");
+                String body = item.optString("body", "Une alerte Jarvis requiert votre attention.");
+                boolean voice = item.optBoolean("voice", false);
+                showNativeAlert(title, body);
                 if (voice && machine.snapshot().state == VoiceStateMachine.State.WAITING_WAKE_WORD) {
-                    String title = alert.optString("title", "Alerte Jarvis");
-                    runOnMain(() -> speakText("Alerte Jarvis. " + title, true));
+                    runOnMain(() -> speakText("Alerte : " + body, true));
                 }
-                client.acknowledgeNativeAlert(id);
+                if (!id.isEmpty()) client.acknowledgeNativeAlert(id);
             }
         } catch (Exception ignored) {
-            // Polling is best effort; absence of network must not stop the wake-word loop.
+            // No provider/no network must not crash the native voice runtime.
         }
     }
 
-    private void showNativeAlert(JSONObject alert) {
+    private void showNativeAlert(String title, String body) {
         NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
         if (manager == null) return;
-        String title = alert.optString("title", "Jarvis");
-        String safeMessage = alert.optString("lockscreenMessage", "Ouvrez Jarvis pour consulter les détails.");
-        Notification publicVersion = new NotificationCompat.Builder(this, CHANNEL_ALERTS)
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ALERTS)
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setContentTitle("Jarvis")
-                .setContentText("Nouvelle notification")
-                .build();
-        Notification notification = new NotificationCompat.Builder(this, CHANNEL_ALERTS)
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setContentTitle(title)
-                .setContentText(safeMessage)
+                .setContentTitle(title == null || title.isEmpty() ? "Jarvis" : title)
+                .setContentText(body == null || body.isEmpty() ? "Une alerte Jarvis requiert votre attention." : body)
                 .setAutoCancel(true)
-                .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-                .setPublicVersion(publicVersion)
-                .build();
-        manager.notify(ALERT_NOTIFICATION_BASE + (alertNotificationSequence++ % 1000), notification);
+                .setVisibility(NotificationCompat.VISIBILITY_PRIVATE);
+        manager.notify(ALERT_NOTIFICATION_BASE + (++alertNotificationSequence), builder.build());
     }
 
-    private void runOnMain(Runnable runnable) {
-        new android.os.Handler(getMainLooper()).post(runnable);
-    }
-
-    private static String emptyToNull(String value) {
-        if (value == null || value.trim().isEmpty()) return null;
-        return value.trim();
+    @Override
+    public void onDestroy() {
+        wakeWordEngine.stop();
+        destroyRecognizer();
+        if (tts != null) {
+            try { tts.stop(); } catch (Exception ignored) { }
+            try { tts.shutdown(); } catch (Exception ignored) { }
+            tts = null;
+        }
+        abandonAudioFocus();
+        networkExecutor.shutdownNow();
+        alertPoller.shutdownNow();
+        super.onDestroy();
     }
 
     @Nullable
@@ -581,20 +568,14 @@ public final class VoiceForegroundService extends Service {
         return null;
     }
 
-    @Override
-    public void onDestroy() {
-        wakeWordEngine.stop();
-        destroyRecognizer();
-        if (tts != null) {
-            tts.stop();
-            tts.shutdown();
-            tts = null;
-        }
-        alertPoller.shutdownNow();
-        networkExecutor.shutdownNow();
-        abandonAudioFocus();
-        machine.transition(VoiceStateMachine.State.OFF);
-        publishState();
-        super.onDestroy();
+    private void runOnMain(Runnable runnable) {
+        android.os.Handler handler = new android.os.Handler(getMainLooper());
+        handler.post(runnable);
+    }
+
+    private static String emptyToNull(String value) {
+        if (value == null) return null;
+        String normalized = value.trim();
+        return normalized.isEmpty() ? null : normalized;
     }
 }
