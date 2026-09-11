@@ -1,4 +1,5 @@
 import type { AgentPendingAction, ChatMessage, ChatRole, ToolCall } from "../../types.js";
+import type { PersonalityTurnPolicy } from "../../personality/domain/types.js";
 
 export type ConversationStatus = "ACTIVE" | "ARCHIVED";
 export type ConversationRequestKind = "MESSAGE" | "REGENERATE";
@@ -57,6 +58,7 @@ export interface AgentExecutionContext {
   conversationId: string;
   turnId: string;
   workspaceId?: string;
+  personalityPolicy?: PersonalityTurnPolicy;
 }
 
 export type TurnIngressDto =
