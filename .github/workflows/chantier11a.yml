@@ -1,0 +1,47 @@
+name: Chantier 11A Conversation Durability
+
+on:
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  conversation-durability:
+    runs-on: ubuntu-latest
+    env:
+      TEST_DATABASE_URL: postgresql://jarvis:jarvis@127.0.0.1:5432/jarvis_test
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: jarvis
+          POSTGRES_PASSWORD: jarvis
+          POSTGRES_DB: jarvis_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U jarvis -d jarvis_test"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: TypeScript build
+        run: npm run build
+
+      - name: Focused SQLite + coordinator tests
+        run: node --import tsx --test --test-concurrency=1 src/persistence/conversations/conversation11a.test.ts
+
+      - name: Real PostgreSQL integration test
+        run: node --import tsx --test --test-concurrency=1 src/persistence/conversations/postgresConversationRepository.test.ts
