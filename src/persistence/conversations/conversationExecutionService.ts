@@ -1,0 +1,212 @@
+import { randomUUID } from "node:crypto";
+import type { Agent } from "../../core/agent.js";
+import { loadCheckpoint } from "../checkpoint.js";
+import type { IConversationRepository } from "./conversationRepository.js";
+import { ConversationCoordinator } from "./conversationCoordinator.js";
+import { computeRequestFingerprint, normalizeConversationMessage } from "./fingerprint.js";
+import type {
+  AgentExecutionContext,
+  CompletedTurnPayload,
+  ConversationPage,
+  ConversationSession,
+  TurnExecutionResult,
+  TurnIngressDto,
+} from "./types.js";
+
+export class ConversationExecutionError extends Error {
+  constructor(public readonly code: string, public readonly httpStatus: number, message = code) {
+    super(message);
+  }
+}
+
+export class ConversationExecutionService {
+  constructor(
+    readonly repository: IConversationRepository,
+    readonly coordinator: ConversationCoordinator,
+    readonly agent: Agent,
+  ) {
+    this.agent.memory.attachActivityProbe(coordinator);
+  }
+
+  async createSession(workspaceId: string | null = null): Promise<ConversationSession> {
+    return this.repository.initializeSession(randomUUID(), workspaceId);
+  }
+
+  async getSession(conversationId: string): Promise<ConversationSession | null> {
+    return this.repository.getSession(conversationId);
+  }
+
+  async listSessions(workspaceId: string | null): Promise<ConversationSession[]> {
+    return this.repository.listSessions(workspaceId);
+  }
+
+  async getMessages(conversationId: string, limit = 30, beforeSequence?: number): Promise<ConversationPage> {
+    if (!(await this.repository.getSession(conversationId))) throw new ConversationExecutionError("SESSION_NOT_FOUND", 404);
+    return this.repository.getMessagesPage(conversationId, limit, beforeSequence);
+  }
+
+  async handleTurn(dto: TurnIngressDto): Promise<TurnExecutionResult> {
+    const session = await this.repository.getSession(dto.conversationId);
+    if (!session) throw new ConversationExecutionError("SESSION_NOT_FOUND", 404);
+
+    let fingerprint: string;
+    let normalizedDto: TurnIngressDto;
+    if (dto.requestKind === "MESSAGE") {
+      const sentWorkspace = dto.payload.workspaceId?.trim() || undefined;
+      if (sentWorkspace !== undefined && sentWorkspace !== (session.workspaceId ?? undefined)) {
+        throw new ConversationExecutionError("CONVERSATION_WORKSPACE_MISMATCH", 409);
+      }
+      const message = normalizeConversationMessage(dto.payload.message);
+      if (!message) throw new ConversationExecutionError("MESSAGE_REQUIRED", 400);
+      normalizedDto = {
+        requestKind: "MESSAGE",
+        conversationId: dto.conversationId,
+        clientRequestId: dto.clientRequestId,
+        voiceCommandId: dto.voiceCommandId,
+        payload: { message, ...(session.workspaceId ? { workspaceId: session.workspaceId } : {}) },
+      };
+      fingerprint = computeRequestFingerprint("MESSAGE", { message, workspaceId: session.workspaceId });
+    } else {
+      const targetMessageId = dto.payload.targetMessageId.trim();
+      if (!targetMessageId) throw new ConversationExecutionError("TARGET_MESSAGE_NOT_FOUND", 404);
+      normalizedDto = {
+        requestKind: "REGENERATE",
+        conversationId: dto.conversationId,
+        clientRequestId: dto.clientRequestId,
+        payload: { targetMessageId },
+      };
+      fingerprint = computeRequestFingerprint("REGENERATE", { targetMessageId });
+    }
+
+    const accepted = await this.repository.acceptTurnIdempotently({
+      turnId: randomUUID(),
+      conversationId: session.conversationId,
+      clientRequestId: normalizedDto.clientRequestId?.trim() || null,
+      voiceCommandId: normalizedDto.requestKind === "MESSAGE" ? normalizedDto.voiceCommandId?.trim() || null : null,
+      requestKind: normalizedDto.requestKind,
+      requestFingerprint: fingerprint,
+    });
+
+    if (accepted.kind === "MISMATCH") {
+      throw new ConversationExecutionError("IDEMPOTENCY_KEY_REUSE_MISMATCH", 409);
+    }
+    if (accepted.kind === "EXISTING") {
+      if (accepted.turn.status === "ACCEPTED" || accepted.turn.status === "RUNNING") {
+        return { result: "EXISTING_PROCESSING", turnId: accepted.turn.turnId, conversationId: session.conversationId };
+      }
+      if (accepted.turn.status === "FAILED") {
+        return {
+          result: "EXISTING_FAILED",
+          turnId: accepted.turn.turnId,
+          conversationId: session.conversationId,
+          failureReason: accepted.turn.failureReason || "UNKNOWN_FAILURE",
+        };
+      }
+      const completed = await this.repository.getCompletedTurnResult(accepted.turn.turnId);
+      if (!completed) throw new ConversationExecutionError("COMPLETED_TURN_RESULT_MISSING", 500);
+      return {
+        result: "EXISTING_COMPLETED",
+        turnId: accepted.turn.turnId,
+        conversationId: session.conversationId,
+        ...completed,
+      };
+    }
+
+    const turn = accepted.turn;
+    return this.coordinator.execute(session.conversationId, async () => {
+      const working = await this.agent.memory.getOrLoadSession(session.conversationId, this.repository, session.workspaceId ?? undefined);
+      working.pin();
+      try {
+        await this.repository.markTurnRunning(turn.turnId);
+        const context: AgentExecutionContext = {
+          conversationId: session.conversationId,
+          turnId: turn.turnId,
+          ...(session.workspaceId ? { workspaceId: session.workspaceId } : {}),
+        };
+
+        if (normalizedDto.requestKind === "MESSAGE") {
+          const storedUser = await this.repository.appendMessage(
+            session.conversationId,
+            turn.turnId,
+            { role: "user", content: normalizedDto.payload.message },
+            randomUUID(),
+          );
+          await this.agent.memory.addStoredMessage(storedUser, context.workspaceId);
+
+          const result = await this.agent.step(normalizedDto.payload.message, context);
+          const completedPayload: CompletedTurnPayload = {
+            response: result.response,
+            iterations: result.iterations,
+            ...(result.pendingAction ? { pendingAction: result.pendingAction } : {}),
+          };
+          const storedFinal = await this.repository.appendFinalMessageAndCompleteTurn(
+            session.conversationId,
+            turn.turnId,
+            { role: "assistant", content: result.response },
+            randomUUID(),
+            completedPayload,
+          );
+          await this.agent.memory.addStoredMessage(storedFinal, context.workspaceId);
+          try {
+            await this.agent.reflectAfterDurableTurn(context);
+          } catch (reflectionError) {
+            console.warn("[Conversation] Post-turn reflection failed:", (reflectionError as Error).message);
+          }
+          return {
+            result: "NEW" as const,
+            turnId: turn.turnId,
+            conversationId: session.conversationId,
+            ...completedPayload,
+          };
+        }
+
+        const target = await this.repository.getMessage(normalizedDto.payload.targetMessageId);
+        if (!target) throw new ConversationExecutionError("TARGET_MESSAGE_NOT_FOUND", 404);
+        if (
+          target.conversationId !== session.conversationId ||
+          target.status !== "ACTIVE" ||
+          target.message.role !== "assistant" ||
+          (target.message.toolCalls?.length ?? 0) > 0
+        ) {
+          throw new ConversationExecutionError("TARGET_MESSAGE_NOT_REGENERABLE", 409);
+        }
+        const regenerated = await this.agent.regenerateLastResponse(context, target.messageId);
+        const completedPayload: CompletedTurnPayload = { response: regenerated.response, iterations: 1 };
+        const storedRevision = await this.repository.appendRevisionAndCompleteTurn(
+          session.conversationId,
+          turn.turnId,
+          target.messageId,
+          { role: "assistant", content: regenerated.response },
+          randomUUID(),
+          completedPayload,
+        );
+        await this.agent.memory.replaceWithStoredRevision(target.messageId, storedRevision, context.workspaceId);
+        return {
+          result: "NEW" as const,
+          turnId: turn.turnId,
+          conversationId: session.conversationId,
+          ...completedPayload,
+        };
+      } catch (error) {
+        await this.repository.failTurn(turn.turnId, error instanceof Error ? error.message : "INTERNAL_ERROR");
+        throw error;
+      } finally {
+        working.unpin();
+        this.agent.memory.triggerPostTurnCleanup();
+      }
+    });
+  }
+
+  async restoreCheckpointBranch(checkpointId: string, workspaceId: string | null = null): Promise<string> {
+    return this.coordinator.executeExclusive(async () => {
+      const state = loadCheckpoint(checkpointId);
+      if (!state) throw new ConversationExecutionError("CHECKPOINT_NOT_FOUND", 404);
+      const session = await this.createSession(workspaceId);
+      await this.repository.importHistoricalMessages(session.conversationId, state.workingMemory);
+      this.agent.applyCheckpointRuntimeState(state, false);
+      this.agent.memory.dropSession(session.conversationId);
+      await this.agent.memory.getOrLoadSession(session.conversationId, this.repository, session.workspaceId ?? undefined);
+      return session.conversationId;
+    });
+  }
+}
