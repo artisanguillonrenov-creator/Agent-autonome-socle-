@@ -20,6 +20,8 @@ import { NotificationStore } from "./autonomy/notificationStore.js";
 import { createConversationRepository } from "./persistence/conversations/conversationRepositoryFactory.js";
 import { ConversationCoordinator } from "./persistence/conversations/conversationCoordinator.js";
 import { ConversationExecutionService } from "./persistence/conversations/conversationExecutionService.js";
+import { createPersonalityRepository } from "./personality/personalityRepositoryFactory.js";
+import { PersonalityPolicyEngine } from "./personality/personalityPolicyEngine.js";
 
 async function main(): Promise<void> {
   registerChantier10Settings();
@@ -37,9 +39,19 @@ async function main(): Promise<void> {
   const recoveredTurns = await conversationRepository.recoverInterruptedTurns();
   if (recoveredTurns > 0) console.warn(`[Conversation] ${recoveredTurns} interrupted turn(s) marked FAILED after restart.`);
 
+  // Personality V1 state is separate from the transcript and must exist before traffic.
+  const personalityRepository = createPersonalityRepository();
+  await personalityRepository.initialize();
+  const personalityPolicyEngine = new PersonalityPolicyEngine(personalityRepository);
+
   const agent = new QueuedAgent({ llm, embeddings, conversationRepository });
   const conversationCoordinator = new ConversationCoordinator();
-  const conversationService = new ConversationExecutionService(conversationRepository, conversationCoordinator, agent);
+  const conversationService = new ConversationExecutionService(
+    conversationRepository,
+    conversationCoordinator,
+    agent,
+    personalityPolicyEngine,
+  );
 
   for (const skill of builtinSkills) agent.skills.register(skill);
   applyAllEffectiveRuntimeSettings(agent);
