@@ -9,24 +9,21 @@ const __dirname = dirname(__filename);
 const rootDir = join(__dirname, "..");
 const wwwDir = join(rootDir, "www");
 
-// Chantier 11A continuity shim must also be present in the Capacitor/base index copied
-// by `npx cap sync android`. Ensure the generated build asset references it without
-// requiring a manual edit of the large legacy index.html.
+// The conversation manager must be present in fresh Web/Capacitor builds.
 const indexPath = join(wwwDir, "index.html");
 const conversationBootstrapPath = join(wwwDir, "conversationPersistence.js");
 if (existsSync(indexPath) && existsSync(conversationBootstrapPath)) {
-  const tag = '<script src="conversationPersistence.js" data-jarvis-conversation-bootstrap="11a"></script>';
+  const tag = '<script src="conversationPersistence.js" data-jarvis-conversation-bootstrap="11b"></script>';
   const indexHtml = readFileSync(indexPath, "utf-8");
-  if (!indexHtml.includes('data-jarvis-conversation-bootstrap="11a"')) {
+  if (!indexHtml.includes('data-jarvis-conversation-bootstrap=')) {
     writeFileSync(indexPath, indexHtml.replace("</body>", `  ${tag}\n</body>`), "utf-8");
   }
 }
 
-// 1. Target files to bundle.
-// Keep the historical OTA contract intentionally limited to these three files.
-// conversationPersistence.js is a normal static www asset referenced by index.html;
-// fresh Web/Capacitor builds ship it with www, but it must not alter the OTA payload
-// shape/hash contract validated by otaClient.test.ts.
+// 1. Historical OTA payload remains index/style/app. To make the separately maintained
+// conversation manager OTA-updatable without breaking that contract, append its source to
+// the bundled app.js. The manager has an idempotent boot guard, so the static script tag in
+// a fresh APK cannot execute it twice.
 const filesToBundle = ["index.html", "style.css", "app.js"];
 const bundleFilesMap = {};
 
@@ -35,6 +32,11 @@ for (const file of filesToBundle) {
   if (existsSync(filePath)) {
     bundleFilesMap[file] = readFileSync(filePath, "utf-8");
   }
+}
+
+if (typeof bundleFilesMap["app.js"] === "string" && existsSync(conversationBootstrapPath)) {
+  const conversationManager = readFileSync(conversationBootstrapPath, "utf-8");
+  bundleFilesMap["app.js"] += `\n\n/* Jarvis Conversation Manager — OTA bundled */\n${conversationManager}`;
 }
 
 // 2. Package bundle payload
