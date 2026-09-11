@@ -7,8 +7,8 @@ export interface ConversationWebUiRuntime {
 }
 
 /**
- * Injects the conversation continuity shim into the served Web UI without rewriting the
- * large legacy index.html or OTA bootloader. Non-root requests are delegated untouched.
+ * Injects the conversation manager into the served Web UI. Fresh/OTA builds may already
+ * contain the build-time bootstrap marker; in that case we must not add a second script.
  */
 export function installConversationWebUiIngress(server: Server): ConversationWebUiRuntime {
   const previousListeners = server.listeners("request") as Array<(req: IncomingMessage, res: ServerResponse) => void>;
@@ -22,8 +22,10 @@ export function installConversationWebUiIngress(server: Server): ConversationWeb
       if (existsSync(indexPath)) {
         try {
           const html = readFileSync(indexPath, "utf-8");
-          const marker = '<script src="conversationPersistence.js"></script>';
-          const injected = html.includes(marker) ? html : html.replace("</body>", `  ${marker}\n</body>`);
+          const marker = '<script src="conversationPersistence.js" data-jarvis-conversation-bootstrap="11b"></script>';
+          const injected = html.includes("conversationPersistence.js")
+            ? html
+            : html.replace("</body>", `  ${marker}\n</body>`);
           res.writeHead(200, {
             "content-type": "text/html; charset=utf-8",
             "access-control-allow-origin": "*",
