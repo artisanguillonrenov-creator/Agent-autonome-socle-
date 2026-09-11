@@ -163,10 +163,16 @@ export class MemoryManager {
     return stored;
   }
 
-  /** Compatibilité legacy : ne persiste pas dans ConversationStore faute de conversationId/turnId. */
+  /**
+   * Legacy direct Agent callers keep the pre-11A awaited embedding semantics so existing
+   * tests/behavior do not race. Durable 11A turns use addStoredMessage()/recordIntermediateTurn,
+   * where VectorMemory is deliberately best-effort after the transcript commit.
+   */
   async recordTurn(message: ChatMessage, workspaceId?: string): Promise<void> {
     this.working.add(message, workspaceId);
-    this.indexBestEffort(message, workspaceId);
+    if (typeof message.content === "string" && message.content.trim().length > 0) {
+      await this.vector.add(`${message.role}: ${message.content}`, "episodic", { workspaceId });
+    }
   }
 
   private indexBestEffort(message: ChatMessage, workspaceId?: string): void {
