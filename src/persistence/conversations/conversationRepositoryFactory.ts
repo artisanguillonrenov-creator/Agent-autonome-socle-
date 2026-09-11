@@ -23,7 +23,7 @@ function mapTurn(row: Record<string, any>): ConversationTurn {
 export function createConversationRepository(): IConversationRepository {
   const pool = getPgPool();
   if (pool) {
-    const repository = new PostgresConversationRepository(pool);
+    const repository: IConversationRepository = new PostgresConversationRepository(pool);
     repository.findTurnByVoiceCommandId = async (voiceCommandId: string) => {
       const result = await pool.query("SELECT * FROM conversation_turns WHERE voice_command_id=$1 ORDER BY created_at DESC LIMIT 1", [voiceCommandId]);
       return result.rows[0] ? mapTurn(result.rows[0]) : null;
@@ -32,7 +32,7 @@ export function createConversationRepository(): IConversationRepository {
   }
 
   const db = getDb();
-  const repository = new SqliteConversationRepository(db);
+  const repository: IConversationRepository = new SqliteConversationRepository(db);
   repository.findTurnByVoiceCommandId = async (voiceCommandId: string) => {
     const row = db.prepare("SELECT * FROM conversation_turns WHERE voice_command_id=? ORDER BY created_at DESC LIMIT 1").get(voiceCommandId) as Record<string, any> | undefined;
     return row ? mapTurn(row) : null;
