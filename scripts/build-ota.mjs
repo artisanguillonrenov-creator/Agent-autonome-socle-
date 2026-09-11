@@ -9,30 +9,28 @@ const __dirname = dirname(__filename);
 const rootDir = join(__dirname, "..");
 const wwwDir = join(rootDir, "www");
 
-// 1. Target files to bundle. Chantier 11A keeps its continuity shim as a separate
-// asset for the native/base app, while the OTA index gets the same code inlined so a
-// document.write() reload of an OTA index cannot silently lose conversation persistence.
+// Chantier 11A continuity shim must also be present in the Capacitor/base index copied
+// by `npx cap sync android`. Ensure the generated build asset references it without
+// requiring a manual edit of the large legacy index.html.
+const indexPath = join(wwwDir, "index.html");
+const conversationBootstrapPath = join(wwwDir, "conversationPersistence.js");
+if (existsSync(indexPath) && existsSync(conversationBootstrapPath)) {
+  const tag = '<script src="conversationPersistence.js" data-jarvis-conversation-bootstrap="11a"></script>';
+  const indexHtml = readFileSync(indexPath, "utf-8");
+  if (!indexHtml.includes('data-jarvis-conversation-bootstrap="11a"')) {
+    writeFileSync(indexPath, indexHtml.replace("</body>", `  ${tag}\n</body>`), "utf-8");
+  }
+}
+
+// 1. Target files to bundle
 const filesToBundle = ["index.html", "style.css", "app.js", "conversationPersistence.js"];
 const bundleFilesMap = {};
-const conversationBootstrapPath = join(wwwDir, "conversationPersistence.js");
-const conversationBootstrap = existsSync(conversationBootstrapPath)
-  ? readFileSync(conversationBootstrapPath, "utf-8")
-  : "";
 
 for (const file of filesToBundle) {
   const filePath = join(wwwDir, file);
-  if (!existsSync(filePath)) continue;
-  let content = readFileSync(filePath, "utf-8");
-  if (file === "index.html" && conversationBootstrap) {
-    const marker = "data-jarvis-conversation-bootstrap=\"11a\"";
-    if (!content.includes(marker)) {
-      content = content.replace(
-        "</body>",
-        `<script ${marker}>\n${conversationBootstrap}\n</script>\n</body>`,
-      );
-    }
+  if (existsSync(filePath)) {
+    bundleFilesMap[file] = readFileSync(filePath, "utf-8");
   }
-  bundleFilesMap[file] = content;
 }
 
 // 2. Package bundle payload
