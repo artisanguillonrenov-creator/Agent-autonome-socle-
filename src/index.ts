@@ -5,6 +5,7 @@ import { builtinSkills } from "./skills/builtin/index.js";
 import { runCli } from "./interfaces/cli.js";
 import { startHttpApi } from "./interfaces/httpApi.js";
 import { installConversationHttpIngress } from "./interfaces/conversationHttpIngress.js";
+import { installConversationWebUiIngress } from "./interfaces/conversationWebUiIngress.js";
 import { config } from "./config.js";
 import { BackgroundRunner } from "./autonomy/backgroundRunner.js";
 import { Scheduler } from "./autonomy/scheduler.js";
@@ -70,12 +71,14 @@ async function main(): Promise<void> {
     // Preserve Chantier-10 alerts/legacy polling, then wrap command/chat routes with 11A.
     const voiceRuntime = installVoiceHttpIngress(server, agent, voiceIngressStore, alertRouter);
     const conversationRuntime = installConversationHttpIngress(server, conversationService);
+    const webConversationRuntime = installConversationWebUiIngress(server);
 
     const shutdown = () => {
       backgroundRunner.stop();
       scheduler.stop();
       agent.planRunner.stop();
       retentionScheduler.stop();
+      webConversationRuntime.dispose();
       conversationRuntime.dispose();
       voiceRuntime.dispose();
       unsubscribeAlerts();
