@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Agent } from "../../core/agent.js";
+import { PersonalityPolicyEngine } from "../../personality/personalityPolicyEngine.js";
+import type { PersonalityTurnPolicy } from "../../personality/domain/types.js";
 import { loadCheckpoint } from "../checkpoint.js";
 import type { IConversationRepository } from "./conversationRepository.js";
 import { ConversationCoordinator } from "./conversationCoordinator.js";
@@ -24,6 +26,7 @@ export class ConversationExecutionService {
     readonly repository: IConversationRepository,
     readonly coordinator: ConversationCoordinator,
     readonly agent: Agent,
+    readonly personalityPolicyEngine?: PersonalityPolicyEngine,
   ) {
     this.agent.memory.attachActivityProbe(coordinator);
   }
@@ -119,10 +122,12 @@ export class ConversationExecutionService {
       let dropRehydratedRegenerationWindow = false;
       try {
         await this.repository.markTurnRunning(turn.turnId);
+        const personalityPolicy = await this.preparePersonalityPolicy(session.conversationId);
         const context: AgentExecutionContext = {
           conversationId: session.conversationId,
           turnId: turn.turnId,
           ...(session.workspaceId ? { workspaceId: session.workspaceId } : {}),
+          ...(personalityPolicy ? { personalityPolicy } : {}),
         };
 
         if (normalizedDto.requestKind === "MESSAGE") {
@@ -148,6 +153,7 @@ export class ConversationExecutionService {
             completedPayload,
           );
           await this.agent.memory.addStoredMessage(storedFinal, context.workspaceId);
+          await this.commitPersonalityBestEffort(session.conversationId, result.response, personalityPolicy);
           try {
             await this.agent.reflectAfterDurableTurn(context);
           } catch (reflectionError) {
@@ -199,6 +205,7 @@ export class ConversationExecutionService {
           completedPayload,
         );
         await this.agent.memory.replaceWithStoredRevision(target.messageId, storedRevision, context.workspaceId);
+        await this.commitPersonalityBestEffort(session.conversationId, regenerated.response, personalityPolicy);
         return {
           result: "NEW" as const,
           turnId: turn.turnId,
@@ -218,6 +225,31 @@ export class ConversationExecutionService {
         this.agent.memory.triggerPostTurnCleanup();
       }
     });
+  }
+
+  private async preparePersonalityPolicy(conversationId: string): Promise<PersonalityTurnPolicy | undefined> {
+    if (!this.personalityPolicyEngine) return undefined;
+    try {
+      const recent = await this.repository.getLastActiveMessages(conversationId, 20);
+      await this.personalityPolicyEngine.reconcileFromTranscript(conversationId, recent);
+      return await this.personalityPolicyEngine.generatePolicy(conversationId);
+    } catch (error) {
+      console.warn("[Personality] Policy preparation failed; continuing without personality state:", (error as Error).message);
+      return undefined;
+    }
+  }
+
+  private async commitPersonalityBestEffort(
+    conversationId: string,
+    response: string,
+    policy?: PersonalityTurnPolicy,
+  ): Promise<void> {
+    if (!this.personalityPolicyEngine || !policy) return;
+    try {
+      await this.personalityPolicyEngine.commitAcceptedResponse(conversationId, response, policy);
+    } catch (error) {
+      console.warn("[Personality] State commit failed; durable transcript remains authoritative:", (error as Error).message);
+    }
   }
 
   async restoreCheckpointBranch(checkpointId: string, workspaceId: string | null = null): Promise<string> {
