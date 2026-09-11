@@ -40,8 +40,8 @@ jobs:
       - name: TypeScript build
         run: npm run build
 
-      - name: Focused SQLite + coordinator tests
-        run: node --import tsx --test --test-concurrency=1 src/persistence/conversations/conversation11a.test.ts
+      - name: Focused SQLite + coordinator + personality tests
+        run: node --import tsx --test --test-concurrency=1 src/persistence/conversations/conversation11a.test.ts src/personality/personality.test.ts
 
-      - name: Real PostgreSQL integration test
-        run: node --import tsx --test --test-concurrency=1 src/persistence/conversations/postgresConversationRepository.test.ts
+      - name: Real PostgreSQL integration tests
+        run: node --import tsx --test --test-concurrency=1 src/persistence/conversations/postgresConversationRepository.test.ts src/personality/postgresPersonalityRepository.test.ts
