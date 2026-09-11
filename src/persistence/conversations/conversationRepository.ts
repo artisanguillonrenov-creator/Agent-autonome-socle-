@@ -18,7 +18,8 @@ export interface IConversationRepository {
   archiveSession(conversationId: string): Promise<void>;
 
   acceptTurnIdempotently(input: AcceptedTurnInput): Promise<TurnAcceptance>;
-  findTurnByVoiceCommandId(voiceCommandId: string): Promise<ConversationTurn | null>;
+  /** Optional adapter helper; canonical execution does not depend on transport-specific lookup. */
+  findTurnByVoiceCommandId?(voiceCommandId: string): Promise<ConversationTurn | null>;
   markTurnRunning(turnId: string): Promise<void>;
   failTurn(turnId: string, reason: string): Promise<void>;
 
