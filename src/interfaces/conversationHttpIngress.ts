@@ -12,7 +12,7 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
     "access-control-allow-origin": "*",
-    "access-control-allow-methods": "GET, POST, OPTIONS",
+    "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
     "access-control-allow-headers": "Content-Type, Authorization",
   });
   res.end(JSON.stringify(body));
@@ -58,8 +58,8 @@ export interface ConversationHttpRuntime {
 }
 
 /**
- * Installs 11A routes around the existing native node:http router and the Chantier-10
- * voice wrapper. Unhandled requests are delegated byte-for-byte to the previous listener.
+ * Installs durable conversation routes around the existing native node:http router and
+ * the voice wrapper. Unhandled requests are delegated byte-for-byte to the previous listener.
  */
 export function installConversationHttpIngress(
   server: Server,
@@ -79,11 +79,15 @@ export function installConversationHttpIngress(
     if (normalized) {
       const existing = await service.getSession(normalized);
       if (!existing) throw new ConversationExecutionError("SESSION_NOT_FOUND", 404);
+      if (existing.status !== "ACTIVE") throw new ConversationExecutionError("CONVERSATION_ARCHIVED", 409);
       return existing;
     }
     const fallbackId = legacyConversationId(workspaceId);
     const existing = await service.getSession(fallbackId);
-    if (existing) return existing;
+    if (existing) {
+      if (existing.status !== "ACTIVE") throw new ConversationExecutionError("CONVERSATION_ARCHIVED", 409);
+      return existing;
+    }
     return service.repository.initializeSession(fallbackId, workspaceId?.trim() || null);
   };
 
@@ -91,6 +95,7 @@ export function installConversationHttpIngress(
     const parsed = new URL(req.url || "/", "http://localhost");
     const pathname = parsed.pathname;
     const conversationPath = pathname === "/api/conversations"
+      || /^\/api\/conversations\/[^/]+$/.test(pathname)
       || /^\/api\/conversations\/[^/]+\/messages$/.test(pathname)
       || /^\/api\/conversations\/[^/]+\/regenerate$/.test(pathname)
       || pathname === "/api/chat"
@@ -108,7 +113,7 @@ export function installConversationHttpIngress(
     if (req.method === "OPTIONS") {
       res.writeHead(204, {
         "access-control-allow-origin": "*",
-        "access-control-allow-methods": "GET, POST, OPTIONS",
+        "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
         "access-control-allow-headers": "Content-Type, Authorization",
       });
       res.end();
@@ -131,6 +136,40 @@ export function installConversationHttpIngress(
         const sessions = await service.listSessions(workspaceParam && workspaceParam.trim() ? workspaceParam.trim() : null);
         sendJson(res, 200, { items: sessions });
         return;
+      }
+
+      const sessionMatch = pathname.match(/^\/api\/conversations\/([^/]+)$/);
+      if (sessionMatch) {
+        const conversationId = decodeURIComponent(sessionMatch[1]);
+        const session = await service.getSession(conversationId);
+        if (!session) throw new ConversationExecutionError("SESSION_NOT_FOUND", 404);
+
+        if (req.method === "GET") {
+          sendJson(res, 200, session);
+          return;
+        }
+
+        if (req.method === "PATCH") {
+          if (session.status !== "ACTIVE") throw new ConversationExecutionError("CONVERSATION_ARCHIVED", 409);
+          const body = await readJson(req);
+          const title = typeof body.title === "string" ? body.title.replace(/\s+/g, " ").trim() : "";
+          if (!title) throw new ConversationExecutionError("CONVERSATION_TITLE_REQUIRED", 400);
+          if (title.length > 120) throw new ConversationExecutionError("CONVERSATION_TITLE_TOO_LONG", 400);
+          await service.repository.updateSessionTitle(conversationId, title);
+          const updated = await service.getSession(conversationId);
+          sendJson(res, 200, updated);
+          return;
+        }
+
+        if (req.method === "DELETE") {
+          if (session.status !== "ACTIVE") {
+            sendJson(res, 200, { conversationId, status: session.status });
+            return;
+          }
+          await service.repository.archiveSession(conversationId);
+          sendJson(res, 200, { conversationId, status: "ARCHIVED" });
+          return;
+        }
       }
 
       const messagesMatch = pathname.match(/^\/api\/conversations\/([^/]+)\/messages$/);
