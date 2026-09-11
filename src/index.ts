@@ -4,6 +4,7 @@ import { QueuedAgent } from "./core/queuedAgent.js";
 import { builtinSkills } from "./skills/builtin/index.js";
 import { runCli } from "./interfaces/cli.js";
 import { startHttpApi } from "./interfaces/httpApi.js";
+import { installConversationHttpIngress } from "./interfaces/conversationHttpIngress.js";
 import { config } from "./config.js";
 import { BackgroundRunner } from "./autonomy/backgroundRunner.js";
 import { Scheduler } from "./autonomy/scheduler.js";
@@ -15,64 +16,77 @@ import { VoiceIngressStore } from "./voice/voiceIngressStore.js";
 import { AlertRouter } from "./voice/alertRouter.js";
 import { installVoiceHttpIngress } from "./voice/httpVoiceIngress.js";
 import { NotificationStore } from "./autonomy/notificationStore.js";
+import { createConversationRepository } from "./persistence/conversations/conversationRepositoryFactory.js";
+import { ConversationCoordinator } from "./persistence/conversations/conversationCoordinator.js";
+import { ConversationExecutionService } from "./persistence/conversations/conversationExecutionService.js";
 
 async function main(): Promise<void> {
-  // Chantier 10 definitions must exist before SettingsStore applies persisted values.
   registerChantier10Settings();
 
-  // Au démarrage, on fige la sélection active (options explicites > persistance > défaut)
-  // dans config.llm — createLLMProvider lui-même reste pur (voir src/llm/providers/index.ts).
   const selection = resolveLLMSelection();
   config.llm.provider = selection.provider;
   config.llm.model = selection.model;
-  // sanitizeReasoning: true — flux chat Jarvis destiné à un utilisateur humain, le
-  // raisonnement interne (<think>) d'un modèle "reasoning" ne doit jamais y être visible.
   const llm = createLLMProvider({ ...selection, sanitizeReasoning: true });
   const embeddings = createEmbeddingProvider();
-  // Toujours UNE SEULE instance de Jarvis : QueuedAgent ne change pas son intelligence,
-  // il sérialise seulement les entrées interactives autour de Agent.step().
-  const agent = new QueuedAgent({ llm, embeddings });
 
-  for (const skill of builtinSkills) {
-    agent.skills.register(skill);
-  }
+  // Chantier 11A: the durable repository must be fully initialized and recovered
+  // before HTTP, voice or CLI traffic can reach Jarvis.
+  const conversationRepository = createConversationRepository();
+  await conversationRepository.initialize();
+  const recoveredTurns = await conversationRepository.recoverInterruptedTurns();
+  if (recoveredTurns > 0) console.warn(`[Conversation] ${recoveredTurns} interrupted turn(s) marked FAILED after restart.`);
 
-  // Applique les réglages persistés au runtime AVANT tout autre démarrage — chemin unique
-  // (voir applier.ts), qu'on tourne en HTTP, en CLI ou les deux à la fois, pour que les réglages
-  // restent réellement effectifs après un redémarrage quel que soit le mode d'interface.
+  const agent = new QueuedAgent({ llm, embeddings, conversationRepository });
+  const conversationCoordinator = new ConversationCoordinator();
+  const conversationService = new ConversationExecutionService(conversationRepository, conversationCoordinator, agent);
+
+  for (const skill of builtinSkills) agent.skills.register(skill);
   applyAllEffectiveRuntimeSettings(agent);
 
   const alertRouter = new AlertRouter();
   const unsubscribeAlerts = NotificationStore.subscribe((notification) => alertRouter.handle(notification));
   const voiceIngressStore = new VoiceIngressStore();
-  // Un RUNNING provenant d'un processus précédent est ambigu : aucune ré-exécution automatique.
+  // Legacy Chantier-10 rows only. New voice commands are canonicalized in conversation_turns.
   voiceIngressStore.markRunningAsRecoveryRequired();
 
-  // connections.autoTestOnStartup : health check réel de tous les services activés.
   if (config.connections.autoTestOnStartup) {
     runStartupHealthChecks(agent.serviceOrchestrator).catch((err) => {
       console.error("[Startup] Health check échoué:", err);
     });
   }
 
-  // projects.memoryRetentionDays : purge périodique des souvenirs episodic expirés.
   const retentionScheduler = new MemoryRetentionScheduler(() => config.projects.memoryRetentionDays);
   retentionScheduler.start();
-
   const modes = new Set(config.interface.modes);
 
   if (modes.has("http")) {
-    const backgroundRunner=new BackgroundRunner(agent.serviceOrchestrator);
-    const scheduler=new Scheduler(agent.serviceOrchestrator);
-    backgroundRunner.start(); scheduler.start(); agent.planRunner.start();
-    const server=startHttpApi(agent, config.api.port);
-    const voiceRuntime=installVoiceHttpIngress(server, agent, voiceIngressStore, alertRouter);
-    const shutdown=()=>{backgroundRunner.stop();scheduler.stop();agent.planRunner.stop();retentionScheduler.stop();voiceRuntime.dispose();unsubscribeAlerts();server.close();};
-    process.once("SIGTERM",shutdown);process.once("SIGINT",shutdown);
+    const backgroundRunner = new BackgroundRunner(agent.serviceOrchestrator);
+    const scheduler = new Scheduler(agent.serviceOrchestrator);
+    backgroundRunner.start();
+    scheduler.start();
+    agent.planRunner.start();
+
+    const server = startHttpApi(agent, config.api.port);
+    // Preserve Chantier-10 alerts/legacy polling, then wrap command/chat routes with 11A.
+    const voiceRuntime = installVoiceHttpIngress(server, agent, voiceIngressStore, alertRouter);
+    const conversationRuntime = installConversationHttpIngress(server, conversationService);
+
+    const shutdown = () => {
+      backgroundRunner.stop();
+      scheduler.stop();
+      agent.planRunner.stop();
+      retentionScheduler.stop();
+      conversationRuntime.dispose();
+      voiceRuntime.dispose();
+      unsubscribeAlerts();
+      server.close();
+    };
+    process.once("SIGTERM", shutdown);
+    process.once("SIGINT", shutdown);
   }
 
   if (modes.has("cli") || modes.size === 0) {
-    await runCli(agent);
+    await runCli(agent, conversationService);
   }
 }
 
