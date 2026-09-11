@@ -12,6 +12,7 @@ export type NotificationType =
   | "APPROVAL_REQUIRED"
   | "COMMERCIAL_ATTENTION_REQUIRED";
 export interface Notification { id: string; type: NotificationType; severity: "info" | "warning" | "error"; title: string; message: string; taskId?: string; operationTaskId?: string; createdAt: number; readAt?: number }
+export type NotificationListener = (notification: Notification) => void | Promise<void>;
 
 /** activity.emailAlerts : types de notification jugés suffisamment importants pour justifier une alerte e-mail (Jarvis -> utilisateur). */
 const ALERT_WORTHY = new Set<NotificationType>(["RECOVERY_REQUIRED", "BACKGROUND_FAILED", "APPROVAL_REQUIRED", "COMMERCIAL_ATTENTION_REQUIRED"]);
@@ -19,7 +20,23 @@ const ALERT_WORTHY = new Set<NotificationType>(["RECOVERY_REQUIRED", "BACKGROUND
 function map(row: any): Notification { return { id: row.id, type: row.type, severity: row.severity, title: row.title, message: row.message, taskId: row.task_id ?? undefined, operationTaskId: row.operation_task_id ?? undefined, createdAt: row.created_at, readAt: row.read_at ?? undefined }; }
 
 export class NotificationStore {
+  private static readonly listeners = new Set<NotificationListener>();
+
   constructor(private readonly emailProvider: EmailProvider = createEmailProvider()) {}
+
+  /** Global process-level subscription: every NotificationStore instance emits here. */
+  static subscribe(listener: NotificationListener): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private static emit(notification: Notification): void {
+    for (const listener of this.listeners) {
+      Promise.resolve(listener(notification)).catch((error) => {
+        console.error("[AlertRouter] notification fanout failed:", (error as Error).message);
+      });
+    }
+  }
 
   create(input: Omit<Notification, "id" | "createdAt" | "readAt">, dedupeKey?: string): Notification {
     const db = getDb(); const id = randomUUID(); const now = Date.now();
@@ -27,9 +44,12 @@ export class NotificationStore {
       .run(id, input.type, input.severity, input.title, input.message, input.taskId ?? null, input.operationTaskId ?? null, dedupeKey ?? null, now);
     const notification = dedupeKey ? map(db.prepare(`SELECT * FROM notifications WHERE dedupe_key=?`).get(dedupeKey)) : this.get(id)!;
     // inserted.changes === 1 : cette notification vient réellement d'être créée (pas une
-    // ré-émission dédupliquée) — évite d'envoyer une alerte e-mail en double sur retry/redémarrage.
-    if (inserted.changes === 1 && config.activity.emailAlerts && ALERT_WORTHY.has(notification.type)) {
-      this.sendEmailAlert(notification).catch(() => undefined);
+    // ré-émission dédupliquée) — évite tout canal d'alerte en double sur retry/redémarrage.
+    if (inserted.changes === 1) {
+      if (config.activity.emailAlerts && ALERT_WORTHY.has(notification.type)) {
+        this.sendEmailAlert(notification).catch(() => undefined);
+      }
+      NotificationStore.emit(notification);
     }
     return notification;
   }

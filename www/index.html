@@ -122,6 +122,179 @@
     </div>
   </div>
 
+  <!-- CHANTIER 10: non-critical WebView ↔ native voice synchronization. The FGS remains independent. -->
+  <script>
+    (function () {
+      var nativeVoiceSettings = {
+        automaticVoiceReading: false,
+        voiceMode: 'OFF',
+        voiceResponseMode: 'AUTO'
+      };
+      var originalFetch = window.fetch.bind(window);
+      var listenersInstalled = false;
+
+      function nativePlugin() {
+        return window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.JarvisVoice
+          ? window.Capacitor.Plugins.JarvisVoice
+          : null;
+      }
+
+      function backendBase() {
+        return (localStorage.getItem('jarvis_backend_url') || '').trim().replace(/\/+$/, '');
+      }
+
+      function authHeaders() {
+        var token = localStorage.getItem('jarvis_token') || '';
+        return token ? { Authorization: 'Bearer ' + token } : {};
+      }
+
+      async function configureNativeClient() {
+        var plugin = nativePlugin();
+        if (!plugin) return;
+        var base = backendBase();
+        var token = localStorage.getItem('jarvis_token') || '';
+        try {
+          if (base) await plugin.configureBackend({ baseUrl: base });
+          if (token) await plugin.configureCredential({ token: token });
+        } catch (err) {
+          console.warn('[Voice] native backend configuration unavailable:', err && err.message ? err.message : err);
+        }
+      }
+
+      async function refreshVoiceSettings() {
+        var plugin = nativePlugin();
+        if (!plugin) return;
+        var base = backendBase();
+        try {
+          var response = await originalFetch(base + '/api/settings', { headers: authHeaders() });
+          if (!response.ok) return;
+          var settings = await response.json();
+          if (!Array.isArray(settings)) return;
+          settings.forEach(function (entry) {
+            var key = entry && entry.definition && entry.definition.key;
+            var value = entry && Object.prototype.hasOwnProperty.call(entry, 'effectiveValue') ? entry.effectiveValue : undefined;
+            if (key === 'settings.automaticVoiceReading') nativeVoiceSettings.automaticVoiceReading = value === true;
+            if (key === 'settings.voiceMode' && typeof value === 'string') nativeVoiceSettings.voiceMode = value;
+            if (key === 'settings.voiceResponseMode' && typeof value === 'string') nativeVoiceSettings.voiceResponseMode = value;
+          });
+          try { await plugin.setVoiceResponseMode({ mode: nativeVoiceSettings.voiceResponseMode }); } catch (_) {}
+          try { await plugin.setVoiceMode({ mode: nativeVoiceSettings.voiceMode }); } catch (err) {
+            // A denied microphone permission or missing wake-word model is a real diagnostic,
+            // not a reason to claim the setting is active natively.
+            console.warn('[Voice] native mode not activated:', err && err.message ? err.message : err);
+          }
+          updateMicButton();
+        } catch (err) {
+          console.warn('[Voice] settings synchronization failed:', err && err.message ? err.message : err);
+        }
+      }
+
+      function updateMicButton() {
+        var plugin = nativePlugin();
+        var button = document.getElementById('jarvis-native-mic');
+        if (!plugin || nativeVoiceSettings.voiceMode === 'OFF') {
+          if (button) button.remove();
+          return;
+        }
+        if (button) return;
+        button = document.createElement('button');
+        button.id = 'jarvis-native-mic';
+        button.type = 'button';
+        button.textContent = '🎙️';
+        button.setAttribute('aria-label', 'Parler à Jarvis');
+        button.title = 'Parler à Jarvis';
+        button.style.cssText = 'position:fixed;right:20px;bottom:22px;z-index:5000;width:54px;height:54px;border-radius:50%;border:1px solid rgba(255,255,255,.3);background:#1d4ed8;color:white;font-size:24px;box-shadow:0 8px 25px rgba(0,0,0,.35)';
+        button.addEventListener('click', async function () {
+          try {
+            if (plugin.requestMicrophonePermission) await plugin.requestMicrophonePermission();
+            await plugin.startListening({});
+          } catch (err) {
+            console.warn('[Voice] microphone start failed:', err && err.message ? err.message : err);
+          }
+        });
+        document.body.appendChild(button);
+      }
+
+      function appendVoiceMessage(role, text) {
+        if (!text || typeof window.appendChatMessage !== 'function') return;
+        try {
+          if (typeof window.switchView === 'function') window.switchView('chat');
+          window.appendChatMessage(role, text, { regeneratable: role !== 'user' });
+        } catch (_) {}
+      }
+
+      async function recoverNativeState() {
+        var plugin = nativePlugin();
+        if (!plugin || !plugin.getVoiceState) return;
+        try {
+          var snapshot = await plugin.getVoiceState();
+          var id = snapshot && snapshot.voiceCommandId;
+          if (!id) return;
+          var displayed = localStorage.getItem('jarvis_voice_last_displayed_id');
+          if (displayed === id) return;
+          var response = await originalFetch(backendBase() + '/api/voice/commands/' + encodeURIComponent(id), { headers: authHeaders() });
+          if (!response.ok) return;
+          var data = await response.json();
+          if (data && data.response) {
+            appendVoiceMessage('user', snapshot.transcription || 'Commande vocale');
+            appendVoiceMessage('agent', data.response);
+            localStorage.setItem('jarvis_voice_last_displayed_id', id);
+          }
+        } catch (_) {}
+      }
+
+      function installNativeListeners() {
+        if (listenersInstalled) return;
+        var plugin = nativePlugin();
+        if (!plugin || !plugin.addListener) return;
+        listenersInstalled = true;
+        plugin.addListener('transcription', function (event) {
+          appendVoiceMessage('user', event && event.text);
+        });
+        plugin.addListener('voiceResponse', function (event) {
+          if (event && event.voiceCommandId) localStorage.setItem('jarvis_voice_last_displayed_id', event.voiceCommandId);
+          appendVoiceMessage('agent', event && event.response);
+        });
+        plugin.addListener('voiceError', function (event) {
+          console.warn('[Voice] native error:', event && event.code);
+        });
+      }
+
+      window.fetch = async function (input, init) {
+        var response = await originalFetch(input, init);
+        try {
+          var method = String((init && init.method) || 'GET').toUpperCase();
+          var requestUrl = new URL(typeof input === 'string' ? input : input.url, window.location.href);
+          if (response.ok && method === 'POST' && requestUrl.pathname === '/api/chat') {
+            var clone = response.clone();
+            var body = await clone.json();
+            await configureNativeClient();
+            await refreshVoiceSettings();
+            var plugin = nativePlugin();
+            if (plugin && nativeVoiceSettings.automaticVoiceReading && body && body.response) {
+              try { await plugin.speak({ text: body.response }); } catch (err) { console.warn('[Voice] automatic reading unavailable:', err && err.message ? err.message : err); }
+            }
+          }
+          if (response.ok && method !== 'GET' && requestUrl.pathname === '/api/settings') {
+            setTimeout(function () { void refreshVoiceSettings(); }, 0);
+          }
+        } catch (_) {}
+        return response;
+      };
+
+      async function bootstrapNativeVoice() {
+        await configureNativeClient();
+        installNativeListeners();
+        await refreshVoiceSettings();
+        await recoverNativeState();
+      }
+
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bootstrapNativeVoice, { once: true });
+      else void bootstrapNativeVoice();
+      window.JarvisNativeVoice = { sync: bootstrapNativeVoice };
+    })();
+  </script>
+
   <!-- EXECUTABLE OTA BOOTLOADER -->
   <script>
     (function() {

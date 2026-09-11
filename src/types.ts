@@ -110,7 +110,7 @@ export type SkillExecutionTarget = "LOCAL_HANDLER" | "SERVICE_CAPABILITY" | "WOR
 export type SkillCategory = "Contrôle" | "Recherche" | "Fichiers" | "Communication" | "Technique" | "Workflows" | "Interne" | "Futur";
 
 export interface SkillContext {
-  rememberFact(entity: string, attribute: string, value: string): void;
+  rememberFact(entity: string, attribute: string, value:string): void;
   serviceOrchestrator?: any;
   planner?: any;
   skillRegistry?: any;
@@ -118,7 +118,17 @@ export interface SkillContext {
   toolCallId?: string;
 }
 
+export type PendingActionRisk = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+
+export interface AgentPendingAction {
+  type: "PERMISSION" | "INPUT";
+  taskId: string;
+  riskLevel?: PendingActionRisk;
+}
+
 export interface AgentStepResult {
   response: string;
   iterations: number;
+  /** Exact operation encountered during this step; absent for ordinary completed responses. */
+  pendingAction?: AgentPendingAction;
 }
