@@ -22,8 +22,12 @@ if (existsSync(indexPath) && existsSync(conversationBootstrapPath)) {
   }
 }
 
-// 1. Target files to bundle
-const filesToBundle = ["index.html", "style.css", "app.js", "conversationPersistence.js"];
+// 1. Target files to bundle.
+// Keep the historical OTA contract intentionally limited to these three files.
+// conversationPersistence.js is a normal static www asset referenced by index.html;
+// fresh Web/Capacitor builds ship it with www, but it must not alter the OTA payload
+// shape/hash contract validated by otaClient.test.ts.
+const filesToBundle = ["index.html", "style.css", "app.js"];
 const bundleFilesMap = {};
 
 for (const file of filesToBundle) {
