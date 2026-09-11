@@ -21,6 +21,7 @@ public final class SecureVoiceConfigStore {
     private static final String KEY_TOKEN = "credential";
     private static final String KEY_MODE = "voice_mode";
     private static final String KEY_RESPONSE_MODE = "voice_response_mode";
+    private static final String KEY_CONVERSATION_ID = "active_conversation_id";
 
     private final SharedPreferences prefs;
 
@@ -81,6 +82,18 @@ public final class SecureVoiceConfigStore {
 
     public String getVoiceResponseMode() {
         return prefs.getString(KEY_RESPONSE_MODE, "AUTO");
+    }
+
+    public void setActiveConversationId(String conversationId) {
+        if (conversationId == null || conversationId.trim().isEmpty()) {
+            prefs.edit().remove(KEY_CONVERSATION_ID).apply();
+        } else {
+            prefs.edit().putString(KEY_CONVERSATION_ID, conversationId.trim()).apply();
+        }
+    }
+
+    public String getActiveConversationId() {
+        return prefs.getString(KEY_CONVERSATION_ID, "");
     }
 
     private SecretKey getOrCreateKey() throws Exception {
