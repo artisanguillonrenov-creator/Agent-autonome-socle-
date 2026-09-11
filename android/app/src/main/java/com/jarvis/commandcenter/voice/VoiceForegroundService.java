@@ -16,8 +16,6 @@ import android.os.IBinder;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
-import android.speech.tts.TextToSpeech;
-import android.speech.tts.UtteranceProgressListener;
 
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
@@ -90,10 +88,9 @@ public final class VoiceForegroundService extends Service {
     private NativeJarvisClient client;
     private WakeWordEngine wakeWordEngine;
     private SpeechRecognizer recognizer;
-    private TextToSpeech tts;
+    private SiwisTtsEngine tts;
     private AudioManager audioManager;
     private AudioManager.OnAudioFocusChangeListener audioFocusListener;
-    private boolean ttsReady = false;
     private String voiceMode = "OFF";
     private String currentWorkspaceId;
     private String activeVoiceCommandId;
@@ -108,6 +105,7 @@ public final class VoiceForegroundService extends Service {
         configStore = new SecureVoiceConfigStore(this);
         client = new NativeJarvisClient(this);
         wakeWordEngine = new WakeWordEngine.Missing();
+        tts = new SiwisTtsEngine(this);
         audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
         audioFocusListener = focusChange -> {
             if (focusChange == AudioManager.AUDIOFOCUS_LOSS
@@ -116,7 +114,6 @@ public final class VoiceForegroundService extends Service {
             }
         };
         createNotificationChannels();
-        initTts();
         alertPoller.scheduleWithFixedDelay(this::pollNativeAlertsSafely, 8, 15, TimeUnit.SECONDS);
     }
 
@@ -338,36 +335,31 @@ public final class VoiceForegroundService extends Service {
             afterSpeech(alert);
             return;
         }
-        if (!ttsReady || tts == null) {
-            VoicePlugin.emitVoiceError("TTS_UNAVAILABLE");
+        if (tts == null || !tts.isAvailable()) {
+            VoicePlugin.emitVoiceError("SIWIS_TTS_MODEL_MISSING");
             afterSpeech(alert);
             return;
         }
         requestAudioFocus();
         machine.transition(VoiceStateMachine.State.SPEAKING);
         publishState();
-        String utteranceId = (alert ? "alert-" : "voice-") + UUID.randomUUID();
-        int status = tts.speak(value, TextToSpeech.QUEUE_FLUSH, null, utteranceId);
-        if (status == TextToSpeech.ERROR) {
-            VoicePlugin.emitVoiceError("TTS_SPEAK_FAILED");
-            abandonAudioFocus();
-            afterSpeech(alert);
-        }
-    }
-
-    private void initTts() {
-        tts = new TextToSpeech(this, status -> {
-            ttsReady = status == TextToSpeech.SUCCESS;
-            if (!ttsReady) {
-                VoicePlugin.emitVoiceError("TTS_INIT_FAILED");
-                return;
+        tts.speak(value, new SiwisTtsEngine.Listener() {
+            @Override
+            public void onDone() {
+                runOnMain(() -> {
+                    abandonAudioFocus();
+                    afterSpeech(alert);
+                });
             }
-            tts.setLanguage(Locale.getDefault());
-            tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
-                @Override public void onStart(String utteranceId) { }
-                @Override public void onError(String utteranceId) { runOnMain(() -> { abandonAudioFocus(); VoicePlugin.emitVoiceError("TTS_ERROR"); afterSpeech(utteranceId.startsWith("alert-")); }); }
-                @Override public void onDone(String utteranceId) { runOnMain(() -> { abandonAudioFocus(); afterSpeech(utteranceId.startsWith("alert-")); }); }
-            });
+
+            @Override
+            public void onError(String code) {
+                runOnMain(() -> {
+                    abandonAudioFocus();
+                    VoicePlugin.emitVoiceError(code == null ? "SIWIS_TTS_FAILED" : code);
+                    afterSpeech(alert);
+                });
+            }
         });
     }
 
@@ -586,7 +578,6 @@ public final class VoiceForegroundService extends Service {
         wakeWordEngine.stop();
         destroyRecognizer();
         if (tts != null) {
-            tts.stop();
             tts.shutdown();
             tts = null;
         }
