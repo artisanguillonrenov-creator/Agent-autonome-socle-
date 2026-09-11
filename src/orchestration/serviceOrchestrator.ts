@@ -17,6 +17,8 @@ import { NotificationStore } from "../autonomy/notificationStore.js";
 import { getDb } from "../persistence/db.js";
 import type { ArtifactInput, ArtifactKind } from "../workspaces/artifactStore.js";
 
+export type SideEffectState = "none" | "partial" | "uncertain";
+
 export interface OrchestrationResult {
   taskId: string;
   traceId: string;
@@ -28,6 +30,9 @@ export interface OrchestrationResult {
   commitSha?: string;
   prNumber?: number;
   prUrl?: string;
+  /** Métadonnées de sécurité issues du dernier TASK_FAILED persisté. */
+  replannable?: boolean;
+  sideEffectState?: SideEffectState;
 }
 
 export function extractOperationMetadata(resultStr?: string): {
@@ -63,6 +68,33 @@ export function extractOperationMetadata(resultStr?: string): {
     }
   } catch {
     // ignore
+  }
+  return {};
+}
+
+/**
+ * Source de vérité unique pour les métadonnées de récupération : le dernier
+ * ServiceEvent TASK_FAILED déjà persisté dans OperationStore.
+ */
+export function extractFailureMetadata(
+  store: OperationStore,
+  taskId: string,
+  fallbackError?: string,
+): Pick<OrchestrationResult, "replannable" | "sideEffectState"> {
+  const event = store.listEvents(taskId).filter((e) => e.type === "TASK_FAILED").at(-1);
+  if (event) {
+    const rawState = event.payload.side_effect_state;
+    const sideEffectState: SideEffectState | undefined =
+      rawState === "none" || rawState === "partial" || rawState === "uncertain" ? rawState : undefined;
+    return {
+      replannable: event.payload.replannable === true,
+      ...(sideEffectState ? { sideEffectState } : {}),
+    };
+  }
+  // Un échec de transport sans événement métier signifie que l'état distant peut
+  // être inconnu : ne jamais le présenter à l'Agent comme rejouable automatiquement.
+  if (fallbackError && /TRANSPORT_UNKNOWN|INTERRUPTED_EXECUTION_STATE_UNKNOWN/i.test(fallbackError)) {
+    return { replannable: false, sideEffectState: "uncertain" };
   }
   return {};
 }
@@ -121,6 +153,7 @@ export class ServiceOrchestrator {
           result: existingOp.result,
           error: existingOp.error,
           ...meta,
+          ...extractFailureMetadata(this.store, existingOp.taskId, existingOp.error),
         };
       }
       // If FAILED and retryable, proceed with controlled retry dispatch below
@@ -197,7 +230,8 @@ export class ServiceOrchestrator {
         const persisted = this.store.getOperation(taskId)!;
         return { taskId, traceId: persisted.traceId, status: persisted.status,
           selectedService: persisted.selectedService, result: persisted.result, error: persisted.error,
-          ...extractOperationMetadata(persisted.result) };
+          ...extractOperationMetadata(persisted.result),
+          ...extractFailureMetadata(this.store, persisted.taskId, persisted.error) };
       }
     }
 
@@ -225,7 +259,8 @@ export class ServiceOrchestrator {
         this.store.updateStatus(taskId, "FAILED", undefined, "APPROVAL_PREPARATION_FAILED");
         const failed = this.store.getOperation(taskId)!;
         return { taskId, traceId: failed.traceId, status: failed.status, selectedService: failed.selectedService,
-          result: failed.result, error: failed.error };
+          result: failed.result, error: failed.error,
+          ...extractFailureMetadata(this.store, failed.taskId, failed.error) };
       }
       // activity.emailAlerts : une approbation en attente est un événement suffisamment
       // important pour justifier une alerte (voir NotificationStore.ALERT_WORTHY).
@@ -251,7 +286,8 @@ export class ServiceOrchestrator {
 
     if (!adapterRes.success) {
       this.store.recordMetrics(taskId,adapterRes.transportDurationMs);
-      // Transport/Network Error: mark as FAILED (retryable = true) with transport info
+      // Le transport a échoué sans ServiceEvent fiable : l'état d'un éventuel effet de bord
+      // est inconnu, donc jamais rejouable automatiquement par le chemin Agent direct.
       this.store.updateStatus(taskId, "FAILED", undefined, `TRANSPORT_UNKNOWN: ${adapterRes.message}`, true);
       return {
         taskId,
@@ -259,6 +295,8 @@ export class ServiceOrchestrator {
         status: "FAILED",
         selectedService: service.id,
         error: adapterRes.message,
+        replannable: false,
+        sideEffectState: "uncertain",
       };
     }
 
@@ -276,6 +314,7 @@ export class ServiceOrchestrator {
       result: updatedOp.result,
       error: updatedOp.error,
       ...meta,
+      ...extractFailureMetadata(this.store, updatedOp.taskId, updatedOp.error),
     };
   }
 
@@ -301,7 +340,8 @@ export class ServiceOrchestrator {
     }
     const updated = this.store.getOperation(taskId)!;
     return { taskId, traceId: updated.traceId, status: updated.status, selectedService: updated.selectedService,
-      result: updated.result, error: updated.error, ...extractOperationMetadata(updated.result) };
+      result: updated.result, error: updated.error, ...extractOperationMetadata(updated.result),
+      ...extractFailureMetadata(this.store, updated.taskId, updated.error) };
   }
 
 
