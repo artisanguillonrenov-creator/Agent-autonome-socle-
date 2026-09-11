@@ -1,0 +1,12 @@
+Jarvis integrated voice — third-party notices
+
+Voice model: Piper fr_FR-siwis-medium (SIWIS, French, single speaker)
+Model source: https://github.com/rhasspy/piper-voices/tree/master/fr/fr_FR/siwis/medium
+Runtime model archive used at build time: https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-fr_FR-siwis-medium.tar.bz2
+SIWIS corpus/model card attribution: CC BY 4.0 — https://creativecommons.org/licenses/by/4.0/
+
+Inference runtime: sherpa-onnx by k2-fsa
+Source: https://github.com/k2-fsa/sherpa-onnx
+License: Apache-2.0
+
+The SIWIS voice model and sherpa-onnx remain third-party components under their respective licenses. Jarvis bundles them so voice synthesis can run locally and offline without requiring a separate Android TTS application.
