@@ -3,6 +3,13 @@
 
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
 
+    <!-- Android 11+ package visibility requirement for SpeechRecognizer. -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
