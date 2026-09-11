@@ -27,6 +27,7 @@ import type { AgentExecutionContext } from "../persistence/conversations/types.j
 import type { PersonalityTurnPolicy } from "../personality/domain/types.js";
 import { PersonalityPromptComposer } from "../personality/personalityPromptComposer.js";
 import { PersonalityOutputValidator } from "../personality/personalityOutputValidator.js";
+import { refinePolicyAfterToolResult, refinePolicyForToolUse } from "../personality/personalityRuntimeSignals.js";
 
 const LEGACY_CONVERSATION_ID = "__legacy__";
 
@@ -159,6 +160,12 @@ export class Agent {
       const nativeToolCalls = completionResult.toolCalls;
 
       if (nativeToolCalls && nativeToolCalls.length > 0) {
+        if (durableContext?.personalityPolicy) {
+          Object.assign(
+            durableContext.personalityPolicy,
+            refinePolicyForToolUse(durableContext.personalityPolicy),
+          );
+        }
         console.log(`[Agent] ${nativeToolCalls.length} appel(s) de tool natif(s) intercepté(s) au tour ${iterations}.`);
         await recordIntermediate({ role: "assistant", content: rawText || null, toolCalls: nativeToolCalls });
 
@@ -196,6 +203,12 @@ export class Agent {
           const result = await this.skills.execute(skillName, parsedInput, context);
           const exactPending = this.pendingActionFromToolResult(result);
           if (exactPending) pendingAction = exactPending;
+          if (durableContext?.personalityPolicy) {
+            Object.assign(
+              durableContext.personalityPolicy,
+              refinePolicyAfterToolResult(durableContext.personalityPolicy, result, exactPending),
+            );
+          }
           await recordIntermediate({
             role: "tool",
             name: skillName,
