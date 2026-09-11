@@ -4,6 +4,7 @@ import Database from "better-sqlite3";
 import { PersonalityPolicyEngine } from "./personalityPolicyEngine.js";
 import { PersonalityOutputValidator } from "./personalityOutputValidator.js";
 import { PersonalityPromptComposer } from "./personalityPromptComposer.js";
+import { refinePolicyAfterToolResult, refinePolicyForToolUse } from "./personalityRuntimeSignals.js";
 import { SqlitePersonalityRepository } from "./sqlitePersonalityRepository.js";
 import type { IPersonalityRepository } from "./domain/personalityRepository.js";
 import type { JarvisPersonalityState, PersonalityTurnPolicy } from "./domain/types.js";
@@ -105,11 +106,39 @@ test("Personality: monsieur must be first or last sentence and at most once", ()
   assert.ok(middle.violations.includes("MONSIEUR_POSITION_INVALID"));
 });
 
-test("Personality: emoji and exclamation are rejected outside code", () => {
+test("Personality: emoji and prose exclamation are rejected while technical bangs survive", () => {
   const validator = new PersonalityOutputValidator();
   assert.equal(validator.validate("C'est fait 😊", basePolicy()).isValid, false);
   assert.equal(validator.validate("C'est fait!", basePolicy()).isValid, false);
+  assert.equal(validator.validate("La condition x != y reste vraie.", basePolicy()).isValid, true);
+  assert.equal(validator.validate("Utilise #!/bin/bash puis CSS !important sans modification.", basePolicy()).isValid, true);
   assert.equal(validator.validate("Code: `if (a != b) return;`", basePolicy()).isValid, true);
+
+  const sanitized = validator.sanitizeStyleOnly("#!/bin/bash\nx != y\ncolor: red !important;\nTerminé!", basePolicy());
+  assert.match(sanitized, /#!\/bin\/bash/);
+  assert.match(sanitized, /x != y/);
+  assert.match(sanitized, /!important/);
+  assert.match(sanitized, /Terminé\./);
+});
+
+test("Personality: actual tool use refines mode, certainty and critical attention", () => {
+  const initial = basePolicy({ certainty: "UNKNOWN", allowHumor: false });
+  const duringTool = refinePolicyForToolUse(initial);
+  assert.equal(duringTool.mode, "OPERATIONNEL");
+  assert.equal(duringTool.certainty, "VERIFICATION_REQUIRED");
+  assert.equal(duringTool.allowHumor, false);
+
+  const afterTool = refinePolicyAfterToolResult(
+    duringTool,
+    JSON.stringify({ status: "WAITING_PERMISSION", taskId: "t" }),
+    { type: "PERMISSION", taskId: "t", riskLevel: "CRITICAL" },
+  );
+  assert.equal(afterTool.mode, "OPERATIONNEL");
+  assert.equal(afterTool.gravity, "CRITIQUE");
+  assert.equal(afterTool.certainty, "INFERRED");
+  assert.equal(afterTool.allowWilliam, true);
+  assert.equal(afterTool.allowHumor, false);
+  assert.equal(afterTool.eventProtocol, "WARNING");
 });
 
 test("Personality: critical response requires all four sections", () => {
