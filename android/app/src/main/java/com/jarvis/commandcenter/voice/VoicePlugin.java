@@ -89,13 +89,20 @@ public class VoicePlugin extends Plugin {
         String mode = call.getString("mode", "OFF");
         SecureVoiceConfigStore store = new SecureVoiceConfigStore(getContext());
 
-        // OFF must never start the microphone foreground service. On Android 14+ / targetSdk 34+
-        // promoting a microphone-typed service without RECORD_AUDIO can throw SecurityException.
-        // This is especially dangerous immediately after a reinstall, where the WebView/settings
-        // may be restored before the runtime permission is granted. Persist OFF and stop any
-        // existing service instance instead of starting one just to tell it to stop.
         if ("OFF".equals(mode)) {
             store.setVoiceMode("OFF");
+            getContext().stopService(new Intent(getContext(), VoiceForegroundService.class));
+            call.resolve();
+            return;
+        }
+
+        // PUSH_TO_TALK is a passive mode: selecting/synchronizing it must not start a
+        // microphone foreground service. The service is started only after an explicit
+        // press on the mic button. This avoids Android 14+/16 startup crashes when the
+        // WebView restores the setting before the Activity is fully eligible for a
+        // microphone foreground service.
+        if ("PUSH_TO_TALK".equals(mode)) {
+            store.setVoiceMode(mode);
             getContext().stopService(new Intent(getContext(), VoiceForegroundService.class));
             call.resolve();
             return;
@@ -184,8 +191,6 @@ public class VoicePlugin extends Plugin {
             return;
         }
         if (getPermissionState("microphone") != PermissionState.GRANTED) {
-            // The only native service in Chantier 10 is microphone-typed; do not try to
-            // start it from the background without its required while-in-use permission.
             call.reject("MICROPHONE_PERMISSION_REQUIRED");
             return;
         }
