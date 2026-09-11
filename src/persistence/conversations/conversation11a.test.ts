@@ -4,7 +4,11 @@ import assert from "node:assert/strict";
 import Database from "better-sqlite3";
 import { SqliteConversationRepository } from "./sqliteConversationRepository.js";
 import { ConversationCoordinator } from "./conversationCoordinator.js";
+import { ConversationExecutionService } from "./conversationExecutionService.js";
 import { computeRequestFingerprint } from "./fingerprint.js";
+import { MemoryManager } from "../../memory/memoryManager.js";
+import { LocalHashingEmbeddingProvider } from "../../llm/embeddings.js";
+import type { Agent } from "../../core/agent.js";
 
 function repository() {
   const db = new Database(":memory:");
@@ -152,6 +156,57 @@ test("11A SQLite: regeneration atomique conserve ancienne et active nouvelle", a
   const active = await repo.getLastActiveMessages(conversationId, 30);
   assert.equal(active.some((message) => message.messageId === original.messageId), false);
   assert.equal(active.some((message) => message.messageId === revised.messageId), true);
+  db.close();
+});
+
+test("11A Service: régénère une cible durable sortie de la fenêtre mémoire chaude", async () => {
+  const { db, repo } = repository();
+  await repo.initialize();
+  const conversationId = randomUUID();
+  await repo.initializeSession(conversationId, null);
+
+  const originalTurn = await createRunningTurn(repo, conversationId);
+  await repo.appendMessage(conversationId, originalTurn, { role: "user", content: "ancienne question" }, randomUUID());
+  const original = await repo.appendFinalMessageAndCompleteTurn(
+    conversationId,
+    originalTurn,
+    { role: "assistant", content: "ancienne réponse" },
+    randomUUID(),
+    { response: "ancienne réponse", iterations: 1 },
+  );
+  await repo.importHistoricalMessages(conversationId, [
+    { role: "user", content: "plus récent 1" },
+    { role: "assistant", content: "plus récent 2" },
+    { role: "user", content: "plus récent 3" },
+    { role: "assistant", content: "plus récent 4" },
+    { role: "user", content: "plus récent 5" },
+  ]);
+
+  const memory = new MemoryManager(new LocalHashingEmbeddingProvider(), repo, 3, 10);
+  let targetWasVisibleToAgent = false;
+  const fakeAgent = {
+    memory,
+    async step() { return { response: "unused", iterations: 1 }; },
+    async regenerateLastResponse(context: { conversationId: string }, targetMessageId: string) {
+      targetWasVisibleToAgent = Boolean(memory.getWorkingSession(context.conversationId)?.getEntryByMessageId(targetMessageId));
+      return { response: "réponse régénérée" };
+    },
+    async reflectAfterDurableTurn() { return null; },
+    applyCheckpointRuntimeState() { return true; },
+  } as unknown as Agent;
+  const service = new ConversationExecutionService(repo, new ConversationCoordinator(), fakeAgent);
+
+  const result = await service.handleTurn({
+    requestKind: "REGENERATE",
+    conversationId,
+    clientRequestId: randomUUID(),
+    payload: { targetMessageId: original.messageId },
+  });
+
+  assert.equal(targetWasVisibleToAgent, true, "la cible durable doit être rechargée avant l'appel Agent");
+  assert.equal(result.result, "NEW");
+  if (result.result === "NEW") assert.equal(result.response, "réponse régénérée");
+  assert.equal((await repo.getMessage(original.messageId))?.status, "SUPERSEDED");
   db.close();
 });
 
