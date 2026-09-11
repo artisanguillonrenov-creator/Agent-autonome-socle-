@@ -2,6 +2,10 @@ import { analyzeVocative, removeVocative, stripCodeForStyleChecks } from "./addr
 import type { PersonalityTurnPolicy, PersonalityValidationResult } from "./domain/types.js";
 
 const EMOJI_REGEX = /\p{Extended_Pictographic}/u;
+// A style exclamation is sentence punctuation. Technical constructs such as !=, #!/bin/bash
+// and !important are deliberately excluded.
+const PROSE_EXCLAMATION_REGEX = /!(?=(?:["'»”’)\]}]*)(?:\s|$))/u;
+const PROSE_EXCLAMATION_GLOBAL_REGEX = /!(?=(?:["'»”’)\]}]*)(?:\s|$))/gu;
 
 function transformOutsideCode(text: string, transform: (segment: string) => string): string {
   const codeRegex = /```[\s\S]*?```|`[^`\n]*`/g;
@@ -26,7 +30,7 @@ export class PersonalityOutputValidator {
     const william = analyzeVocative(text, "William");
 
     if (EMOJI_REGEX.test(styleText)) violations.push("EMOJI_FORBIDDEN");
-    if (styleText.includes("!")) violations.push("EXCLAMATION_FORBIDDEN");
+    if (PROSE_EXCLAMATION_REGEX.test(styleText)) violations.push("EXCLAMATION_FORBIDDEN");
 
     if (!policy.allowMonsieur && monsieur.count > 0) {
       violations.push("MONSIEUR_FORBIDDEN");
@@ -83,7 +87,7 @@ export class PersonalityOutputValidator {
     let text = transformOutsideCode(response, (segment) => (
       segment
         .replace(/\p{Extended_Pictographic}/gu, "")
-        .replace(/!/g, ".")
+        .replace(PROSE_EXCLAMATION_GLOBAL_REGEX, ".")
     ));
 
     const monsieur = analyzeVocative(text, "monsieur");
