@@ -24,6 +24,9 @@ import { providerForRole } from "../llm/modelRouter.js";
 import { resolveEffectiveInputBudget } from "../llm/contextWindow.js";
 import type { IConversationRepository } from "../persistence/conversations/conversationRepository.js";
 import type { AgentExecutionContext } from "../persistence/conversations/types.js";
+import type { PersonalityTurnPolicy } from "../personality/domain/types.js";
+import { PersonalityPromptComposer } from "../personality/personalityPromptComposer.js";
+import { PersonalityOutputValidator } from "../personality/personalityOutputValidator.js";
 
 const LEGACY_CONVERSATION_ID = "__legacy__";
 
@@ -49,6 +52,8 @@ export class Agent {
   readonly skillSelector: SkillSelector;
   private llm: LLMProvider;
   private readonly contextBudget: ContextBudgetManager;
+  private readonly personalityPromptComposer = new PersonalityPromptComposer();
+  private readonly personalityOutputValidator = new PersonalityOutputValidator();
   private customMaxIterations?: number;
   private stepCount = 0;
 
@@ -121,9 +126,13 @@ export class Agent {
       const reflections = retrieved.relevantMemories.filter((memory) => memory.kind === "reflection");
       const episodic = retrieved.relevantMemories.filter((memory) => memory.kind === "episodic");
       const effectiveInputBudget = resolveEffectiveInputBudget(this.llm.model, this.contextBudget.tokenBudget, config.llm.maxOutputTokens);
+      const personalityInstructions = durableContext?.personalityPolicy
+        ? this.personalityPromptComposer.compose(durableContext.personalityPolicy)
+        : "";
       const systemPrompt = this.contextBudget.assemble(
         [
           { label: "Instructions", content: this.buildInstructions(availableSkills), priority: 100 },
+          ...(personalityInstructions ? [{ label: "Personnalité", content: personalityInstructions, priority: 110 }] : []),
           { label: "Faits connus", content: retrieved.facts.join("\n"), priority: 80 },
           { label: "Réflexions passées", content: reflections.map((memory) => memory.text).join("\n"), priority: 70 },
           { label: "Souvenirs pertinents", content: episodic.map((memory) => memory.text).join("\n"), priority: 50 },
@@ -197,7 +206,13 @@ export class Agent {
         continue;
       }
 
-      finalResponse = rawText.trim() || "Je suis à votre disposition.";
+      const candidate = rawText.trim() || "Je suis à votre disposition.";
+      finalResponse = await this.enforcePersonalityFinalResponse(
+        candidate,
+        messages,
+        roleProvider,
+        durableContext?.personalityPolicy,
+      );
       if (!durableContext) await this.memory.recordTurn({ role: "assistant", content: finalResponse }, workspaceId);
       break;
     }
@@ -214,6 +229,44 @@ export class Agent {
 
   async reflectAfterDurableTurn(context: AgentExecutionContext): Promise<string | null> {
     return this.reflection.maybeReflectForConversation(context.conversationId, context.workspaceId);
+  }
+
+  private async enforcePersonalityFinalResponse(
+    response: string,
+    messages: ChatMessage[],
+    provider: LLMProvider,
+    policy?: PersonalityTurnPolicy,
+  ): Promise<string> {
+    if (!policy) return response;
+
+    const first = this.personalityOutputValidator.validate(response, policy);
+    if (first.isValid) return first.text;
+
+    const correctionMessages: ChatMessage[] = [
+      ...messages,
+      { role: "assistant", content: response },
+      { role: "user", content: this.personalityOutputValidator.correctionInstruction(first.violations, policy) },
+    ];
+    try {
+      const corrected = await completeWithLocalPriority(
+        provider,
+        correctionMessages,
+        withGenerationDefaults({ tools: undefined }),
+      );
+      if (!corrected.toolCalls?.length) {
+        const correctedText = corrected.content?.trim() ?? "";
+        if (correctedText) {
+          const second = this.personalityOutputValidator.validate(correctedText, policy);
+          if (second.isValid) return second.text;
+          console.warn(`[Personality] Corrective regeneration still violated: ${second.violations.join(", ")}`);
+          return this.personalityOutputValidator.sanitizeStyleOnly(correctedText, policy);
+        }
+      }
+    } catch (error) {
+      console.warn("[Personality] Corrective regeneration failed:", (error as Error).message);
+    }
+
+    return this.personalityOutputValidator.sanitizeStyleOnly(response, policy);
   }
 
   private pendingActionFromToolResult(result: string): AgentStepResult["pendingAction"] | undefined {
@@ -256,15 +309,25 @@ export class Agent {
     }
     if (targetIndex < 0) throw new Error("NO_REGENERATABLE_RESPONSE");
     const previousResponse = history[targetIndex].content ?? "";
+    const personalityInstructions = context?.personalityPolicy
+      ? this.personalityPromptComposer.compose(context.personalityPolicy)
+      : "";
     const messages: ChatMessage[] = [
-      { role: "system", content: "Reformule la dernière réponse de Jarvis sans effectuer d'action, sans appeler d'outil et sans ajouter de fait nouveau." },
+      {
+        role: "system",
+        content: [
+          "Reformule la dernière réponse de Jarvis sans effectuer d'action, sans appeler d'outil et sans ajouter de fait nouveau.",
+          personalityInstructions,
+        ].filter(Boolean).join("\n\n"),
+      },
       ...history.slice(0, targetIndex),
       { role: "user", content: `Réécris uniquement cette réponse finale :\n${previousResponse}` },
     ];
     const completion = await completeWithLocalPriority(this.llm, messages, withGenerationDefaults({ tools: undefined }));
     if (completion.toolCalls?.length) throw new Error("UNEXPECTED_TOOL_CALL_DURING_REGENERATION");
-    const response = completion.content?.trim();
-    if (!response) throw new Error("EMPTY_REGENERATION_RESPONSE");
+    const candidate = completion.content?.trim();
+    if (!candidate) throw new Error("EMPTY_REGENERATION_RESPONSE");
+    const response = await this.enforcePersonalityFinalResponse(candidate, messages, this.llm, context?.personalityPolicy);
     if (!durable) {
       entries[targetIndex] = { ...entries[targetIndex], message: { role: "assistant", content: response } };
       working.restoreEntries(entries);
