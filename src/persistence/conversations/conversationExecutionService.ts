@@ -116,6 +116,7 @@ export class ConversationExecutionService {
     return this.coordinator.execute(session.conversationId, async () => {
       const working = await this.agent.memory.getOrLoadSession(session.conversationId, this.repository, session.workspaceId ?? undefined);
       working.pin();
+      let dropRehydratedRegenerationWindow = false;
       try {
         await this.repository.markTurnRunning(turn.turnId);
         const context: AgentExecutionContext = {
@@ -170,6 +171,23 @@ export class ConversationExecutionService {
         ) {
           throw new ConversationExecutionError("TARGET_MESSAGE_NOT_REGENERABLE", 409);
         }
+
+        // The durable target may be older than the hot WorkingMemory window. Rehydrate a
+        // bounded ACTIVE history ending at the exact target so regeneration remains
+        // targetMessageId-driven even for long conversations.
+        if (!working.getEntryByMessageId(target.messageId)) {
+          const historicalWindow = await this.repository.getMessagesPage(
+            session.conversationId,
+            30,
+            target.sequence + 1,
+          );
+          if (!historicalWindow.items.some((item) => item.messageId === target.messageId)) {
+            throw new ConversationExecutionError("TARGET_MESSAGE_NOT_FOUND", 404);
+          }
+          working.restoreStoredMessages(historicalWindow.items, context.workspaceId);
+          dropRehydratedRegenerationWindow = true;
+        }
+
         const regenerated = await this.agent.regenerateLastResponse(context, target.messageId);
         const completedPayload: CompletedTurnPayload = { response: regenerated.response, iterations: 1 };
         const storedRevision = await this.repository.appendRevisionAndCompleteTurn(
@@ -192,6 +210,11 @@ export class ConversationExecutionService {
         throw error;
       } finally {
         working.unpin();
+        if (dropRehydratedRegenerationWindow) {
+          // Reload the latest durable tail on the next turn instead of leaving an old
+          // target-centered window as the hot conversation context.
+          this.agent.memory.dropSession(session.conversationId);
+        }
         this.agent.memory.triggerPostTurnCleanup();
       }
     });
