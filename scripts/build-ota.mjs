@@ -9,15 +9,30 @@ const __dirname = dirname(__filename);
 const rootDir = join(__dirname, "..");
 const wwwDir = join(rootDir, "www");
 
-// 1. Target files to bundle
-const filesToBundle = ["index.html", "style.css", "app.js"];
+// 1. Target files to bundle. Chantier 11A keeps its continuity shim as a separate
+// asset for the native/base app, while the OTA index gets the same code inlined so a
+// document.write() reload of an OTA index cannot silently lose conversation persistence.
+const filesToBundle = ["index.html", "style.css", "app.js", "conversationPersistence.js"];
 const bundleFilesMap = {};
+const conversationBootstrapPath = join(wwwDir, "conversationPersistence.js");
+const conversationBootstrap = existsSync(conversationBootstrapPath)
+  ? readFileSync(conversationBootstrapPath, "utf-8")
+  : "";
 
 for (const file of filesToBundle) {
   const filePath = join(wwwDir, file);
-  if (existsSync(filePath)) {
-    bundleFilesMap[file] = readFileSync(filePath, "utf-8");
+  if (!existsSync(filePath)) continue;
+  let content = readFileSync(filePath, "utf-8");
+  if (file === "index.html" && conversationBootstrap) {
+    const marker = "data-jarvis-conversation-bootstrap=\"11a\"";
+    if (!content.includes(marker)) {
+      content = content.replace(
+        "</body>",
+        `<script ${marker}>\n${conversationBootstrap}\n</script>\n</body>`,
+      );
+    }
   }
+  bundleFilesMap[file] = content;
 }
 
 // 2. Package bundle payload
@@ -29,13 +44,6 @@ writeFileSync(bundlePath, bundlePayload, "utf-8");
 // main, qui fait foi pour savoir si un bundle a réellement changé.
 const sha256 = createHash("sha256").update(bundlePayload).digest("hex");
 
-/**
- * Identifiant de build unique : dérivé du commit réellement déployé quand la
- * plateforme d'hébergement (Render) ou la CI (GitHub Actions) l'expose, sinon dérivé
- * du contenu du bundle lui-même. Jamais une valeur fixe : chaque changement de code
- * Web produit un buildId différent, ce qui permet au client de détecter une nouvelle
- * mise à jour sans dépendre d'un numéro de version bumpé manuellement.
- */
 function resolveBuildId() {
   const fromEnv =
     process.env.OTA_BUILD_ID ||
