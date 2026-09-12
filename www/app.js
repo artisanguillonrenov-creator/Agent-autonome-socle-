@@ -1183,7 +1183,13 @@ function renderChatView() {
   layout.append(messages, form);
   workspace.append(layout);
   container.appendChild(workspace);
-  appendChatMessage('agent', "Bonjour, je suis Jarvis Command Center. Comment puis-je vous aider aujourd'hui ?", { regeneratable: false });
+  // Si conversationPersistence.js est chargé, sa propre boucle de sondage va
+  // remplacer #chat-messages par l'historique durable de la conversation active
+  // (ou par ce même message d'accueil si elle est vide) : on évite ici un flash
+  // visuel en ne posant l'accueil statique que lorsque la persistance est absente.
+  if (!window.__JARVIS_CONVERSATION_MANAGER_LOADED__) {
+    appendChatMessage('agent', "Bonjour, je suis Jarvis Command Center. Comment puis-je vous aider aujourd'hui ?", { regeneratable: false });
+  }
 
   let submitting = false;
   let activeAbortController = null;

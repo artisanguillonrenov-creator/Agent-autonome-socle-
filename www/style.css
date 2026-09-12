@@ -789,6 +789,13 @@ body {
 .checkpoint-restore:hover { background:var(--bg-card-hover); }
 .checkpoint-restore:disabled { opacity:.5; cursor:wait; }
 
+/* --- Gestionnaire de conversations (Chantier 11B) --- */
+.conversation-manager { display:flex; gap:8px; align-items:center; flex-wrap:wrap; padding:10px 14px; border-bottom:1px solid var(--border-color); background:var(--bg-card); flex-shrink:0; }
+.conversation-manager-label { font-size:.78rem; color:var(--text-muted); font-weight:700; letter-spacing:.02em; text-transform:uppercase; }
+.conversation-manager-select { min-width:190px; max-width:360px; flex:1; padding:9px 10px; border-radius:10px; border:1px solid var(--border-color); background:var(--bg-input); color:var(--text-main); font:inherit; }
+.conversation-manager .btn { white-space:nowrap; }
+@media (max-width:640px) { .conversation-manager-select { min-width:100%; max-width:none; order:2; } .conversation-manager-label { width:100%; } }
+
 /* --- Toast (notifications discrètes, remplace certaines alert()) --- */
 .jarvis-toast-host { position:fixed; left:50%; bottom:28px; transform:translateX(-50%); z-index:2000; display:flex; flex-direction:column; gap:8px; align-items:center; pointer-events:none; }
 .jarvis-toast { pointer-events:auto; padding:10px 18px; border-radius:12px; background:var(--text-main); color:var(--bg-dark); font-size:.88rem; font-weight:500; box-shadow:var(--shadow-soft); opacity:0; transform:translateY(8px); transition:opacity .2s ease, transform .2s ease; max-width:min(90vw,420px); text-align:center; }

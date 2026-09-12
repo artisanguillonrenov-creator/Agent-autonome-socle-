@@ -398,5 +398,12 @@
       });
     })();
   </script>
+
+  <!-- Chantier 11B : persistance multi-conversation (historique durable, sélecteur de
+       conversations, auto-titrage). Chargé après le bootstrap OTA/app.js ; sa propre
+       boucle de sondage (voir conversationPersistence.js) attend que #chat-messages et
+       window.appendChatMessage existent avant d'agir, donc l'ordre exact de chargement
+       face à app.js n'est pas critique. -->
+  <script src="conversationPersistence.js"></script>
 </body>
 </html>
