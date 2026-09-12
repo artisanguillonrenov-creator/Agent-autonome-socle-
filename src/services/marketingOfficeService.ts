@@ -17,7 +17,7 @@ export class MarketingOfficeService {
   constructor(
     private readonly store = new MarketingOfficeStore(),
     private readonly searchProvider: WebSearchProvider = createWebSearchProvider(),
-    private readonly llm: (role?: ModelRole) => LLMProvider = officeLlm,
+    private readonly llm: (role?: ModelRole) => LLMProvider = (role) => officeLlm("marketing_office", role),
   ) {}
 
   async handleTaskRequest(r: TaskRequest): Promise<ServiceEvent[]> {

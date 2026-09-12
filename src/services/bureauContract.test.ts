@@ -11,7 +11,7 @@ test("officeLlm : utilise le modèle spécialisé Chantier 8 (ex. researchModel)
     config.llm.provider = "anthropic";
     config.llm.model = "claude-main";
     config.llm.researchModel = "claude-research-special";
-    const llm = officeLlm("research");
+    const llm = officeLlm("product_studio", "research");
     assert.equal(llm.model, "claude-research-special");
   } finally {
     config.llm.provider = originalProvider;
@@ -30,9 +30,9 @@ test("officeLlm : retombe sur le modèle principal Jarvis quand aucun modèle sp
     config.llm.model = "claude-main";
     config.llm.researchModel = "";
     config.llm.utilityModel = "";
-    assert.equal(officeLlm("research").model, "claude-main");
-    assert.equal(officeLlm("utility").model, "claude-main");
-    assert.equal(officeLlm().model, "claude-main");
+    assert.equal(officeLlm("product_studio", "research").model, "claude-main");
+    assert.equal(officeLlm("product_studio", "utility").model, "claude-main");
+    assert.equal(officeLlm("product_studio").model, "claude-main");
   } finally {
     config.llm.provider = originalProvider;
     config.llm.model = originalModel;

@@ -41,8 +41,8 @@ export class ProductStudioService {
   constructor(
     private readonly store = new ProductStudioStore(),
     private readonly searchProvider: WebSearchProvider = createWebSearchProvider(),
-    /** Injectable pour les tests ; en production, résout toujours le modèle Jarvis actif/spécialisé courant. */
-    private readonly llm: (role?: ModelRole) => LLMProvider = officeLlm,
+    /** Injectable pour les tests ; en production, résout toujours le modèle Jarvis actif/spécialisé (ou l'override propre à ce bureau) courant. */
+    private readonly llm: (role?: ModelRole) => LLMProvider = (role) => officeLlm("product_studio", role),
   ) {}
 
   async handleTaskRequest(r: TaskRequest): Promise<ServiceEvent[]> {
