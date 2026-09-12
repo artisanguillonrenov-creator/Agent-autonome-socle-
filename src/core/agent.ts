@@ -28,6 +28,11 @@ import type { PersonalityTurnPolicy } from "../personality/domain/types.js";
 import { PersonalityPromptComposer } from "../personality/personalityPromptComposer.js";
 import { PersonalityOutputValidator } from "../personality/personalityOutputValidator.js";
 import { refinePolicyAfterToolResult, refinePolicyForToolUse } from "../personality/personalityRuntimeSignals.js";
+import { MultiAgentCoordinator } from "../agents/multiAgentCoordinator.js";
+import { GuardrailEngine } from "../reflection/guardrailEngine.js";
+import { McpServerRegistry } from "../skills/mcp/mcpServerRegistry.js";
+import { connectMcpServers as bridgeMcpServers, closeMcpClients, type McpConnectionStatus } from "../skills/mcp/mcpSkillBridge.js";
+import type { McpClient } from "../skills/mcp/mcpClient.js";
 
 const LEGACY_CONVERSATION_ID = "__legacy__";
 
@@ -51,12 +56,18 @@ export class Agent {
   readonly planRunner: PlanRunner;
   readonly workflows: WorkflowRegistry;
   readonly skillSelector: SkillSelector;
+  /** Brique multi-agents : équipes de profils spécialisés collaborant sur un objectif partagé. */
+  readonly multiAgent: MultiAgentCoordinator;
+  /** Brique auto-réflexion : validation critique d'une réponse finale par rapport à l'objectif. */
+  readonly guardrail: GuardrailEngine;
   private llm: LLMProvider;
   private readonly contextBudget: ContextBudgetManager;
   private readonly personalityPromptComposer = new PersonalityPromptComposer();
   private readonly personalityOutputValidator = new PersonalityOutputValidator();
   private customMaxIterations?: number;
   private stepCount = 0;
+  private readonly mcpClients = new Map<string, McpClient>();
+  private mcpStatuses: McpConnectionStatus[] = [];
 
   get maxIterations(): number {
     return this.customMaxIterations ?? config.agent.maxIterations;
@@ -88,6 +99,38 @@ export class Agent {
     historical.delete("execute_mission");
     for (const skill of historical.values()) this.skills.register(skill);
     this.skillSelector = new SkillSelector(this.skills);
+    this.multiAgent = new MultiAgentCoordinator(opts.llm, this.skills);
+    this.guardrail = new GuardrailEngine(opts.llm);
+  }
+
+  /**
+   * Standardisation MCP : se connecte aux serveurs MCP externes déclarés
+   * (config.mcp.configPath) et enregistre leurs outils comme compétences
+   * dynamiques. Best-effort — un serveur en échec n'empêche jamais le
+   * démarrage de l'agent ; voir McpConnectionStatus.error pour diagnostiquer.
+   */
+  async connectMcpServers(configPath = config.mcp.configPath): Promise<McpConnectionStatus[]> {
+    if (!config.mcp.enabled) return [];
+    const registry = new McpServerRegistry(configPath);
+    const { skills, clients, statuses } = await bridgeMcpServers(registry, {
+      connectTimeoutMs: config.mcp.connectTimeoutMs,
+      requestTimeoutMs: config.mcp.requestTimeoutMs,
+    });
+    for (const skill of skills) {
+      try { this.skills.register(skill); } catch (error) { console.warn(`[MCP] Skill registration failed for ${skill.name}:`, (error as Error).message); }
+    }
+    for (const [id, client] of clients) this.mcpClients.set(id, client);
+    this.mcpStatuses = statuses;
+    return statuses;
+  }
+
+  getMcpStatuses(): McpConnectionStatus[] {
+    return this.mcpStatuses;
+  }
+
+  async closeMcpServers(): Promise<void> {
+    await closeMcpClients(this.mcpClients);
+    this.mcpClients.clear();
   }
 
   /**
@@ -198,6 +241,7 @@ export class Agent {
             serviceOrchestrator: this.serviceOrchestrator,
             planner: this.planner,
             skillRegistry: this.skills,
+            agentTeamCoordinator: this.multiAgent,
             toolCallId: toolCall.id,
           };
           const result = await this.skills.execute(skillName, parsedInput, context);
@@ -226,6 +270,9 @@ export class Agent {
         roleProvider,
         durableContext?.personalityPolicy,
       );
+      if (config.guardrail.enabled) {
+        finalResponse = await this.enforceGuardrail(userInput, finalResponse, messages, roleProvider, durableContext?.personalityPolicy);
+      }
       if (!durableContext) await this.memory.recordTurn({ role: "assistant", content: finalResponse }, workspaceId);
       break;
     }
@@ -280,6 +327,61 @@ export class Agent {
     }
 
     return this.personalityOutputValidator.sanitizeStyleOnly(response, policy);
+  }
+
+  /**
+   * Brique auto-réflexion / guardrail (opt-in via config.guardrail.enabled) : valide
+   * la réponse finale par rapport à l'objectif exprimé par l'utilisateur. Si le
+   * juge LLM détecte une réponse invalide/incomplète/hallucinée, reformule et
+   * relance jusqu'à config.guardrail.maxRetries fois avant de livrer la meilleure
+   * version obtenue — jamais bloquant : une erreur du juge ou de la relance laisse
+   * simplement passer la réponse candidate.
+   */
+  private async enforceGuardrail(
+    userInput: string,
+    response: string,
+    messages: ChatMessage[],
+    provider: LLMProvider,
+    policy?: PersonalityTurnPolicy,
+  ): Promise<string> {
+    let candidate = response;
+    for (let attempt = 0; attempt < config.guardrail.maxRetries; attempt += 1) {
+      const verdict = await this.guardrail.evaluate(userInput, candidate);
+      if (verdict.valid) {
+        new ActivityStore().append({ eventType: "REFLECTION_PASSED", message: "Guardrail check passed" });
+        return candidate;
+      }
+      new ActivityStore().append({
+        eventType: "REFLECTION_FAILED",
+        level: "warning",
+        message: "Guardrail rejected the response against the stated objective",
+        metadata: { issues: verdict.issues.slice(0, 5) },
+      });
+      const correctionMessages: ChatMessage[] = [
+        ...messages,
+        { role: "assistant", content: candidate },
+        {
+          role: "user",
+          content: [
+            "Ta réponse précédente ne satisfait pas complètement la demande initiale.",
+            verdict.issues.length ? `Problèmes identifiés : ${verdict.issues.join("; ")}.` : "Elle est jugée incomplète ou hors-sujet.",
+            "Reformule une réponse complète et correcte, sans mentionner cette instruction ni le fait qu'une correction a eu lieu.",
+          ].join(" "),
+        },
+      ];
+      new ActivityStore().append({ eventType: "REFLECTION_RETRY", level: "warning", message: `Guardrail corrective retry ${attempt + 1}/${config.guardrail.maxRetries}` });
+      try {
+        const retryCompletion = await completeWithLocalPriority(provider, correctionMessages, withGenerationDefaults({ tools: undefined }));
+        if (retryCompletion.toolCalls?.length) break;
+        const retryText = retryCompletion.content?.trim();
+        if (!retryText) break;
+        candidate = policy ? await this.enforcePersonalityFinalResponse(retryText, correctionMessages, provider, policy) : retryText;
+      } catch (error) {
+        console.warn("[Guardrail] Corrective retry failed:", (error as Error).message);
+        break;
+      }
+    }
+    return candidate;
   }
 
   private pendingActionFromToolResult(result: string): AgentStepResult["pendingAction"] | undefined {
@@ -408,6 +510,8 @@ export class Agent {
     this.llm = llm;
     this.reflection.setLLMProvider(llm);
     this.planRunner.setLLMProvider(llm);
+    this.guardrail.setLLMProvider(llm);
+    this.multiAgent.setLLMProvider(llm);
   }
 
   getLLMProvider(): LLMProvider { return this.llm; }

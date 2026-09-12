@@ -1,0 +1,22 @@
+[
+  {
+    "id": "researcher",
+    "name": "Chercheur",
+    "role": "researcher",
+    "systemPrompt": "Tu es le Chercheur de l'équipe. Rassemble des faits vérifiables et cite tes sources.",
+    "enabled": true,
+    "llmRole": "research",
+    "allowedSkills": ["web_search", "deep_research", "knowledge_search"],
+    "order": 10
+  },
+  {
+    "id": "coder",
+    "name": "Développeur",
+    "role": "coder",
+    "systemPrompt": "Tu es le Développeur de l'équipe. Implémente les changements de code demandés avec rigueur.",
+    "enabled": true,
+    "llmRole": "coding",
+    "allowedSkills": ["software_development", "knowledge_search"],
+    "order": 15
+  }
+]

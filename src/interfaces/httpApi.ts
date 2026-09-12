@@ -24,6 +24,7 @@ import { applyAllEffectiveRuntimeSettings } from "../settings/applier.js";
 import { getDb } from "../persistence/db.js";
 import type { ChatMessage } from "../types.js";
 import type { LLMProvider, ToolDefinition } from "../llm/provider.js";
+import { AgentTeamStore } from "../agents/agentTeamStore.js";
 
 const taskStore = new TaskStore();
 const notificationStore = new NotificationStore();
@@ -34,6 +35,7 @@ const artifactStore = new ArtifactStore(workspaceStore);
 const observabilityStore = new ObservabilityStore();
 const activityStore = new ActivityStore();
 const settingsStore = new SettingsStore();
+const agentTeamStore = new AgentTeamStore();
 let lastServerError: string | null = null;
 
 async function readBody(req: IncomingMessage): Promise<string> {
@@ -383,6 +385,31 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
       if (req.method === "GET" && planMetrics) {
         const value = observabilityStore.plan(decodeURIComponent(planMetrics[1]));
         sendJson(res, value ? 200 : 404, value ?? { error: "not_found" });
+        return;
+      }
+
+      // Brique multi-agents : profils déclarés et sessions d'équipe (observabilité www/).
+      if (req.method === "GET" && pathname === "/api/agents") {
+        sendJson(res, 200, { profiles: agent.multiAgent.profiles.list() });
+        return;
+      }
+
+      if (req.method === "GET" && pathname === "/api/agent-teams") {
+        sendJson(res, 200, { items: agentTeamStore.list(Number(parsedUrl.searchParams.get("limit")) || 50) });
+        return;
+      }
+
+      const agentTeamDetail = pathname.match(/^\/api\/agent-teams\/([^/]+)$/);
+      if (req.method === "GET" && agentTeamDetail) {
+        const run = agentTeamStore.get(decodeURIComponent(agentTeamDetail[1]));
+        if (!run) { sendJson(res, 404, { error: "not_found" }); return; }
+        sendJson(res, 200, { run, messages: agentTeamStore.messages(run.id) });
+        return;
+      }
+
+      // Brique MCP : état des serveurs externes connectés et de leurs outils découverts.
+      if (req.method === "GET" && pathname === "/api/mcp/servers") {
+        sendJson(res, 200, { servers: agent.getMcpStatuses() });
         return;
       }
 

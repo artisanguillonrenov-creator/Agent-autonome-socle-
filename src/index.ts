@@ -22,6 +22,7 @@ import { ConversationCoordinator } from "./persistence/conversations/conversatio
 import { ConversationExecutionService } from "./persistence/conversations/conversationExecutionService.js";
 import { createPersonalityRepository } from "./personality/personalityRepositoryFactory.js";
 import { PersonalityPolicyEngine } from "./personality/personalityPolicyEngine.js";
+import { AgentTeamStore } from "./agents/agentTeamStore.js";
 
 async function main(): Promise<void> {
   registerChantier10Settings();
@@ -68,6 +69,24 @@ async function main(): Promise<void> {
     });
   }
 
+  // Brique MCP : connexion best-effort aux serveurs externes déclarés. Ne bloque
+  // jamais le démarrage — un serveur MCP indisponible reste simplement absent
+  // des compétences disponibles (voir agent.getMcpStatuses()).
+  agent.connectMcpServers().catch((err) => {
+    console.error("[MCP] Connexion aux serveurs MCP échouée:", err);
+  });
+
+  // Brique durabilité (multi-agents) : reprend les collaborations d'équipe
+  // interrompues par un crash serveur, une coupure réseau ou une erreur LLM.
+  if (config.agentTeams.enabled) {
+    const agentTeamStore = new AgentTeamStore();
+    for (const run of agentTeamStore.incomplete()) {
+      agent.multiAgent.resume(run.id).catch((err) => {
+        console.warn(`[AgentTeam] Reprise de la session ${run.id} échouée:`, (err as Error).message);
+      });
+    }
+  }
+
   const retentionScheduler = new MemoryRetentionScheduler(() => config.projects.memoryRetentionDays);
   retentionScheduler.start();
   const modes = new Set(config.interface.modes);
@@ -94,6 +113,7 @@ async function main(): Promise<void> {
       conversationRuntime.dispose();
       voiceRuntime.dispose();
       unsubscribeAlerts();
+      agent.closeMcpServers().catch(() => undefined);
       server.close();
     };
     process.once("SIGTERM", shutdown);

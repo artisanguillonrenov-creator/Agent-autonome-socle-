@@ -1,0 +1,27 @@
+[
+  {
+    "id": "github",
+    "name": "GitHub MCP Server",
+    "enabled": false,
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-github"],
+    "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "" }
+  },
+  {
+    "id": "filesystem",
+    "name": "Filesystem MCP Server",
+    "enabled": false,
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/data/workspaces"]
+  },
+  {
+    "id": "remote-tools",
+    "name": "Remote MCP server (HTTP+SSE)",
+    "enabled": false,
+    "transport": "sse",
+    "url": "https://example.com/mcp/sse",
+    "headers": { "authorization": "Bearer REPLACE_ME" }
+  }
+]

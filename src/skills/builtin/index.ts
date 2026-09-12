@@ -10,6 +10,7 @@ import { productStudioSkill } from "./productStudio.js";
 import { creativeStudioSkill } from "./creativeStudio.js";
 import { commercialOfficeSkill } from "./commercialOffice.js";
 import { marketingOfficeSkill } from "./marketingOffice.js";
+import { runAgentTeamSkill } from "./agentTeam.js";
 
 export const builtinSkills: SkillDefinition[] = [
   getCurrentTimeSkill,
@@ -25,4 +26,5 @@ export const builtinSkills: SkillDefinition[] = [
   creativeStudioSkill,
   commercialOfficeSkill,
   marketingOfficeSkill,
+  runAgentTeamSkill,
 ];

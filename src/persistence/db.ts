@@ -215,6 +215,20 @@ export function getDb(): Database.Database {
       dedupe_key TEXT PRIMARY KEY, sent_at INTEGER NOT NULL, ok INTEGER NOT NULL, error TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS agent_team_runs (
+      id TEXT PRIMARY KEY, objective TEXT NOT NULL, status TEXT NOT NULL,
+      profile_ids_json TEXT NOT NULL, current_index INTEGER NOT NULL DEFAULT 0,
+      rounds_completed INTEGER NOT NULL DEFAULT 0, max_rounds INTEGER NOT NULL DEFAULT 1,
+      workspace_id TEXT, conversation_id TEXT, last_error TEXT,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS agent_team_messages (
+      id TEXT PRIMARY KEY, team_run_id TEXT NOT NULL, sequence INTEGER NOT NULL,
+      agent_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_team_messages_run ON agent_team_messages(team_run_id, sequence);
+
     CREATE TABLE IF NOT EXISTS service_connections (
       service_id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
