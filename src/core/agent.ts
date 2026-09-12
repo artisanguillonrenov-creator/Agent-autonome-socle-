@@ -18,6 +18,10 @@ import { createRuntimeSkills } from "../skills/runtime.js";
 import { WorkflowRegistry } from "../workflows/workflowRegistry.js";
 import { executeMissionMetadata } from "../skills/catalog.js";
 import { ActivityStore } from "../observability/activityStore.js";
+import { tracer } from "../observability/tracer.js";
+import { estimateTokens } from "../observability/tokenEstimate.js";
+import { estimateCostUsd } from "../observability/pricing.js";
+import { HumanEditStore } from "../collaboration/humanEditStore.js";
 import type { GithubReadOnlyClient } from "../repository/githubReadOnlyClient.js";
 import { withGenerationDefaults } from "../llm/generationDefaults.js";
 import { completeWithLocalPriority } from "../llm/localModelPriority.js";
@@ -65,6 +69,7 @@ export class Agent {
   private readonly contextBudget: ContextBudgetManager;
   private readonly personalityPromptComposer = new PersonalityPromptComposer();
   private readonly personalityOutputValidator = new PersonalityOutputValidator();
+  private readonly humanEdits = new HumanEditStore();
   private customMaxIterations?: number;
   private stepCount = 0;
   private readonly mcpClients = new Map<string, McpClient>();
@@ -142,6 +147,18 @@ export class Agent {
    * d'une heuristique par timestamp qui peut mélanger les opérations de clients concurrents.
    */
   async step(userInput: string, workspaceOrContext?: string | AgentExecutionContext, chatRequestId?: string): Promise<AgentStepResult> {
+    return tracer.withSpan(
+      "agent.step",
+      { kind: "planning", inputs: { userInputPreview: userInput.slice(0, 200) } },
+      async (rootSpan) => {
+        const result = await this.stepInner(userInput, workspaceOrContext, chatRequestId);
+        rootSpan.setOutputs({ responsePreview: result.response.slice(0, 300), iterations: result.iterations });
+        return result;
+      },
+    );
+  }
+
+  private async stepInner(userInput: string, workspaceOrContext?: string | AgentExecutionContext, chatRequestId?: string): Promise<AgentStepResult> {
     const durableContext = typeof workspaceOrContext === "object" ? workspaceOrContext : undefined;
     const workspaceId = durableContext?.workspaceId ?? (typeof workspaceOrContext === "string" ? workspaceOrContext : undefined);
     const conversationId = durableContext?.conversationId ?? LEGACY_CONVERSATION_ID;
@@ -160,6 +177,15 @@ export class Agent {
       if (durableContext) await this.memory.recordIntermediateTurn(message, durableContext);
       else await this.memory.recordTurn(message, workspaceId);
     };
+
+    if (workspaceId) {
+      try {
+        const notice = this.consumeHumanEditNotice(workspaceId);
+        if (notice) await recordIntermediate({ role: "user", content: notice });
+      } catch (error) {
+        console.warn("[Agent] Failed to consume pending human edits:", (error as Error).message);
+      }
+    }
 
     while (iterations < this.maxIterations) {
       iterations += 1;
@@ -197,12 +223,39 @@ export class Agent {
           parameters: skill.parameters || { type: "object", properties: {}, additionalProperties: true },
         },
       }));
-      const role = availableSkillNames.has("deep_research") ? "research" : availableSkillNames.has("software_development") ? "coding" : undefined;
-      const roleProvider = role ? providerForRole(role, this.llm) : this.llm;
-      const completionResult = await completeWithLocalPriority(
-        roleProvider,
-        messages,
-        withGenerationDefaults({ tools: toolDefinitions.length > 0 ? toolDefinitions : undefined }),
+      // Smart routing (routage dynamique) : le premier tour d'un cycle (décision/planification,
+      // y compris un éventuel appel à execute_mission) est le tour à plus forte charge de
+      // raisonnement -> modèle de Raisonnement Lourd. Les tours suivants d'un même cycle
+      // (mise en forme de résultats d'outils, exécution de routine) retombent sur le modèle
+      // Rapide & Économique. Une compétence spécialisée déjà routée (research/coding) est
+      // toujours prioritaire sur cette heuristique générale.
+      const role = availableSkillNames.has("deep_research")
+        ? "research"
+        : availableSkillNames.has("software_development")
+        ? "coding"
+        : iterations === 1
+        ? "reasoning"
+        : "fast";
+      const roleProvider = providerForRole(role, this.llm);
+      const completionResult = await tracer.withSpan(
+        iterations === 1 ? "planning.decide" : "llm.completion",
+        { kind: "llm", inputs: { iterations, role, model: roleProvider.model } },
+        async (span) => {
+          const res = await completeWithLocalPriority(
+            roleProvider,
+            messages,
+            withGenerationDefaults({ tools: toolDefinitions.length > 0 ? toolDefinitions : undefined }),
+          );
+          const inputTokens = estimateTokens(messages.map((m) => (typeof m.content === "string" ? m.content : "")).join("\n"));
+          const outputTokens = estimateTokens(res.content ?? "");
+          span.setTokens(inputTokens + outputTokens);
+          span.setCost(estimateCostUsd(roleProvider.model, inputTokens, outputTokens));
+          span.setOutputs({
+            contentPreview: (res.content ?? "").slice(0, 300),
+            toolCalls: res.toolCalls?.map((call) => call.function?.name),
+          });
+          return res;
+        },
       );
       const rawText = completionResult.content ?? "";
       const nativeToolCalls = completionResult.toolCalls;
@@ -399,6 +452,22 @@ export class Agent {
       }
     }
     return candidate;
+  }
+
+  /**
+   * Co-édition humaine bidirectionnelle : si l'utilisateur a modifié un artefact via l'IHM
+   * Web pendant que ce workspace était hors d'un plan actif (conversation directe), on
+   * consomme les éditions en attente et on les restitue comme un événement prioritaire que
+   * l'agent devra prendre en compte dès ce tour, sans jamais faire échouer le cycle appelant.
+   */
+  private consumeHumanEditNotice(workspaceId: string): string | undefined {
+    const pending = this.humanEdits.consumePendingForWorkspace(workspaceId);
+    if (pending.length === 0) return undefined;
+    const lines = pending.map(
+      (edit) =>
+        `L'utilisateur a manuellement modifié l'artefact ${edit.artifactId ?? "(sans id)"}${edit.note ? ` (${edit.note})` : ""}. Voici la nouvelle version :\n${edit.content}`,
+    );
+    return `[ÉDITION HUMAINE PRIORITAIRE]\n${lines.join("\n\n")}\nTiens compte immédiatement de cette version : invalide toute hypothèse ou plan basé sur l'ancienne version et ajuste ta trajectoire sans repartir de zéro.`;
   }
 
   private pendingActionFromToolResult(result: string): AgentStepResult["pendingAction"] | undefined {

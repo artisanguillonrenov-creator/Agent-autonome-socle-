@@ -229,6 +229,13 @@ export function getDb(): Database.Database {
     );
     CREATE INDEX IF NOT EXISTS idx_agent_team_messages_run ON agent_team_messages(team_run_id, sequence);
 
+    CREATE TABLE IF NOT EXISTS human_edits (
+      id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, artifact_id TEXT, plan_run_id TEXT,
+      content TEXT NOT NULL, note TEXT, created_at INTEGER NOT NULL, consumed_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_human_edits_workspace ON human_edits(workspace_id, consumed_at);
+    CREATE INDEX IF NOT EXISTS idx_human_edits_plan_run ON human_edits(plan_run_id, consumed_at);
+
     CREATE TABLE IF NOT EXISTS service_connections (
       service_id TEXT PRIMARY KEY,
       name TEXT NOT NULL,

@@ -39,6 +39,15 @@ export const config = {
     codingModel: "",
     researchModel: "",
     utilityModel: "",
+    /**
+     * Routage dynamique vers modèles de raisonnement : un modèle "Rapide & Économique"
+     * (ex: GPT-4o-mini, Claude Haiku) pour les tâches d'exécution de routine, et un modèle
+     * de "Raisonnement Lourd" (ex: o1/o3, DeepSeek-R1, Claude Sonnet en mode thinking) pour
+     * la planification et les boucles d'auto-réflexion/critique. `undefined`/vide = pas de
+     * modèle dédié configuré -> retombe sur le modèle principal actif (jamais d'échec).
+     */
+    reasoningModel: process.env.LLM_REASONING_MODEL || "",
+    fastModel: process.env.LLM_FAST_MODEL || "",
     /** Chantier 10 : candidat local distinct du provider nominal. V1 supporte Ollama. */
     localModelPriority: false,
     localProvider: ((process.env.LOCAL_LLM_PROVIDER as LLMProviderName) || "ollama") as LLMProviderName,
