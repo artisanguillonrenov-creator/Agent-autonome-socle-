@@ -219,12 +219,18 @@ export function installConversationHttpIngress(
         return;
       }
 
-      if (req.method === "GET" && pathname === "/api/chat/stream") {
-        const message = (parsed.searchParams.get("message") || "").trim();
+      if ((req.method === "GET" || req.method === "POST") && pathname === "/api/chat/stream") {
+        // POST est le chemin recommandé : un prompt long ou collé (document, code) ne
+        // risque plus de dépasser une limite de longueur d'URL et n'atterrit plus dans
+        // les journaux d'accès HTTP. GET reste accepté (query string) pour compatibilité
+        // ascendante avec d'éventuels appelants existants.
+        const body = req.method === "POST" ? await readJson(req) : {};
+        const message = (typeof body.message === "string" ? body.message : parsed.searchParams.get("message") || "").trim();
         if (!message) throw new ConversationExecutionError("MESSAGE_REQUIRED", 400);
-        const workspaceId = parsed.searchParams.get("workspaceId")?.trim() || undefined;
-        const session = await ensureSession(parsed.searchParams.get("conversationId") || undefined, workspaceId);
-        const clientRequestId = parsed.searchParams.get("clientRequestId")?.trim() || randomUUID();
+        const workspaceId = (typeof body.workspaceId === "string" ? body.workspaceId : parsed.searchParams.get("workspaceId") || "").trim() || undefined;
+        const conversationIdParam = typeof body.conversationId === "string" ? body.conversationId : parsed.searchParams.get("conversationId") || undefined;
+        const session = await ensureSession(conversationIdParam, workspaceId);
+        const clientRequestId = (typeof body.clientRequestId === "string" ? body.clientRequestId : parsed.searchParams.get("clientRequestId") || "").trim() || randomUUID();
         res.writeHead(200, {
           "content-type": "text/event-stream",
           "cache-control": "no-cache",
@@ -244,7 +250,18 @@ export function installConversationHttpIngress(
           } else if (result.result === "EXISTING_FAILED") {
             res.write(`data: ${JSON.stringify({ type: "error", error: result.failureReason })}\n\n`);
           } else {
-            res.write(`data: ${JSON.stringify({ type: "answer", content: result.response, iterations: result.iterations, conversationId: session.conversationId })}\n\n`);
+            // Le fournisseur LLM ne diffuse pas encore les tokens au fil de la génération
+            // (voir src/llm/provider.ts) : la réponse complète est déjà disponible ici.
+            // On la restitue quand même en flux SSE mot par mot pour un rendu progressif
+            // fidèle côté client, sans changement de contrat le jour où un provider
+            // proposera un vrai streaming token par token.
+            const words = result.response.split(/(\s+)/).filter((part) => part.length > 0);
+            for (const word of words) {
+              if (res.writableEnded) break;
+              res.write(`data: ${JSON.stringify({ type: "token", content: word, conversationId: session.conversationId })}\n\n`);
+              await new Promise((resolve) => setTimeout(resolve, 12));
+            }
+            res.write(`data: ${JSON.stringify({ type: "done", iterations: result.iterations, pendingAction: result.pendingAction, conversationId: session.conversationId })}\n\n`);
           }
           res.write("data: [DONE]\n\n");
           res.end();

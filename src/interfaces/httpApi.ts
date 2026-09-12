@@ -550,10 +550,14 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         return;
       }
 
-      if (req.method === "GET" && pathname === "/api/chat/stream") {
-        const queryMsg = parsedUrl.searchParams.get("message") || "";
+      if ((req.method === "GET" || req.method === "POST") && pathname === "/api/chat/stream") {
+        // POST est le chemin recommandé (voir conversationHttpIngress.ts) : un prompt long
+        // ne risque plus de dépasser une limite de longueur d'URL ni de finir dans les
+        // journaux d'accès. GET reste accepté (query string) pour compatibilité ascendante.
+        const streamBody = req.method === "POST" ? (JSON.parse((await readBody(req)) || "{}") as { message?: string; workspaceId?: string; requestId?: string; clientRequestId?: string }) : {};
+        const queryMsg = typeof streamBody.message === "string" ? streamBody.message : parsedUrl.searchParams.get("message") || "";
         if (!queryMsg.trim()) {
-          sendJson(res, 400, { error: "message query param requis" });
+          sendJson(res, 400, { error: "message requis" });
           return;
         }
 
@@ -567,9 +571,26 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         res.write(`data: ${JSON.stringify({ type: "thought", content: "Analyse de la demande en cours..." })}\n\n`);
 
         try {
-          const streamWorkspaceId = parsedUrl.searchParams.get("workspaceId") || undefined;
-          const result = await agent.step(queryMsg.trim(), streamWorkspaceId);
-          res.write(`data: ${JSON.stringify({ type: "answer", content: result.response, iterations: result.iterations })}\n\n`);
+          const streamWorkspaceId = (typeof streamBody.workspaceId === "string" ? streamBody.workspaceId : parsedUrl.searchParams.get("workspaceId")) || undefined;
+          // requestId/clientRequestId (voir le handler /api/chat ci-dessus) : corrèle les
+          // opérations dispatchées par ce tour pour la timeline live de www/app.js.
+          const streamRequestIdRaw = typeof streamBody.requestId === "string" ? streamBody.requestId : typeof streamBody.clientRequestId === "string" ? streamBody.clientRequestId : parsedUrl.searchParams.get("requestId") || parsedUrl.searchParams.get("clientRequestId");
+          const streamRequestId = streamRequestIdRaw && streamRequestIdRaw.trim() ? streamRequestIdRaw.trim().slice(0, 200) : undefined;
+          const result = await agent.step(queryMsg.trim(), streamWorkspaceId, streamRequestId);
+
+          // Le fournisseur LLM ne diffuse pas encore les tokens au fil de la génération
+          // (voir src/llm/provider.ts) : la réponse complète est déjà disponible ici.
+          // On la restitue quand même en flux SSE mot par mot pour un rendu progressif
+          // fidèle côté client, sans changement de contrat le jour où un provider
+          // proposera un vrai streaming token par token.
+          const words = result.response.split(/(\s+)/).filter((part) => part.length > 0);
+          for (const word of words) {
+            if (res.writableEnded) break;
+            res.write(`data: ${JSON.stringify({ type: "token", content: word })}\n\n`);
+            await new Promise((resolve) => setTimeout(resolve, 12));
+          }
+
+          res.write(`data: ${JSON.stringify({ type: "done", iterations: result.iterations, pendingAction: result.pendingAction })}\n\n`);
           res.write(`data: [DONE]\n\n`);
           res.end();
         } catch (err) {

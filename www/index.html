@@ -4,6 +4,15 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>JARVIS COMMAND CENTER</title>
+
+  <!-- Typographie premium (fallback système silencieux si hors-ligne). -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap" rel="stylesheet" />
+
+  <!-- Pas de CDN Tailwind ici : cette page authentifiée lit le token porteur
+       (jarvis_token) depuis localStorage, et charger un script tiers mutable dans
+       cette origine lui donnerait accès à ce token. Tout le style vient de style.css. -->
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -66,6 +75,19 @@
           <span>Paramètres</span>
         </a>
       </nav>
+
+      <!-- Brique 9 : gestion graphique des checkpoints (équivalent visuel de
+           `/checkpoint save` en CLI) — sauvegarde et restauration d'un état de
+           l'agent directement depuis la sidebar. -->
+      <div class="sidebar-checkpoints">
+        <div class="sidebar-section-title">
+          <span>🗂️ Points de sauvegarde</span>
+          <button type="button" id="btn-save-checkpoint" class="checkpoint-save-btn" title="Sauvegarder l'état actuel" aria-label="Sauvegarder l'état actuel">＋</button>
+        </div>
+        <div id="checkpoint-list" class="checkpoint-list">
+          <div class="checkpoint-empty">Aucun point de sauvegarde.</div>
+        </div>
+      </div>
     </aside>
 
     <!-- MAIN CONTENT AREA -->
@@ -376,7 +398,12 @@
       });
     })();
   </script>
-  <!-- JARVIS_CONVERSATION_MANAGER_BEGIN -->
+  <!-- Chantier 11B : persistance multi-conversation (historique durable, sélecteur de
+       conversations, auto-titrage). Chargé après le bootstrap OTA/app.js ; sa propre
+       boucle de sondage (voir conversationPersistence.js) attend que #chat-messages et
+       window.appendChatMessage existent avant d'agir, donc l'ordre exact de chargement
+       face à app.js n'est pas critique. -->
+    <!-- JARVIS_CONVERSATION_MANAGER_BEGIN -->
 <script data-jarvis-conversation-bootstrap="11b">
 // Chantier 11B — persistent multi-conversation manager for the Web/Android UI.
 (function () {
@@ -540,11 +567,26 @@
       return originalFetch(input, Object.assign({}, init || {}, { body: JSON.stringify(body) }));
     }
 
-    if (path === '/api/chat/stream' && method === 'GET') {
+    if (path === '/api/chat/stream' && (method === 'GET' || method === 'POST')) {
       const conversationId = await ensureConversation();
-      requestUrl.searchParams.set('conversationId', conversationId);
-      if (!requestUrl.searchParams.get('clientRequestId')) requestUrl.searchParams.set('clientRequestId', newRequestId());
-      return originalFetch(requestUrl.toString(), init);
+      let response;
+      let messageForTitle = '';
+      if (method === 'GET') {
+        requestUrl.searchParams.set('conversationId', conversationId);
+        if (!requestUrl.searchParams.get('clientRequestId')) requestUrl.searchParams.set('clientRequestId', newRequestId());
+        messageForTitle = requestUrl.searchParams.get('message') || '';
+        response = await originalFetch(requestUrl.toString(), init);
+      } else {
+        const body = parseBody(init);
+        body.conversationId = conversationId;
+        if (!body.clientRequestId) body.clientRequestId = newRequestId();
+        messageForTitle = body.message || '';
+        response = await originalFetch(input, Object.assign({}, init || {}, { body: JSON.stringify(body) }));
+      }
+      // Le corps de la réponse est un flux SSE : on ne le lit/clone jamais ici, seul
+      // `response.ok` (déjà connu dès réception des en-têtes) déclenche l'auto-titrage.
+      if (response.ok && messageForTitle) void maybeAutoTitle(conversationId, messageForTitle);
+      return response;
     }
 
     return originalFetch(input, init);
@@ -609,19 +651,10 @@
     }
   }
 
-  function injectConversationStyles() {
-    if (document.getElementById('jarvis-conversation-manager-style')) return;
-    const style = document.createElement('style');
-    style.id = 'jarvis-conversation-manager-style';
-    style.textContent = [
-      '.conversation-manager{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 12px;border-bottom:1px solid rgba(148,163,184,.2);background:rgba(15,23,42,.55)}',
-      '.conversation-manager-label{font-size:.78rem;color:var(--text-muted,#94a3b8);font-weight:700;letter-spacing:.02em}',
-      '.conversation-manager-select{min-width:190px;max-width:360px;flex:1;padding:9px 10px;border-radius:10px;border:1px solid rgba(148,163,184,.3);background:rgba(15,23,42,.75);color:inherit}',
-      '.conversation-manager .btn{white-space:nowrap}',
-      '@media(max-width:640px){.conversation-manager-select{min-width:100%;max-width:none;order:2}.conversation-manager-label{width:100%}}'
-    ].join('');
-    document.head.appendChild(style);
-  }
+  // Le style de `.conversation-manager*` vit désormais dans style.css (jeton de design
+  // partagé avec le reste du Command Center, clair/sombre inclus) plutôt qu'injecté ici
+  // en dur : cette fonction ne fait plus qu'assurer la compatibilité de l'appelant.
+  function injectConversationStyles() {}
 
   function formatSessionLabel(session) {
     const title = session && session.title ? session.title : 'Nouvelle conversation';
