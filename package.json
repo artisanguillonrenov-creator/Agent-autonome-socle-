@@ -33,7 +33,7 @@
   "devDependencies": {
     "@capacitor/cli": "^8.5.1",
     "@types/better-sqlite3": "^7.6.11",
-    "@types/node": "^20.14.0",
+    "@types/node": "^22.20.2",
     "@types/unzipper": "^0.10.11",
     "patch-package": "^8.0.1",
     "tsx": "^4.19.0",
