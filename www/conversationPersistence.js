@@ -160,11 +160,26 @@
       return originalFetch(input, Object.assign({}, init || {}, { body: JSON.stringify(body) }));
     }
 
-    if (path === '/api/chat/stream' && method === 'GET') {
+    if (path === '/api/chat/stream' && (method === 'GET' || method === 'POST')) {
       const conversationId = await ensureConversation();
-      requestUrl.searchParams.set('conversationId', conversationId);
-      if (!requestUrl.searchParams.get('clientRequestId')) requestUrl.searchParams.set('clientRequestId', newRequestId());
-      return originalFetch(requestUrl.toString(), init);
+      let response;
+      let messageForTitle = '';
+      if (method === 'GET') {
+        requestUrl.searchParams.set('conversationId', conversationId);
+        if (!requestUrl.searchParams.get('clientRequestId')) requestUrl.searchParams.set('clientRequestId', newRequestId());
+        messageForTitle = requestUrl.searchParams.get('message') || '';
+        response = await originalFetch(requestUrl.toString(), init);
+      } else {
+        const body = parseBody(init);
+        body.conversationId = conversationId;
+        if (!body.clientRequestId) body.clientRequestId = newRequestId();
+        messageForTitle = body.message || '';
+        response = await originalFetch(input, Object.assign({}, init || {}, { body: JSON.stringify(body) }));
+      }
+      // Le corps de la réponse est un flux SSE : on ne le lit/clone jamais ici, seul
+      // `response.ok` (déjà connu dès réception des en-têtes) déclenche l'auto-titrage.
+      if (response.ok && messageForTitle) void maybeAutoTitle(conversationId, messageForTitle);
+      return response;
     }
 
     return originalFetch(input, init);
@@ -229,19 +244,10 @@
     }
   }
 
-  function injectConversationStyles() {
-    if (document.getElementById('jarvis-conversation-manager-style')) return;
-    const style = document.createElement('style');
-    style.id = 'jarvis-conversation-manager-style';
-    style.textContent = [
-      '.conversation-manager{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 12px;border-bottom:1px solid rgba(148,163,184,.2);background:rgba(15,23,42,.55)}',
-      '.conversation-manager-label{font-size:.78rem;color:var(--text-muted,#94a3b8);font-weight:700;letter-spacing:.02em}',
-      '.conversation-manager-select{min-width:190px;max-width:360px;flex:1;padding:9px 10px;border-radius:10px;border:1px solid rgba(148,163,184,.3);background:rgba(15,23,42,.75);color:inherit}',
-      '.conversation-manager .btn{white-space:nowrap}',
-      '@media(max-width:640px){.conversation-manager-select{min-width:100%;max-width:none;order:2}.conversation-manager-label{width:100%}}'
-    ].join('');
-    document.head.appendChild(style);
-  }
+  // Le style de `.conversation-manager*` vit désormais dans style.css (jeton de design
+  // partagé avec le reste du Command Center, clair/sombre inclus) plutôt qu'injecté ici
+  // en dur : cette fonction ne fait plus qu'assurer la compatibilité de l'appelant.
+  function injectConversationStyles() {}
 
   function formatSessionLabel(session) {
     const title = session && session.title ? session.title : 'Nouvelle conversation';
