@@ -4,6 +4,20 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>JARVIS COMMAND CENTER</title>
+
+  <!-- Typographie premium (fallback système silencieux si hors-ligne). -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap" rel="stylesheet" />
+
+  <!-- Tailwind CDN (utilitaires ponctuels uniquement) : le "preflight" est désactivé
+       pour ne jamais entrer en conflit avec le design system existant (style.css),
+       partagé par les onze vues du Command Center. -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = { corePlugins: { preflight: false } };
+  </script>
+
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -66,6 +80,19 @@
           <span>Paramètres</span>
         </a>
       </nav>
+
+      <!-- Brique 9 : gestion graphique des checkpoints (équivalent visuel de
+           `/checkpoint save` en CLI) — sauvegarde et restauration d'un état de
+           l'agent directement depuis la sidebar. -->
+      <div class="sidebar-checkpoints">
+        <div class="sidebar-section-title">
+          <span>🗂️ Points de sauvegarde</span>
+          <button type="button" id="btn-save-checkpoint" class="checkpoint-save-btn" title="Sauvegarder l'état actuel" aria-label="Sauvegarder l'état actuel">＋</button>
+        </div>
+        <div id="checkpoint-list" class="checkpoint-list">
+          <div class="checkpoint-empty">Aucun point de sauvegarde.</div>
+        </div>
+      </div>
     </aside>
 
     <!-- MAIN CONTENT AREA -->

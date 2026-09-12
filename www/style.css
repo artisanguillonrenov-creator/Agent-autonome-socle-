@@ -1,20 +1,69 @@
+/*
+ * DESIGN SYSTEM PREMIUM — inspiré de la lisibilité et de la retenue visuelle de
+ * Claude et ChatGPT : palette "papier" en clair, gris chaud profond en sombre,
+ * typographie aérée. Les noms de variables historiques (--bg-dark, --bg-card, …)
+ * sont conservés tels quels pour ne rien casser dans les onze vues existantes ;
+ * seules leurs VALEURS changent, plus une bascule clair/sombre ci-dessous.
+ */
 :root {
-  --bg-dark: #0b0f19;
-  --bg-card: #151d2a;
-  --bg-card-hover: #1c2738;
-  --bg-input: #0f1724;
-  --border-color: #233146;
-  --text-main: #f1f5f9;
-  --text-muted: #94a3b8;
-  --accent-primary: #3b82f6;
-  --accent-primary-hover: #2563eb;
-  --accent-success: #10b981;
-  --accent-warning: #f59e0b;
-  --accent-danger: #ef4444;
-  --accent-info: #06b6d4;
-  --sidebar-width: 260px;
+  /* Thème clair (papier / crème) — valeur par défaut */
+  --bg-dark: #fbfaf7;
+  --bg-card: #ffffff;
+  --bg-card-hover: #f2efe6;
+  --bg-input: #ffffff;
+  --border-color: #e8e3d8;
+  --text-main: #2b2a26;
+  --text-muted: #7c776b;
+  --accent-primary: #c1652f;
+  --accent-primary-hover: #a8551f;
+  --accent-success: #1f8f5f;
+  --accent-warning: #b7791f;
+  --accent-danger: #c0392b;
+  --accent-info: #3f6fa8;
+  --shadow-soft: 0 1px 2px rgba(43, 42, 38, 0.05), 0 8px 24px rgba(43, 42, 38, 0.06);
+  --sidebar-width: 272px;
   --header-height: 64px;
-  --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  --font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  --font-family-serif: "Source Serif 4", Georgia, "Times New Roman", serif;
+}
+
+/* Thème sombre (gris chaud profond) : automatique via prefers-color-scheme quand
+   aucun choix explicite n'a été fait (réglage "SYSTEM" — voir applyThemeRuntime). */
+@media (prefers-color-scheme: dark) {
+  :root:not(.theme-light):not(.theme-dark) {
+    --bg-dark: #191919;
+    --bg-card: #212121;
+    --bg-card-hover: #2a2a29;
+    --bg-input: #242423;
+    --border-color: #38372f;
+    --text-main: #ece9e2;
+    --text-muted: #a39d8e;
+    --accent-primary: #e2793f;
+    --accent-primary-hover: #ef8b52;
+    --accent-success: #4cbd8c;
+    --accent-warning: #dba53a;
+    --accent-danger: #e0685a;
+    --accent-info: #6ea3d8;
+    --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.25), 0 12px 32px rgba(0, 0, 0, 0.35);
+  }
+}
+
+/* Bascule manuelle explicite (Paramètres → Apparence), prioritaire sur le système. */
+:root.theme-dark {
+  --bg-dark: #191919;
+  --bg-card: #212121;
+  --bg-card-hover: #2a2a29;
+  --bg-input: #242423;
+  --border-color: #38372f;
+  --text-main: #ece9e2;
+  --text-muted: #a39d8e;
+  --accent-primary: #e2793f;
+  --accent-primary-hover: #ef8b52;
+  --accent-success: #4cbd8c;
+  --accent-warning: #dba53a;
+  --accent-danger: #e0685a;
+  --accent-info: #6ea3d8;
+  --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.25), 0 12px 32px rgba(0, 0, 0, 0.35);
 }
 
 * {
@@ -33,6 +82,9 @@ body {
   overflow: hidden;
   display: flex;
   font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  transition: background-color 0.2s ease, color 0.2s ease;
 }
 
 .chat-timeline-host {
@@ -642,27 +694,102 @@ body {
   margin-top: 16px;
 }
 
-/* Chat UX V1 */
-.chat-layout { height: calc(100dvh - 96px); display:flex; flex-direction:column; max-width:980px; margin:0 auto; }
-.chat-messages { flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:20px; padding:16px clamp(4px,2vw,20px) 24px; scroll-behavior:smooth; }
-.msg { width:min(88%,760px); line-height:1.6; overflow-wrap:anywhere; }
-.msg.user { align-self:flex-end; padding:14px 17px 10px; border-radius:20px 20px 5px 20px; background:var(--accent-primary); color:#fff; }
-.msg.agent { align-self:flex-start; padding:2px 4px; color:var(--text-main); }
-.msg.pending,.msg.error { padding:12px 15px; border-left:2px solid var(--accent-info); color:var(--text-muted); }
+/* Chat UX Premium — sobre, aéré, inspiré de Claude / ChatGPT */
+.chat-workspace { flex:1; min-height:0; display:flex; gap:0; height:calc(100dvh - 96px); }
+.chat-layout { flex:1 1 auto; min-width:0; height:100%; display:flex; flex-direction:column; max-width:820px; margin:0 auto; transition:max-width .25s ease; }
+.chat-workspace.split .chat-layout { max-width:none; margin:0; }
+.chat-messages { flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:22px; padding:20px clamp(4px,2vw,24px) 24px; scroll-behavior:smooth; }
+.msg { width:min(88%,760px); line-height:1.65; overflow-wrap:anywhere; font-size:1rem; }
+.msg.user { align-self:flex-end; padding:13px 18px; border-radius:20px 20px 4px 20px; background:var(--accent-primary); color:#fff; box-shadow:var(--shadow-soft); }
+.msg.agent { align-self:flex-start; width:min(92%,760px); padding:16px 20px; border-radius:4px 20px 20px 20px; background:var(--bg-card); border:1px solid var(--border-color); color:var(--text-main); box-shadow:var(--shadow-soft); }
+.msg.pending,.msg.error { padding:13px 16px; border-left:3px solid var(--accent-info); color:var(--text-muted); background:var(--bg-card); border-radius:4px 14px 14px 4px; }
 .msg.error { border-color:var(--accent-danger); color:var(--accent-danger); }
-.msg-label { margin-bottom:4px; color:inherit; opacity:.7; font-size:.75rem; font-weight:700; letter-spacing:.03em; }
+.msg.stopped { border-left-color:var(--accent-warning); color:var(--text-muted); font-style:italic; }
+.msg-label { margin-bottom:6px; color:inherit; opacity:.6; font-size:.72rem; font-weight:700; letter-spacing:.06em; text-transform:uppercase; }
 .msg-content { white-space:pre-wrap; font-size:1rem; }
-.msg-actions { display:flex; flex-wrap:wrap; gap:3px; margin-top:7px; }
-.chat-action { min-width:44px; min-height:40px; padding:7px 9px; border:0; border-radius:8px; background:transparent; color:var(--text-muted); cursor:pointer; font:inherit; font-size:.78rem; }
+.msg-content.markdown-body { white-space:normal; }
+.msg-actions { display:flex; flex-wrap:wrap; gap:3px; margin-top:9px; }
+.chat-action { min-width:40px; min-height:36px; padding:6px 9px; border:0; border-radius:8px; background:transparent; color:var(--text-muted); cursor:pointer; font:inherit; font-size:.78rem; }
 .chat-action:hover { background:var(--bg-card-hover); color:var(--text-main); }
 .chat-action:disabled { opacity:.55; cursor:wait; }
-.chat-action:focus-visible,.chat-input:focus-visible,.chat-send:focus-visible { outline:3px solid var(--accent-info); outline-offset:2px; }
-.chat-composer { position:sticky; bottom:0; display:flex; align-items:flex-end; gap:9px; padding:10px; border:1px solid var(--border-color); border-radius:20px; background:color-mix(in srgb,var(--bg-card) 94%,transparent); box-shadow:0 -8px 30px rgba(0,0,0,.2); }
-.chat-input { flex:1; min-height:46px; max-height:160px; padding:12px 14px; resize:none; border-radius:15px; line-height:1.35; overflow-y:auto; }
+.chat-action:focus-visible,.chat-input:focus-visible,.chat-send:focus-visible,.chat-stop:focus-visible { outline:3px solid var(--accent-info); outline-offset:2px; }
+.chat-composer { position:sticky; bottom:0; display:flex; align-items:flex-end; gap:9px; padding:10px; border:1px solid var(--border-color); border-radius:22px; background:color-mix(in srgb,var(--bg-card) 96%,transparent); box-shadow:var(--shadow-soft); backdrop-filter:blur(6px); }
+.chat-input { flex:1; min-height:46px; max-height:160px; padding:12px 14px; resize:none; border-radius:15px; line-height:1.4; overflow-y:auto; background:transparent; border-color:transparent; }
+.chat-input:focus { border-color:transparent; box-shadow:none; }
 .chat-send { min-width:92px; min-height:46px; border-radius:14px; }
-.chat-timeline-host { width:min(92%,760px); }
-.chat-timeline-toggle { display:none; min-height:40px; border:0; background:transparent; color:var(--accent-primary); cursor:pointer; }
+.chat-stop { display:none; align-items:center; gap:7px; min-width:92px; min-height:46px; border-radius:14px; background:var(--accent-danger); color:#fff; border:0; font-weight:700; cursor:pointer; }
+.chat-stop::before { content:"■"; font-size:.7rem; }
+.chat-composer.generating .chat-send { display:none; }
+.chat-composer.generating .chat-stop { display:inline-flex; }
+.chat-timeline-host { width:min(92%,760px); align-self:flex-start; display:flex; flex-direction:column; gap:10px; }
+.chat-timeline-toggle { display:none; min-height:36px; border:0; background:transparent; color:var(--accent-primary); cursor:pointer; font-weight:600; }
 .chat-timeline.terminal { padding:10px 12px; }
 .chat-timeline.terminal:not(.expanded) .chat-timeline-steps,.chat-timeline.terminal:not(.expanded) > details { display:none; }
 .chat-timeline.terminal .chat-timeline-toggle { display:block; }
-@media (max-width:700px) { .chat-layout{height:calc(100dvh - 76px)} .chat-messages{padding-top:8px;gap:17px}.msg{width:94%}.msg.user{width:auto;max-width:92%}.chat-composer{margin:0 -8px;border-radius:17px 17px 0 0}.chat-send{min-width:76px;padding-inline:10px} }
+@media (max-width:700px) { .chat-workspace{height:calc(100dvh - 76px)} .chat-messages{padding-top:8px;gap:17px}.msg{width:94%}.msg.user{width:auto;max-width:92%}.chat-composer{margin:0 -8px;border-radius:17px 17px 0 0}.chat-send,.chat-stop{min-width:76px;padding-inline:10px} .chat-workspace.split{flex-direction:column} .chat-workspace.split .chat-layout{max-width:none} .artifact-panel{width:100%!important;height:52%;border-left:0;border-top:1px solid var(--border-color)} }
+
+/* --- Accordéon "boucle agentique" : planification & exécution des skills --- */
+.chat-timeline { padding:12px 14px; border:1px solid var(--border-color); border-left:3px solid var(--accent-info); border-radius:14px; background:var(--bg-card); box-shadow:var(--shadow-soft); }
+.chat-timeline-heading { display:inline-flex; align-items:center; gap:6px; font-weight:700; margin-right:10px; }
+.thinking-icon { display:inline-block; animation:thinking-pulse 1.6s ease-in-out infinite; }
+.chat-timeline.terminal .thinking-icon,.chat-timeline:not(.chat-timeline--active) .thinking-icon { animation:none; }
+@keyframes thinking-pulse { 0%,100%{opacity:.55} 50%{opacity:1} }
+
+/* --- Espace de travail latéral (artefacts : code / documents longs) --- */
+.artifact-panel { width:min(46vw,640px); flex:0 0 auto; height:100%; display:flex; flex-direction:column; border-left:1px solid var(--border-color); background:var(--bg-card); box-shadow:-8px 0 24px rgba(0,0,0,.05); }
+.artifact-header { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:14px 16px; border-bottom:1px solid var(--border-color); }
+.artifact-title-group { display:flex; flex-direction:column; gap:2px; min-width:0; }
+.artifact-title { font-weight:700; font-size:.95rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.artifact-subtitle { font-size:.75rem; color:var(--text-muted); text-transform:uppercase; letter-spacing:.05em; }
+.artifact-toolbar { display:flex; align-items:center; gap:4px; flex-shrink:0; }
+.artifact-toolbar-btn { min-height:36px; min-width:36px; padding:0 10px; border:1px solid var(--border-color); background:var(--bg-input); color:var(--text-main); border-radius:9px; cursor:pointer; font-size:.85rem; display:inline-flex; align-items:center; gap:6px; }
+.artifact-toolbar-btn:hover { background:var(--bg-card-hover); }
+.artifact-close { min-height:36px; min-width:36px; border:0; background:transparent; color:var(--text-muted); font-size:1.1rem; cursor:pointer; border-radius:9px; }
+.artifact-close:hover { background:var(--bg-card-hover); color:var(--text-main); }
+.artifact-body { flex:1; min-height:0; overflow:auto; padding:18px 20px; }
+.artifact-body pre { margin:0; white-space:pre-wrap; word-break:break-word; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.86rem; line-height:1.6; }
+.artifact-body.is-markdown { font-family:var(--font-family-serif); font-size:1.02rem; line-height:1.7; }
+
+/* --- Bandeau "réponse ouverte dans l'espace de travail" dans le fil de discussion --- */
+.artifact-pointer { display:inline-flex; align-items:center; gap:8px; margin-top:10px; padding:9px 13px; border:1px solid var(--border-color); border-radius:12px; background:var(--bg-input); cursor:pointer; font-size:.86rem; color:var(--text-main); }
+.artifact-pointer:hover { background:var(--bg-card-hover); }
+.artifact-pointer .artifact-pointer-icon { font-size:1rem; }
+
+/* --- Rendu markdown léger dans les bulles de conversation --- */
+.markdown-body h1,.markdown-body h2,.markdown-body h3 { margin:.6em 0 .3em; line-height:1.3; }
+.markdown-body h1 { font-size:1.3rem; } .markdown-body h2 { font-size:1.15rem; } .markdown-body h3 { font-size:1.05rem; }
+.markdown-body p { margin:.5em 0; }
+.markdown-body ul,.markdown-body ol { margin:.4em 0 .4em 1.3em; }
+.markdown-body li { margin:.2em 0; }
+.markdown-body a { color:var(--accent-primary); }
+.markdown-body blockquote { margin:.5em 0; padding:.4em .9em; border-left:3px solid var(--border-color); color:var(--text-muted); }
+.markdown-body code { background:var(--bg-input); border:1px solid var(--border-color); border-radius:5px; padding:1px 6px; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.88em; }
+.markdown-body pre { margin:.6em 0; padding:14px 16px; border-radius:12px; background:var(--bg-input); border:1px solid var(--border-color); overflow-x:auto; }
+.markdown-body pre code { background:none; border:0; padding:0; font-size:.85rem; line-height:1.55; }
+.markdown-body table { border-collapse:collapse; margin:.5em 0; width:100%; }
+.markdown-body th,.markdown-body td { border:1px solid var(--border-color); padding:6px 10px; text-align:left; font-size:.9rem; }
+
+/* --- Bloc de code sourcé depuis un message, avec renvoi vers l'espace de travail --- */
+.code-block-wrap { position:relative; margin:.6em 0; }
+.code-block-openbtn { position:absolute; top:8px; right:8px; min-height:30px; padding:0 10px; border-radius:8px; border:1px solid var(--border-color); background:var(--bg-card); color:var(--text-main); font-size:.75rem; cursor:pointer; }
+.code-block-openbtn:hover { background:var(--bg-card-hover); }
+
+/* --- Checkpoints (Brique 9) dans la sidebar --- */
+.sidebar-checkpoints { border-top:1px solid var(--border-color); padding:12px 14px 16px; display:flex; flex-direction:column; gap:8px; max-height:34%; }
+.sidebar-section-title { display:flex; align-items:center; justify-content:space-between; font-size:.78rem; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:var(--text-muted); }
+.checkpoint-save-btn { min-width:26px; min-height:26px; border-radius:8px; border:1px solid var(--border-color); background:var(--bg-input); color:var(--text-main); cursor:pointer; font-size:1rem; line-height:1; }
+.checkpoint-save-btn:hover { background:var(--bg-card-hover); }
+.checkpoint-list { overflow-y:auto; display:flex; flex-direction:column; gap:6px; }
+.checkpoint-empty { font-size:.8rem; color:var(--text-muted); padding:6px 2px; }
+.checkpoint-item { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:8px 10px; border-radius:10px; background:var(--bg-input); border:1px solid var(--border-color); }
+.checkpoint-info { display:flex; flex-direction:column; min-width:0; gap:1px; }
+.checkpoint-label { font-size:.85rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.checkpoint-date { font-size:.72rem; color:var(--text-muted); }
+.checkpoint-restore { flex-shrink:0; min-width:30px; min-height:30px; border-radius:8px; border:1px solid var(--border-color); background:var(--bg-card); color:var(--accent-primary); cursor:pointer; font-size:.95rem; }
+.checkpoint-restore:hover { background:var(--bg-card-hover); }
+.checkpoint-restore:disabled { opacity:.5; cursor:wait; }
+
+/* --- Toast (notifications discrètes, remplace certaines alert()) --- */
+.jarvis-toast-host { position:fixed; left:50%; bottom:28px; transform:translateX(-50%); z-index:2000; display:flex; flex-direction:column; gap:8px; align-items:center; pointer-events:none; }
+.jarvis-toast { pointer-events:auto; padding:10px 18px; border-radius:12px; background:var(--text-main); color:var(--bg-dark); font-size:.88rem; font-weight:500; box-shadow:var(--shadow-soft); opacity:0; transform:translateY(8px); transition:opacity .2s ease, transform .2s ease; max-width:min(90vw,420px); text-align:center; }
+.jarvis-toast.show { opacity:1; transform:translateY(0); }

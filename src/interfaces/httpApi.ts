@@ -513,7 +513,20 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         try {
           const streamWorkspaceId = parsedUrl.searchParams.get("workspaceId") || undefined;
           const result = await agent.step(queryMsg.trim(), streamWorkspaceId);
-          res.write(`data: ${JSON.stringify({ type: "answer", content: result.response, iterations: result.iterations })}\n\n`);
+
+          // Le fournisseur LLM ne diffuse pas encore les tokens au fil de la génération
+          // (voir src/llm/provider.ts) : la réponse complète est déjà disponible ici.
+          // On la restitue quand même en flux SSE mot par mot pour un rendu progressif
+          // fidèle côté client, sans changement de contrat le jour où un provider
+          // proposera un vrai streaming token par token.
+          const words = result.response.split(/(\s+)/).filter((part) => part.length > 0);
+          for (const word of words) {
+            if (res.writableEnded) break;
+            res.write(`data: ${JSON.stringify({ type: "token", content: word })}\n\n`);
+            await new Promise((resolve) => setTimeout(resolve, 12));
+          }
+
+          res.write(`data: ${JSON.stringify({ type: "done", iterations: result.iterations, pendingAction: result.pendingAction })}\n\n`);
           res.write(`data: [DONE]\n\n`);
           res.end();
         } catch (err) {

@@ -244,7 +244,18 @@ export function installConversationHttpIngress(
           } else if (result.result === "EXISTING_FAILED") {
             res.write(`data: ${JSON.stringify({ type: "error", error: result.failureReason })}\n\n`);
           } else {
-            res.write(`data: ${JSON.stringify({ type: "answer", content: result.response, iterations: result.iterations, conversationId: session.conversationId })}\n\n`);
+            // Le fournisseur LLM ne diffuse pas encore les tokens au fil de la génération
+            // (voir src/llm/provider.ts) : la réponse complète est déjà disponible ici.
+            // On la restitue quand même en flux SSE mot par mot pour un rendu progressif
+            // fidèle côté client, sans changement de contrat le jour où un provider
+            // proposera un vrai streaming token par token.
+            const words = result.response.split(/(\s+)/).filter((part) => part.length > 0);
+            for (const word of words) {
+              if (res.writableEnded) break;
+              res.write(`data: ${JSON.stringify({ type: "token", content: word, conversationId: session.conversationId })}\n\n`);
+              await new Promise((resolve) => setTimeout(resolve, 12));
+            }
+            res.write(`data: ${JSON.stringify({ type: "done", iterations: result.iterations, pendingAction: result.pendingAction, conversationId: session.conversationId })}\n\n`);
           }
           res.write("data: [DONE]\n\n");
           res.end();

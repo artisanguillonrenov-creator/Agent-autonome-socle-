@@ -100,6 +100,8 @@ const elements = {
   navItems: document.querySelectorAll('.nav-item'),
   sections: document.querySelectorAll('.view-section'),
   otaBanner: document.getElementById('ota-banner'),
+  checkpointList: document.getElementById('checkpoint-list'),
+  btnSaveCheckpoint: document.getElementById('btn-save-checkpoint'),
 };
 
 // --- API HELPER FUNCTIONS ---
@@ -605,14 +607,16 @@ function serviceEventToTimelineEntry(event) {
 
   switch (event && event.type) {
     case 'TASK_ACCEPTED':
-      label = 'Tâche acceptée';
+      label = '🧠 Planification de la tâche…';
       break;
-    case 'TASK_PROGRESS':
-      label = SERVICE_STAGE_LABELS[payload.stage] || (payload.message != null ? String(payload.message) : 'Progression');
+    case 'TASK_PROGRESS': {
+      const stageLabel = SERVICE_STAGE_LABELS[payload.stage] || (payload.message != null ? String(payload.message) : 'Progression');
+      label = `⚙️ ${stageLabel}`;
       if (ACTIVE_SERVICE_STAGES.has(payload.stage) || (payload.stage == null && payload.message != null)) {
         state = 'active-candidate';
       }
       break;
+    }
     case 'NEEDS_INPUT':
       label = 'Information utilisateur requise';
       state = 'active';
@@ -656,10 +660,15 @@ function normalizeOperations(data) {
 
 function createTimelineCard(host, operation) {
   const card = document.createElement('section');
-  card.className = 'chat-timeline';
+  card.className = 'chat-timeline chat-timeline--active';
   const heading = document.createElement('div');
   heading.className = 'chat-timeline-heading';
-  heading.textContent = 'Jarvis';
+  const headingIcon = document.createElement('span');
+  headingIcon.className = 'thinking-icon';
+  headingIcon.textContent = '🧠';
+  const headingText = document.createElement('span');
+  headingText.textContent = operation && operation.objective ? `Boucle agentique — ${operation.objective}` : 'Boucle agentique';
+  heading.append(headingIcon, headingText);
   const status = document.createElement('span');
   status.className = 'chat-timeline-status';
   const steps = document.createElement('div');
@@ -833,7 +842,7 @@ async function pollTimelineOperation(initialOperation, view) {
   }
 }
 
-async function monitorChatOperations(snapshotTaskIds, requestStartedAt, host, control) {
+async function monitorChatOperations(snapshotTaskIds, requestStartedAt, host, control, onDiscover) {
   const detectedTaskIds = new Set();
   const discover = async () => {
     let operations;
@@ -850,6 +859,7 @@ async function monitorChatOperations(snapshotTaskIds, requestStartedAt, host, co
       ) continue;
       detectedTaskIds.add(operation.taskId);
       const view = createTimelineCard(host, operation);
+      if (onDiscover) onDiscover(operation);
       void pollTimelineOperation(operation, view);
     }
   };
@@ -905,21 +915,294 @@ function updateRegenerateAvailability() {
   });
 }
 
+// --- MARKDOWN LÉGER (sans dépendance) --------------------------------------
+// Rendu minimal et sûr : le texte brut est toujours échappé avant toute
+// transformation, donc aucune balise fournie par le modèle ou l'utilisateur
+// n'est jamais interprétée comme du HTML.
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function renderInlineMarkdown(text) {
+  let out = escapeHtml(text);
+  out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
+  out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  out = out.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
+  out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+  return out;
+}
+
+const FENCED_CODE_BLOCK_RE = /```([a-zA-Z0-9_+-]*)\n([\s\S]*?)```/g;
+
+/** Extrait les blocs de code balisés ``` d'un texte brut (sans échappement). */
+function extractCodeBlocks(rawMarkdown) {
+  const blocks = [];
+  let match;
+  FENCED_CODE_BLOCK_RE.lastIndex = 0;
+  while ((match = FENCED_CODE_BLOCK_RE.exec(rawMarkdown)) !== null) {
+    blocks.push({ language: match[1] || 'text', content: match[2].replace(/\n$/, '') });
+  }
+  return blocks;
+}
+
+let codeBlockCounter = 0;
+
+/** Convertit un texte markdown brut en HTML sûr (échappé) pour affichage dans une bulle. */
+function renderMarkdownLite(rawMarkdown) {
+  const html = [];
+  let cursor = 0;
+  FENCED_CODE_BLOCK_RE.lastIndex = 0;
+  let match;
+  while ((match = FENCED_CODE_BLOCK_RE.exec(rawMarkdown)) !== null) {
+    html.push(renderMarkdownBlocks(rawMarkdown.slice(cursor, match.index)));
+    const language = match[1] || 'text';
+    const content = match[2].replace(/\n$/, '');
+    const blockId = `code-block-${Date.now()}-${codeBlockCounter++}`;
+    html.push(
+      `<div class="code-block-wrap" data-code-id="${blockId}">` +
+        `<button type="button" class="code-block-openbtn" data-open-code="${blockId}">Ouvrir ↗</button>` +
+        `<pre><code data-lang="${escapeHtml(language)}">${escapeHtml(content)}</code></pre>` +
+      `</div>`,
+    );
+    cursor = FENCED_CODE_BLOCK_RE.lastIndex;
+  }
+  html.push(renderMarkdownBlocks(rawMarkdown.slice(cursor)));
+  return { html: html.join(''), blockContents: extractCodeBlocks(rawMarkdown) };
+}
+
+function renderMarkdownBlocks(segment) {
+  const lines = segment.split('\n');
+  const out = [];
+  let listBuffer = null; // { tag: 'ul'|'ol', items: [] }
+  const flushList = () => {
+    if (!listBuffer) return;
+    out.push(`<${listBuffer.tag}>${listBuffer.items.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join('')}</${listBuffer.tag}>`);
+    listBuffer = null;
+  };
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    const heading = /^(#{1,3})\s+(.*)$/.exec(line);
+    const unordered = /^[-*]\s+(.*)$/.exec(line);
+    const ordered = /^\d+\.\s+(.*)$/.exec(line);
+    const quote = /^>\s?(.*)$/.exec(line);
+    if (heading) {
+      flushList();
+      out.push(`<h${heading[1].length}>${renderInlineMarkdown(heading[2])}</h${heading[1].length}>`);
+    } else if (unordered) {
+      if (!listBuffer || listBuffer.tag !== 'ul') { flushList(); listBuffer = { tag: 'ul', items: [] }; }
+      listBuffer.items.push(unordered[1]);
+    } else if (ordered) {
+      if (!listBuffer || listBuffer.tag !== 'ol') { flushList(); listBuffer = { tag: 'ol', items: [] }; }
+      listBuffer.items.push(ordered[1]);
+    } else if (quote) {
+      flushList();
+      out.push(`<blockquote>${renderInlineMarkdown(quote[1])}</blockquote>`);
+    } else if (line === '') {
+      flushList();
+    } else {
+      flushList();
+      out.push(`<p>${renderInlineMarkdown(line)}</p>`);
+    }
+  }
+  flushList();
+  return out.join('');
+}
+
+// --- ESPACE DE TRAVAIL LATÉRAL (ARTEFACTS) ----------------------------------
+// Clone du split-screen "Artifacts" : un bloc de code long ou un document
+// Markdown structuré s'ouvre dans un panneau persistant à droite, pendant que
+// le fil de discussion reste concis à gauche.
+const ARTIFACT_MIN_CODE_LENGTH = 400;
+const ARTIFACT_MIN_DOC_LENGTH = 1200;
+
+function detectArtifact(rawMarkdown, fallbackTitle) {
+  const blocks = extractCodeBlocks(rawMarkdown);
+  const bigBlock = blocks.find((b) => b.content.length >= ARTIFACT_MIN_CODE_LENGTH || b.content.split('\n').length >= 12);
+  if (bigBlock) {
+    return { kind: 'code', title: fallbackTitle || `Extrait de code`, language: bigBlock.language, content: bigBlock.content };
+  }
+  const headingCount = (rawMarkdown.match(/^#{1,3}\s+/gm) || []).length;
+  if (rawMarkdown.length >= ARTIFACT_MIN_DOC_LENGTH && headingCount >= 2) {
+    return { kind: 'markdown', title: fallbackTitle || 'Document', language: null, content: rawMarkdown };
+  }
+  return null;
+}
+
+function ensureArtifactPanel() {
+  let panel = document.getElementById('artifact-panel');
+  if (panel) return panel;
+  panel = document.createElement('aside');
+  panel.id = 'artifact-panel';
+  panel.className = 'artifact-panel';
+  panel.hidden = true;
+  panel.innerHTML = `
+    <div class="artifact-header">
+      <div class="artifact-title-group">
+        <span class="artifact-title" id="artifact-title">Artefact</span>
+        <span class="artifact-subtitle" id="artifact-subtitle"></span>
+      </div>
+      <div class="artifact-toolbar">
+        <button type="button" class="artifact-toolbar-btn" id="artifact-copy">Copier</button>
+        <button type="button" class="artifact-toolbar-btn" id="artifact-download">Télécharger</button>
+        <button type="button" class="artifact-close" id="artifact-close" aria-label="Fermer l'espace de travail">✕</button>
+      </div>
+    </div>
+    <div class="artifact-body" id="artifact-body"></div>
+  `;
+  return panel;
+}
+
+let currentArtifact = null;
+
+function openArtifactPanel(artifact) {
+  const workspace = document.querySelector('.chat-workspace');
+  const panel = ensureArtifactPanel();
+  if (workspace && !panel.isConnected) workspace.appendChild(panel);
+  currentArtifact = artifact;
+
+  panel.querySelector('#artifact-title').textContent = artifact.title;
+  panel.querySelector('#artifact-subtitle').textContent = artifact.kind === 'code' ? (artifact.language || 'code') : 'Document Markdown';
+  const body = panel.querySelector('#artifact-body');
+  if (artifact.kind === 'code') {
+    body.className = 'artifact-body';
+    body.innerHTML = `<pre><code>${escapeHtml(artifact.content)}</code></pre>`;
+  } else {
+    body.className = 'artifact-body is-markdown markdown-body';
+    body.innerHTML = renderMarkdownBlocks(artifact.content);
+  }
+
+  panel.querySelector('#artifact-close').onclick = closeArtifactPanel;
+  panel.querySelector('#artifact-copy').onclick = async (e) => {
+    const btn = e.currentTarget;
+    try { await copyPlainText(artifact.content); btn.textContent = 'Copié ✓'; setTimeout(() => { btn.textContent = 'Copier'; }, 1600); }
+    catch { btn.textContent = 'Échec'; }
+  };
+  panel.querySelector('#artifact-download').onclick = () => downloadArtifact(artifact);
+
+  panel.hidden = false;
+  if (workspace) workspace.classList.add('split');
+}
+
+function closeArtifactPanel() {
+  const panel = document.getElementById('artifact-panel');
+  const workspace = document.querySelector('.chat-workspace');
+  if (panel) panel.hidden = true;
+  if (workspace) workspace.classList.remove('split');
+  currentArtifact = null;
+}
+
+function bindCodeOpenButtons(content) {
+  content.querySelectorAll('[data-open-code]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const code = btn.parentElement.querySelector('code');
+      openArtifactPanel({ kind: 'code', title: 'Extrait de code', language: code?.dataset.lang || 'text', content: code?.textContent || '' });
+    });
+  });
+}
+
+const ARTIFACT_EXTENSIONS = { javascript: 'js', typescript: 'ts', python: 'py', json: 'json', bash: 'sh', shell: 'sh', html: 'html', css: 'css', markdown: 'md', text: 'txt' };
+
+function downloadArtifact(artifact) {
+  const ext = artifact.kind === 'markdown' ? 'md' : (ARTIFACT_EXTENSIONS[(artifact.language || '').toLowerCase()] || 'txt');
+  const blob = new Blob([artifact.content], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url; link.download = `${(artifact.title || 'artefact').replace(/[^a-z0-9-_]+/gi, '_')}.${ext}`;
+  document.body.appendChild(link); link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+// --- TOASTS (notifications discrètes) ---------------------------------------
+function showToast(message) {
+  let host = document.querySelector('.jarvis-toast-host');
+  if (!host) { host = document.createElement('div'); host.className = 'jarvis-toast-host'; document.body.appendChild(host); }
+  const toast = document.createElement('div'); toast.className = 'jarvis-toast'; toast.textContent = message;
+  host.appendChild(toast);
+  requestAnimationFrame(() => toast.classList.add('show'));
+  setTimeout(() => { toast.classList.remove('show'); setTimeout(() => toast.remove(), 250); }, 3200);
+}
+
+// --- FLUX SSE (Server-Sent Events) ------------------------------------------
+// Consomme /api/chat/stream au fil de l'eau. Le backend restitue aujourd'hui la
+// réponse déjà générée en l'émettant mot par mot (voir httpApi.ts /
+// conversationHttpIngress.ts) ; ce client est écrit pour un vrai streaming
+// token par token sans qu'aucun changement ne soit nécessaire côté front le
+// jour où un fournisseur LLM diffusera ses tokens en direct.
+async function streamChat(text, { onThought, onToken, onDone, onError, signal }) {
+  const url = getApiUrl(`/api/chat/stream?message=${encodeURIComponent(text)}`);
+  const headers = {};
+  if (state.token) headers['Authorization'] = `Bearer ${state.token}`;
+  const response = await fetch(url, { headers, signal });
+  if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let sepIndex;
+    while ((sepIndex = buffer.indexOf('\n\n')) !== -1) {
+      const rawEvent = buffer.slice(0, sepIndex);
+      buffer = buffer.slice(sepIndex + 2);
+      const dataLine = rawEvent.split('\n').find((l) => l.startsWith('data:'));
+      if (!dataLine) continue;
+      const dataStr = dataLine.slice(5).trim();
+      if (dataStr === '[DONE]') return;
+      let payload;
+      try { payload = JSON.parse(dataStr); } catch { continue; }
+      if (payload.type === 'thought') onThought && onThought(payload.content);
+      else if (payload.type === 'token') onToken && onToken(payload.content);
+      else if (payload.type === 'answer') onToken && onToken(payload.content);
+      else if (payload.type === 'done') onDone && onDone(payload);
+      else if (payload.type === 'error') { onError && onError(payload.error); return; }
+    }
+  }
+}
+
 function renderChatView() {
   const container = document.getElementById('view-chat');
   if (!container || !container.children || container.children.length > 0) return;
 
+  const workspace = document.createElement('div'); workspace.className = 'chat-workspace';
   const layout = document.createElement('div'); layout.className = 'chat-layout';
   const messages = document.createElement('div'); messages.id = 'chat-messages'; messages.className = 'chat-messages';
   const form = document.createElement('form'); form.id = 'chat-form'; form.className = 'chat-composer';
   const input = document.createElement('textarea'); input.id = 'chat-input'; input.className = 'input-field chat-input'; input.rows = 1; input.placeholder = 'Posez une question ou demandez une action…'; input.setAttribute('aria-label', 'Message à Jarvis');
   const sendButton = document.createElement('button'); sendButton.type = 'submit'; sendButton.id = 'chat-send'; sendButton.className = 'btn btn-primary chat-send'; sendButton.textContent = 'Envoyer';
-  form.append(input, sendButton); layout.append(messages, form); container.appendChild(layout);
+  const stopButton = document.createElement('button'); stopButton.type = 'button'; stopButton.id = 'chat-stop'; stopButton.className = 'btn chat-stop'; stopButton.textContent = 'Stop';
+  stopButton.title = "Interrompre la génération en cours";
+  form.append(input, sendButton, stopButton);
+  layout.append(messages, form);
+  workspace.append(layout);
+  container.appendChild(workspace);
   appendChatMessage('agent', "Bonjour, je suis Jarvis Command Center. Comment puis-je vous aider aujourd'hui ?", { regeneratable: false });
 
   let submitting = false;
+  let activeAbortController = null;
+  let activeOperationTaskId = null;
   const resizeInput = () => { input.style.height = 'auto'; input.style.height = `${Math.min(input.scrollHeight, 160)}px`; };
   input.addEventListener('input', resizeInput);
+
+  const setGenerating = (generating) => { form.classList.toggle('generating', generating); };
+
+  stopButton.addEventListener('click', async () => {
+    setGenerating(false);
+    if (activeAbortController) activeAbortController.abort();
+    // Interrompt l'affichage immédiatement ; si une opération d'arrière-plan a
+    // été détectée (dispatch vers un service/spécialiste), on demande aussi son
+    // annulation réelle — voir /api/operations/:id/cancel.
+    if (activeOperationTaskId) {
+      try { await fetchApi(`/api/operations/${encodeURIComponent(activeOperationTaskId)}/cancel`, { method: 'POST' }); } catch {}
+    }
+  });
+
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     if (submitting) return;
@@ -927,24 +1210,58 @@ function renderChatView() {
     if (!text) return;
     submitting = true;
     input.value = ''; resizeInput();
-    sendButton.disabled = true; sendButton.textContent = 'Envoi…';
+    setGenerating(true);
+    activeOperationTaskId = null;
 
     let operationSnapshot = null;
     try { operationSnapshot = new Set(normalizeOperations(await fetchApi('/api/operations')).map((operation) => operation.taskId)); } catch {}
     appendChatMessage('user', text);
     const timelineHost = document.createElement('div'); timelineHost.className = 'chat-timeline-host'; timelineHost.hidden = true; messages.appendChild(timelineHost);
-    const pendingEl = appendChatMessage('agent pending', 'Jarvis is thinking...');
     const monitorControl = { chatPending: true };
-    if (operationSnapshot) void monitorChatOperations(operationSnapshot, Date.now(), timelineHost, monitorControl);
+    if (operationSnapshot) {
+      void monitorChatOperations(operationSnapshot, Date.now(), timelineHost, monitorControl, (operation) => {
+        // Une opération d'arrière-plan réelle (dispatch vers un service/spécialiste)
+        // vient d'être détectée : le bouton Stop pourra l'annuler pour de vrai
+        // via /api/operations/:id/cancel, au-delà du simple arrêt de l'affichage.
+        activeOperationTaskId = operation.taskId;
+      });
+    }
+
+    const pendingEl = appendChatMessage('agent pending', '🧠 Réflexion en cours…');
+    const contentEl = pendingEl ? pendingEl.querySelector('.msg-content') : null;
+    let streamedText = '';
+    activeAbortController = new AbortController();
 
     try {
-      const res = await fetchApi('/api/chat', { method: 'POST', body: JSON.stringify({ message: text }) });
-      pendingEl?.remove(); appendChatMessage('agent', res.response);
+      await streamChat(text, {
+        signal: activeAbortController.signal,
+        onThought: (thought) => { if (contentEl && !streamedText) contentEl.textContent = thought; },
+        onToken: (token) => {
+          streamedText += token;
+          if (contentEl) {
+            const shouldScroll = isNearChatBottom(messages);
+            contentEl.textContent = streamedText;
+            scrollChatIfNearBottom(messages, shouldScroll);
+          }
+        },
+        onDone: () => {},
+        onError: (message) => { throw new Error(message); },
+      });
+      pendingEl?.remove();
+      appendChatMessage('agent', streamedText || '…', {});
     } catch (err) {
       pendingEl?.remove();
-      appendChatMessage('agent error', `⚠️ Erreur : ${err.message}`);
+      if (err && err.name === 'AbortError') {
+        appendChatMessage('agent stopped', streamedText ? `${streamedText}\n\n⏹️ Génération interrompue par l'utilisateur.` : "⏹️ Génération interrompue par l'utilisateur.", { regeneratable: false });
+      } else {
+        appendChatMessage('agent error', `⚠️ Erreur : ${err.message}`);
+      }
     } finally {
-      monitorControl.chatPending = false; submitting = false; sendButton.disabled = false; sendButton.textContent = 'Envoyer'; input.focus();
+      monitorControl.chatPending = false;
+      submitting = false;
+      setGenerating(false);
+      activeAbortController = null;
+      input.focus();
     }
   });
   input.addEventListener('keydown', (e) => {
@@ -958,8 +1275,32 @@ function appendChatMessage(role, text, options = {}) {
   const shouldScroll = isNearChatBottom(box);
   const article = document.createElement('article'); article.className = `msg ${role}`;
   const label = document.createElement('div'); label.className = 'msg-label'; label.textContent = role.includes('user') ? 'Vous' : 'Jarvis';
-  const content = document.createElement('div'); content.className = 'msg-content'; content.textContent = text;
+  const content = document.createElement('div'); content.className = 'msg-content';
+  const isRenderable = role.includes('agent') && !role.includes('pending') && !role.includes('error') && !role.includes('stopped');
+
+  let artifact = null;
+  if (isRenderable) {
+    artifact = detectArtifact(text);
+    const visibleText = artifact ? text.replace(FENCED_CODE_BLOCK_RE, '').trim() || `📄 « ${artifact.title} » a été ouvert dans l'espace de travail.` : text;
+    const { html } = renderMarkdownLite(artifact ? visibleText : text);
+    content.classList.add('markdown-body');
+    content.innerHTML = html;
+  } else {
+    content.textContent = text;
+  }
   article.append(label, content);
+
+  if (artifact) {
+    const pointer = document.createElement('button');
+    pointer.type = 'button';
+    pointer.className = 'artifact-pointer';
+    pointer.innerHTML = `<span class="artifact-pointer-icon">${artifact.kind === 'code' ? '💻' : '📄'}</span><span>Ouvrir « ${escapeHtml(artifact.title)} »</span>`;
+    pointer.addEventListener('click', () => openArtifactPanel(artifact));
+    article.appendChild(pointer);
+    openArtifactPanel(artifact);
+  }
+
+  bindCodeOpenButtons(content);
 
   if (!role.includes('pending') && !role.includes('error')) {
     const actions = document.createElement('div'); actions.className = 'msg-actions';
@@ -986,7 +1327,14 @@ function appendChatMessage(role, text, options = {}) {
       const regenerate = createMessageAction('Régénérer', 'Reformuler cette réponse', async () => {
         if (regenerate.disabled) return;
         const oldText = content.textContent; regenerate.disabled = true; regenerate.textContent = 'Régénération…';
-        try { const result = await fetchApi('/api/chat/regenerate', { method: 'POST', body: '{}' }); content.textContent = result.response; }
+        try {
+          const result = await fetchApi('/api/chat/regenerate', { method: 'POST', body: '{}' });
+          const newArtifact = detectArtifact(result.response);
+          const visibleText = newArtifact ? result.response.replace(FENCED_CODE_BLOCK_RE, '').trim() || `📄 « ${newArtifact.title} » a été ouvert dans l'espace de travail.` : result.response;
+          content.innerHTML = renderMarkdownLite(visibleText).html;
+          bindCodeOpenButtons(content);
+          if (newArtifact) openArtifactPanel(newArtifact);
+        }
         catch { content.textContent = oldText; regenerate.textContent = 'Erreur — réessayer'; setTimeout(() => { regenerate.textContent = 'Régénérer'; }, 2200); }
         finally { regenerate.disabled = false; if (regenerate.textContent === 'Régénération…') regenerate.textContent = 'Régénérer'; }
       });
@@ -2655,6 +3003,74 @@ function renderFutureMapCard() {
   return card;
 }
 
+// --- CHECKPOINTS (Brique 9) : gestion graphique dans la sidebar ------------
+// Équivalent visuel de la commande CLI `/checkpoint save` : visualiser,
+// sauvegarder et restaurer un état de l'agent (mémoire de travail + plan en
+// cours) sans repasser par le terminal.
+async function renderCheckpointsPanel() {
+  const list = elements.checkpointList;
+  if (!list) return;
+  try {
+    const checkpoints = await fetchApi('/api/checkpoints');
+    if (!Array.isArray(checkpoints) || checkpoints.length === 0) {
+      list.innerHTML = '<div class="checkpoint-empty">Aucun point de sauvegarde.</div>';
+      return;
+    }
+    list.replaceChildren();
+    checkpoints.forEach((cp) => {
+      const item = document.createElement('div'); item.className = 'checkpoint-item';
+      const info = document.createElement('div'); info.className = 'checkpoint-info';
+      const label = document.createElement('span'); label.className = 'checkpoint-label'; label.textContent = cp.label; label.title = cp.label;
+      const date = document.createElement('span'); date.className = 'checkpoint-date'; date.textContent = cp.createdAt ? new Date(cp.createdAt).toLocaleString() : '';
+      info.append(label, date);
+
+      const restore = document.createElement('button');
+      restore.type = 'button';
+      restore.className = 'checkpoint-restore';
+      restore.title = `Restaurer « ${cp.label} »`;
+      restore.setAttribute('aria-label', `Restaurer « ${cp.label} »`);
+      restore.textContent = '↺';
+      restore.addEventListener('click', async () => {
+        if (!window.confirm(`Restaurer l'état « ${cp.label} » ? La conversation en cours sera remplacée par cet état sauvegardé.`)) return;
+        restore.disabled = true;
+        try {
+          const res = await fetchApi(`/api/checkpoints/${encodeURIComponent(cp.id)}/restore`, { method: 'POST' });
+          showToast(res && res.ok ? `✅ État restauré : ${cp.label}` : '⚠️ Échec de la restauration.');
+        } catch (err) {
+          showToast(`⚠️ Erreur : ${err.message}`);
+        } finally {
+          restore.disabled = false;
+        }
+      });
+
+      item.append(info, restore);
+      list.appendChild(item);
+    });
+  } catch (err) {
+    list.innerHTML = `<div class="checkpoint-empty">Indisponible : ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function initCheckpointsPanel() {
+  if (elements.btnSaveCheckpoint) {
+    elements.btnSaveCheckpoint.addEventListener('click', async () => {
+      const label = window.prompt('Nom du point de sauvegarde :', `checkpoint-${new Date().toLocaleString()}`);
+      if (!label || !label.trim()) return;
+      elements.btnSaveCheckpoint.disabled = true;
+      try {
+        await fetchApi('/api/checkpoints', { method: 'POST', body: JSON.stringify({ label: label.trim() }) });
+        showToast(`💾 Point de sauvegarde créé : ${label.trim()}`);
+        await renderCheckpointsPanel();
+      } catch (err) {
+        showToast(`⚠️ Échec de la sauvegarde : ${err.message}`);
+      } finally {
+        elements.btnSaveCheckpoint.disabled = false;
+      }
+    });
+  }
+  void renderCheckpointsPanel();
+}
+
 // --- INITIALIZATION ---
 let jarvisInitialized = false;
 
@@ -2663,6 +3079,7 @@ function bootstrapJarvis() {
   jarvisInitialized = true;
 
   initNavigation();
+  initCheckpointsPanel();
 
   // Apply general settings saved in localStorage for instant initial rendering
   const savedTheme = localStorage.getItem('jarvis_theme') || 'SYSTEM';
