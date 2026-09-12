@@ -1,19 +1,33 @@
-# Socle agent autonome
+# Socle agent autonome (Jarvis Command Center)
 
 Socle générique et réutilisable pour bâtir un agent IA autonome, condensé à
 partir de dix architectures existantes (Hermes Agent, OpenClaw, AutoGPT,
 BabyAGI, CrewAI, AutoGen, MetaGPT, Generative Agents, Voyager, SillyTavern)
-en neuf briques communes.
+en neuf briques communes. Au-delà du socle, le dépôt implémente Jarvis
+Command Center : voir [Au-delà des 9 briques](#au-delà-des-9-briques)
+ci-dessous pour l'ampleur réelle du projet (Software Factory, bureaux
+métier, personnalité, voix, repository intelligence).
 
 ## Principes
 
 - **LLM-agnostique** : Anthropic, OpenAI, OpenRouter, Ollama, Infermatic ou un fournisseur `mock`
   (hors-ligne, sans clé API) sont interchangeables via `LLM_PROVIDER`. Aucun SDK
-  propriétaire : les fournisseurs parlent en HTTP brut derrière l'interface `LLMProvider`.
-- **Stockage et embeddings locaux par défaut** : stockage SQLite (fichier unique,
-  `better-sqlite3`) et mémoire vectorielle par feature hashing (déterministe, zéro
-  dépendance). Le LLM nominal de Jarvis est Infermatic avec
-  `Qwen-Qwen3.6-35B-A3B`, et nécessite donc une clé `INFERMATIC_API_KEY` valide.
+  propriétaire côté fournisseurs LLM : ils parlent tous en HTTP brut derrière
+  l'interface `LLMProvider` — cette contrainte ne s'étend pas au reste du projet, qui
+  utilise par ailleurs des SDK tiers là où c'est pertinent (`@octokit/rest` pour
+  l'intégration GitHub de la Software Factory et de repository intelligence,
+  `exceljs`/`pdf-parse` pour le Document & Data Workbench).
+- **Stockage local par défaut, Postgres en option pour la durabilité** : SQLite
+  (fichier unique, `better-sqlite3`) est le stockage par défaut pour à peu près tout
+  (mémoire, tâches, opérations de service, connexions...). Si `DATABASE_URL` est
+  défini, l'historique de conversation durable (Chantier 11A, `src/persistence/conversations/`)
+  et l'état de personnalité (`src/personality/`) basculent automatiquement sur
+  PostgreSQL au lieu de SQLite — c'est le mode recommandé pour un déploiement où la
+  continuité de conversation doit survivre à un redémarrage/redéploiement (voir
+  `.github/workflows/android.yml`/`chantier11a.yml`, qui provisionnent un Postgres de
+  test). La mémoire vectorielle reste par feature hashing (déterministe, zéro
+  dépendance) quel que soit le backend choisi. Le LLM nominal de Jarvis est Infermatic
+  avec `Qwen-Qwen3.6-35B-A3B`, et nécessite donc une clé `INFERMATIC_API_KEY` valide.
   Des fournisseurs OpenAI/Voyage restent branchables pour les embeddings si besoin
   de meilleure précision sémantique (`EMBEDDING_PROVIDER`).
 
@@ -30,6 +44,48 @@ en neuf briques communes.
 | 7 | Gestionnaire de budget de contexte | `src/context/contextBudgetManager.ts` |
 | 8 | Façade(s) | `src/interfaces/cli.ts` |
 | 9 | Points de reprise | `src/persistence/` |
+
+## Au-delà des 9 briques
+
+Le socle initial (9 briques ci-dessus) sert de fondation à Jarvis Command
+Center, dont la portée réelle est nettement plus large :
+
+- **Orchestration de services & Software Factory** (`src/orchestration/`,
+  `src/services/softwareFactoryService.ts`) : Jarvis Core (le raisonnement)
+  ne parle jamais directement à un service — tout passe par
+  `ServiceOrchestrator`/le contrat `TASK_REQUEST`/`TASK_EVENT`
+  (`src/orchestration/contract.ts`), avec gating par risque (LOW → CRITICAL,
+  approbation explicite au-delà) et machine à états des opérations
+  (`src/orchestration/operationStore.ts`). La Software Factory génère du
+  code, ouvre des branches/PR sur GitHub (`@octokit/rest`) via son propre
+  provider/modèle LLM (`SOFTWARE_FACTORY_PROVIDER`/`SOFTWARE_FACTORY_MODEL`),
+  indépendant du provider actif de Jarvis.
+- **Bureaux métier** (Chantier 9, `src/services/{product,creative,commercial,marketing}*.ts`) :
+  Product Studio, Creative Studio, Commercial Office et Marketing Office —
+  quatre services synchrones dispatchés comme des capacités, désactivés par
+  défaut (`config/services.json`), activables depuis les réglages.
+- **Personnalité** (`src/personality/`) : politique de ton/style appliquée
+  aux réponses de Jarvis, avec validation de sortie et repli automatique si
+  une régénération corrective échoue.
+- **Voix** (Chantier 10, `src/voice/`) : ingestion de commandes vocales
+  Android idempotente, alertes (SMS/notification native), file d'attente
+  avec purge des commandes terminées (`DONE`/`RECOVERY_REQUIRED`).
+- **Repository intelligence** (`src/repository/`) : lecture seule d'un
+  dépôt GitHub (arborescence, recherche, PR, diffs, audit de secrets) via
+  la skill `knowledge_search`, en local (`LOCAL_HANDLER`), sans passer par
+  le contrat de service (elle ne dispatche rien à un service externe).
+- **Document & Data Workbench** (`src/workbench/`) : lecture/écriture de
+  fichiers de travail, tableurs (`exceljs`), PDF (`pdf-parse`), analyse de
+  données, avec garde-fous anti zip-bomb pour les fichiers XLSX
+  (`src/workbench/xlsxZipGuard.ts`).
+- **Planification hiérarchique avancée** (`src/planning/`) : missions
+  multi-étapes avec parallélisme borné, replanification sûre et
+  spécialistes (`src/orchestration/specialistRegistry.ts`).
+- **Autonomie** (`src/autonomy/`) : exécution en arrière-plan, planificateur,
+  notifications, alertes email.
+- **Android/Capacitor + OTA** (`android/`, `www/`) : app mobile encapsulant
+  l'interface Web, avec mise à jour OTA du bundle Web (voir section
+  dédiée plus bas) sans passer par le store pour les changements HTML/CSS/JS.
 
 ## Démarrage
 
