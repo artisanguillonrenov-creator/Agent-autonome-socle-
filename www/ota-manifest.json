@@ -1,10 +1,10 @@
 {
   "version": "0.1.0",
-  "buildId": "e99899e40737",
-  "build": 1789076322495,
+  "buildId": "ce2c1e1f770e",
+  "build": 1789228921871,
   "minimumNativeVersion": "1.0.0",
   "bundleUrl": "/api/ota/bundle",
-  "sha256": "b540d71ff831115315c5b3f3a00b8623f8f6fa4b775b2eb4e67005f2f34f6963",
+  "sha256": "485055d348f8fe7e6803f4fa5689badd47b1d72b44c00139e8bbcad90f76f4ff",
   "releaseNotes": "Mise à jour OTA Command Center - Améliorations visuelles et fonctionnelles.",
-  "updatedAt": "2026-09-10T21:38:42.495Z"
+  "updatedAt": "2026-09-12T16:02:01.871Z"
 }
