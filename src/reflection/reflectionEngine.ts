@@ -3,6 +3,7 @@ import type { MemoryManager } from "../memory/memoryManager.js";
 import { withGenerationDefaults } from "../llm/generationDefaults.js";
 import { providerForRole } from "../llm/modelRouter.js";
 import { config } from "../config.js";
+import { tracer } from "../observability/tracer.js";
 
 const LEGACY_CONVERSATION_ID = "__legacy__";
 
@@ -76,20 +77,27 @@ export class ReflectionEngine {
   private async createInsight(recent: Array<{ role: string; content: string | null }>, workspaceId?: string): Promise<string> {
     if (recent.length === 0) return "";
     const transcript = recent.map((message) => `${message.role}: ${message.content}`).join("\n");
-    const rawInsight = await providerForRole("utility", this.llm).complete(
-      [
-        {
-          role: "system",
-          content:
-            "Tu es le module de réflexion d'un agent autonome. Relis cet extrait d'échanges récents " +
-            "et résume en 1 à 3 phrases les enseignements de haut niveau à retenir durablement " +
-            "(préférences révélées, décisions prises, erreurs à ne pas répéter). " +
-            "Sois concis, factuel, à la troisième personne.",
-        },
-        { role: "user", content: transcript },
-      ],
-      withGenerationDefaults({}),
-    );
+    // Boucle d'auto-réflexion/critique : routée vers le modèle de Raisonnement Lourd
+    // (intelligence.reasoningModel), pas le modèle rapide — dégrade proprement vers le
+    // modèle principal si aucun modèle de raisonnement n'est configuré.
+    const rawInsight = await tracer.withSpan("reflection.insight", { kind: "planning", inputs: { transcriptLength: transcript.length } }, async (span) => {
+      const res = await providerForRole("reasoning", this.llm).complete(
+        [
+          {
+            role: "system",
+            content:
+              "Tu es le module de réflexion d'un agent autonome. Relis cet extrait d'échanges récents " +
+              "et résume en 1 à 3 phrases les enseignements de haut niveau à retenir durablement " +
+              "(préférences révélées, décisions prises, erreurs à ne pas répéter). " +
+              "Sois concis, factuel, à la troisième personne.",
+          },
+          { role: "user", content: transcript },
+        ],
+        withGenerationDefaults({}),
+      );
+      span.setOutputs(typeof res === "string" ? res : res.content);
+      return res;
+    });
     const insight = typeof rawInsight === "string" ? rawInsight : rawInsight.content ?? "";
     if (insight.trim().length > 0) {
       await this.memory.vector.add(insight.trim(), "reflection", { workspaceId });

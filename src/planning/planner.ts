@@ -69,4 +69,17 @@ export class Planner {
  activeRuns(){return(getDb().prepare(`SELECT * FROM plan_runs WHERE status NOT IN ('COMPLETED','FAILED','CANCELLED') ORDER BY created_at`).all() as any[]).map(rowToRun);}
  nodes(runId:string){return(getDb().prepare(`SELECT * FROM plan_nodes WHERE plan_run_id=? AND capability IS NOT NULL ORDER BY generation,position,created_at`).all(runId) as any[]).map(rowToNode);}
  updateRun(id:string,status:PlanRunStatus,lastError?:string){getDb().prepare(`UPDATE plan_runs SET status=?,last_error=COALESCE(?,last_error),updated_at=? WHERE id=?`).run(status,lastError??null,Date.now(),id);}
+ /**
+  * Co-édition humaine : fusionne `patch` dans le contexte JSON persisté d'un nœud sans
+  * toucher à son statut ni à ses dépendances — permet d'injecter une nouvelle information
+  * (ex: contenu d'artefact modifié par l'utilisateur) dans une étape déjà planifiée, avant
+  * son (re)dispatch, sans relancer le plan depuis zéro.
+  */
+ mergeContext(id:string,patch:Record<string,unknown>):void{
+  const row=getDb().prepare(`SELECT context_json FROM plan_nodes WHERE id=?`).get(id) as {context_json:string|null}|undefined;
+  if(!row)return;
+  let context:Record<string,unknown>={};
+  try{const parsed=JSON.parse(row.context_json??"{}");if(parsed&&typeof parsed==="object"&&!Array.isArray(parsed))context=parsed;}catch{context={};}
+  getDb().prepare(`UPDATE plan_nodes SET context_json=?,updated_at=? WHERE id=?`).run(JSON.stringify({...context,...patch}),Date.now(),id);
+ }
 }

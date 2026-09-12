@@ -2,6 +2,7 @@ import type { EmbeddingProvider } from "../llm/embeddings.js";
 import { cosineSimilarity } from "../llm/embeddings.js";
 import type { SkillContext, SkillDefinition } from "../types.js";
 import { SkillPreferenceStore } from "./preferences.js";
+import { tracer } from "../observability/tracer.js";
 
 const kinds=new Set(["SKILL","WORKFLOW","INTERNAL","FUTURE","SYSTEM","LEGACY"]), availability=new Set(["AVAILABLE","UNAVAILABLE","DISABLED"]), exposures=new Set(["ALWAYS","DYNAMIC","NEVER"]), risks=new Set(["LOW","MEDIUM","HIGH","CRITICAL"]), targets=new Set(["LOCAL_HANDLER","SERVICE_CAPABILITY","WORKFLOW","INTERNAL"]);
 function normalized(skill:SkillDefinition):SkillDefinition {
@@ -100,7 +101,11 @@ export class SkillRegistry {
     try {
       if(skill.kind==="INTERNAL"||skill.kind==="FUTURE"||skill.availability!=="AVAILABLE"||!this.isEnabled(skill)||!skill.handler)throw new Error("SKILL_NOT_EXECUTABLE");
       validateInput(skill.parameters,input);
-      const result=await skill.handler(input, ctx);
+      const result=await tracer.withSpan(`skill.${name}`,{kind:"skill",inputs:input},async(span)=>{
+        const r=await skill.handler!(input, ctx);
+        span.setOutputs(typeof r==="string"?r.slice(0,500):r);
+        return r;
+      });
       console.log(`[JARVIS-FLOW] TOOL_RESULT=${name}`);
       return result;
     } catch (err) {
