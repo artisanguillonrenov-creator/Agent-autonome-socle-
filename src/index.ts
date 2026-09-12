@@ -1,7 +1,6 @@
 import { createLLMProvider, resolveLLMSelection } from "./llm/providers/index.js";
 import { createEmbeddingProvider } from "./llm/embeddingFactory.js";
 import { QueuedAgent } from "./core/queuedAgent.js";
-import { builtinSkills } from "./skills/builtin/index.js";
 import { runCli } from "./interfaces/cli.js";
 import { startHttpApi } from "./interfaces/httpApi.js";
 import { installConversationHttpIngress } from "./interfaces/conversationHttpIngress.js";
@@ -53,7 +52,9 @@ async function main(): Promise<void> {
     personalityPolicyEngine,
   );
 
-  for (const skill of builtinSkills) agent.skills.register(skill);
+  // Le constructeur d'Agent enregistre déjà l'intégralité de builtinSkills (fusionnée avec
+  // les skills runtime issues de createRuntimeSkills) — les réenregistrer ici écraserait cette
+  // fusion et l'état de disponibilité déjà calculé par service.
   applyAllEffectiveRuntimeSettings(agent);
 
   const alertRouter = new AlertRouter();
