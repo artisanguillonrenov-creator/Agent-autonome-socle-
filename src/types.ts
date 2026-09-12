@@ -116,6 +116,14 @@ export interface SkillContext {
   skillRegistry?: any;
   /** Native invocation identity; used for side-effect idempotency. */
   toolCallId?: string;
+  /**
+   * Identifiant du tour de conversation en cours (voir Agent.step). Regroupe, sous un même
+   * traceId, toutes les opérations de service dispatchées pendant CE tour — utilisé par les
+   * skills qui appellent directement `orchestrator.dispatchCapability` sans passer par le
+   * `serviceOrchestrator` fourni dans ce contexte (ex. src/skills/runtime.ts, dont les
+   * handlers ferment sur le ServiceOrchestrator d'origine plutôt que sur ce SkillContext).
+   */
+  traceId?: string;
 }
 
 export type PendingActionRisk = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";

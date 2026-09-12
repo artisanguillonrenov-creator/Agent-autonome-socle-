@@ -1,9 +1,20 @@
-import { test } from "node:test";
+import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+
+// C.3 (directives de correction) : scripts/build-ota.mjs tournait auparavant en pretest
+// npm, donc à CHAQUE lancement de `npm test` — y compris pour les 500+ tests backend qui
+// n'en dépendent pas — et mutait des fichiers suivis par git (www/index.html,
+// ota-manifest.json, ota-bundle.json) sur chaque exécution. Seul ce fichier a réellement
+// besoin d'un www/ota-*.json à jour : on l'exécute donc ici, une seule fois, avant les
+// tests qui en dépendent.
+before(() => {
+  execFileSync(process.execPath, [path.join(process.cwd(), "scripts", "build-ota.mjs")], { stdio: "inherit" });
+});
 
 /**
  * Fabrique une sandbox vm neuve pour www/app.js, façon httpApi.test.ts : un `require`
