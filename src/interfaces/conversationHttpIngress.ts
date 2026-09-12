@@ -219,12 +219,18 @@ export function installConversationHttpIngress(
         return;
       }
 
-      if (req.method === "GET" && pathname === "/api/chat/stream") {
-        const message = (parsed.searchParams.get("message") || "").trim();
+      if ((req.method === "GET" || req.method === "POST") && pathname === "/api/chat/stream") {
+        // POST est le chemin recommandé : un prompt long ou collé (document, code) ne
+        // risque plus de dépasser une limite de longueur d'URL et n'atterrit plus dans
+        // les journaux d'accès HTTP. GET reste accepté (query string) pour compatibilité
+        // ascendante avec d'éventuels appelants existants.
+        const body = req.method === "POST" ? await readJson(req) : {};
+        const message = (typeof body.message === "string" ? body.message : parsed.searchParams.get("message") || "").trim();
         if (!message) throw new ConversationExecutionError("MESSAGE_REQUIRED", 400);
-        const workspaceId = parsed.searchParams.get("workspaceId")?.trim() || undefined;
-        const session = await ensureSession(parsed.searchParams.get("conversationId") || undefined, workspaceId);
-        const clientRequestId = parsed.searchParams.get("clientRequestId")?.trim() || randomUUID();
+        const workspaceId = (typeof body.workspaceId === "string" ? body.workspaceId : parsed.searchParams.get("workspaceId") || "").trim() || undefined;
+        const conversationIdParam = typeof body.conversationId === "string" ? body.conversationId : parsed.searchParams.get("conversationId") || undefined;
+        const session = await ensureSession(conversationIdParam, workspaceId);
+        const clientRequestId = (typeof body.clientRequestId === "string" ? body.clientRequestId : parsed.searchParams.get("clientRequestId") || "").trim() || randomUUID();
         res.writeHead(200, {
           "content-type": "text/event-stream",
           "cache-control": "no-cache",

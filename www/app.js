@@ -1132,10 +1132,13 @@ function showToast(message) {
 // token par token sans qu'aucun changement ne soit nécessaire côté front le
 // jour où un fournisseur LLM diffusera ses tokens en direct.
 async function streamChat(text, { onThought, onToken, onDone, onError, signal }) {
-  const url = getApiUrl(`/api/chat/stream?message=${encodeURIComponent(text)}`);
-  const headers = {};
+  // POST plutôt que GET+query : un document ou un extrait de code collé long peut
+  // dépasser une limite de longueur d'URL, et le contenu du message ne doit pas finir
+  // dans les journaux d'accès HTTP (proxy, reverse-proxy, etc.).
+  const url = getApiUrl('/api/chat/stream');
+  const headers = { 'Content-Type': 'application/json' };
   if (state.token) headers['Authorization'] = `Bearer ${state.token}`;
-  const response = await fetch(url, { headers, signal });
+  const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ message: text }), signal });
   if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
 
   const reader = response.body.getReader();
@@ -1175,7 +1178,7 @@ function renderChatView() {
   const input = document.createElement('textarea'); input.id = 'chat-input'; input.className = 'input-field chat-input'; input.rows = 1; input.placeholder = 'Posez une question ou demandez une action…'; input.setAttribute('aria-label', 'Message à Jarvis');
   const sendButton = document.createElement('button'); sendButton.type = 'submit'; sendButton.id = 'chat-send'; sendButton.className = 'btn btn-primary chat-send'; sendButton.textContent = 'Envoyer';
   const stopButton = document.createElement('button'); stopButton.type = 'button'; stopButton.id = 'chat-stop'; stopButton.className = 'btn chat-stop'; stopButton.textContent = 'Stop';
-  stopButton.title = "Interrompre la génération en cours";
+  stopButton.title = "Interrompre l'affichage et annuler toute opération d'arrière-plan en cours";
   form.append(input, sendButton, stopButton);
   layout.append(messages, form);
   workspace.append(layout);
@@ -1185,20 +1188,26 @@ function renderChatView() {
   let submitting = false;
   let activeAbortController = null;
   let activeOperationTaskId = null;
+  let stopRequested = false;
   const resizeInput = () => { input.style.height = 'auto'; input.style.height = `${Math.min(input.scrollHeight, 160)}px`; };
   input.addEventListener('input', resizeInput);
 
   const setGenerating = (generating) => { form.classList.toggle('generating', generating); };
 
+  const cancelOperation = async (taskId) => {
+    try { await fetchApi(`/api/operations/${encodeURIComponent(taskId)}/cancel`, { method: 'POST' }); } catch {}
+  };
+
   stopButton.addEventListener('click', async () => {
     setGenerating(false);
+    stopRequested = true;
     if (activeAbortController) activeAbortController.abort();
-    // Interrompt l'affichage immédiatement ; si une opération d'arrière-plan a
+    // Interrompt l'affichage immédiatement ; si une opération d'arrière-plan a déjà
     // été détectée (dispatch vers un service/spécialiste), on demande aussi son
-    // annulation réelle — voir /api/operations/:id/cancel.
-    if (activeOperationTaskId) {
-      try { await fetchApi(`/api/operations/${encodeURIComponent(activeOperationTaskId)}/cancel`, { method: 'POST' }); } catch {}
-    }
+    // annulation réelle — voir /api/operations/:id/cancel. `stopRequested` couvre
+    // aussi le cas où l'opération n'est découverte qu'après ce clic (le callback
+    // onDiscover ci-dessous l'annule immédiatement dans ce cas).
+    if (activeOperationTaskId) await cancelOperation(activeOperationTaskId);
   });
 
   form.addEventListener('submit', async (e) => {
@@ -1207,6 +1216,7 @@ function renderChatView() {
     const text = input.value.trim();
     if (!text) return;
     submitting = true;
+    stopRequested = false;
     input.value = ''; resizeInput();
     setGenerating(true);
     activeOperationTaskId = null;
@@ -1222,6 +1232,9 @@ function renderChatView() {
         // vient d'être détectée : le bouton Stop pourra l'annuler pour de vrai
         // via /api/operations/:id/cancel, au-delà du simple arrêt de l'affichage.
         activeOperationTaskId = operation.taskId;
+        // Stop a déjà été cliqué avant que cette opération ne soit visible côté
+        // client (course entre le clic et la découverte) : on l'annule quand même.
+        if (stopRequested) void cancelOperation(operation.taskId);
       });
     }
 
@@ -1250,7 +1263,12 @@ function renderChatView() {
     } catch (err) {
       pendingEl?.remove();
       if (err && err.name === 'AbortError') {
-        appendChatMessage('agent stopped', streamedText ? `${streamedText}\n\n⏹️ Génération interrompue par l'utilisateur.` : "⏹️ Génération interrompue par l'utilisateur.", { regeneratable: false });
+        // Honnêteté volontaire : Stop coupe l'affichage et annule toute opération
+        // d'arrière-plan détectée, mais le tour en cours peut continuer à se terminer
+        // côté serveur (le traitement de conversation est durable/idempotent — voir
+        // conversationExecutionService.ts) avant qu'un nouveau message ne soit envoyé.
+        const stoppedNote = "⏹️ Affichage interrompu. La requête peut néanmoins continuer à se terminer côté serveur.";
+        appendChatMessage('agent stopped', streamedText ? `${streamedText}\n\n${stoppedNote}` : stoppedNote, { regeneratable: false });
       } else {
         appendChatMessage('agent error', `⚠️ Erreur : ${err.message}`);
       }
@@ -3009,8 +3027,13 @@ async function renderCheckpointsPanel() {
   const list = elements.checkpointList;
   if (!list) return;
   try {
-    const checkpoints = await fetchApi('/api/checkpoints');
-    if (!Array.isArray(checkpoints) || checkpoints.length === 0) {
+    const allCheckpoints = await fetchApi('/api/checkpoints');
+    // /api/checkpoints renvoie aussi des checkpoints PLAN_EXECUTION (créés en interne
+    // pendant le replanning) : seuls les checkpoints AGENT_STATE sont restaurables par
+    // agent.restoreCheckpoint (voir persistence/checkpoint.ts). Les autres feraient
+    // échouer la restauration (404) si on leur proposait le même bouton.
+    const checkpoints = Array.isArray(allCheckpoints) ? allCheckpoints.filter((cp) => cp.kind === 'AGENT_STATE') : [];
+    if (checkpoints.length === 0) {
       list.innerHTML = '<div class="checkpoint-empty">Aucun point de sauvegarde.</div>';
       return;
     }
@@ -3029,11 +3052,14 @@ async function renderCheckpointsPanel() {
       restore.setAttribute('aria-label', `Restaurer « ${cp.label} »`);
       restore.textContent = '↺';
       restore.addEventListener('click', async () => {
-        if (!window.confirm(`Restaurer l'état « ${cp.label} » ? La conversation en cours sera remplacée par cet état sauvegardé.`)) return;
+        // Restaure la mémoire de travail et le plan internes de l'agent (voir
+        // persistence/checkpoint.ts) — pas nécessairement l'historique visible de la
+        // conversation en cours, qui est géré séparément par le stockage durable.
+        if (!window.confirm(`Restaurer « ${cp.label} » ? Cela réinitialise la mémoire de travail et le plan internes de l'agent à cet état sauvegardé.`)) return;
         restore.disabled = true;
         try {
           const res = await fetchApi(`/api/checkpoints/${encodeURIComponent(cp.id)}/restore`, { method: 'POST' });
-          showToast(res && res.ok ? `✅ État restauré : ${cp.label}` : '⚠️ Échec de la restauration.');
+          showToast(res && res.ok ? `✅ État de l'agent restauré : ${cp.label}` : '⚠️ Échec de la restauration.');
         } catch (err) {
           showToast(`⚠️ Erreur : ${err.message}`);
         } finally {

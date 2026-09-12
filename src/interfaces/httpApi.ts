@@ -494,10 +494,14 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         return;
       }
 
-      if (req.method === "GET" && pathname === "/api/chat/stream") {
-        const queryMsg = parsedUrl.searchParams.get("message") || "";
+      if ((req.method === "GET" || req.method === "POST") && pathname === "/api/chat/stream") {
+        // POST est le chemin recommandé (voir conversationHttpIngress.ts) : un prompt long
+        // ne risque plus de dépasser une limite de longueur d'URL ni de finir dans les
+        // journaux d'accès. GET reste accepté (query string) pour compatibilité ascendante.
+        const streamBody = req.method === "POST" ? (JSON.parse((await readBody(req)) || "{}") as { message?: string; workspaceId?: string }) : {};
+        const queryMsg = typeof streamBody.message === "string" ? streamBody.message : parsedUrl.searchParams.get("message") || "";
         if (!queryMsg.trim()) {
-          sendJson(res, 400, { error: "message query param requis" });
+          sendJson(res, 400, { error: "message requis" });
           return;
         }
 
@@ -511,7 +515,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         res.write(`data: ${JSON.stringify({ type: "thought", content: "Analyse de la demande en cours..." })}\n\n`);
 
         try {
-          const streamWorkspaceId = parsedUrl.searchParams.get("workspaceId") || undefined;
+          const streamWorkspaceId = (typeof streamBody.workspaceId === "string" ? streamBody.workspaceId : parsedUrl.searchParams.get("workspaceId")) || undefined;
           const result = await agent.step(queryMsg.trim(), streamWorkspaceId);
 
           // Le fournisseur LLM ne diffuse pas encore les tokens au fil de la génération
