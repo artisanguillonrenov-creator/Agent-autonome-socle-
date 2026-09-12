@@ -83,6 +83,42 @@ test("Android / Capacitor post-DOMContentLoaded bootstrap timing test", async ()
   assert.equal(contextObj.window.jarvisInitialized(), true);
 });
 
+test("newRequestId() (www/app.js) ne lève jamais, même sans window.crypto.randomUUID (revue Codex sur la PR #72)", () => {
+  // Sans repli, crypto.randomUUID() lève sur une origine non sécurisée ou une vieille WebView,
+  // AVANT le try/finally qui entoure l'envoi du chat : le composeur restait alors bloqué en
+  // 'submitting' pour toujours (voir renderChatView dans www/app.js).
+  const dummyElement = {
+    addEventListener: () => {},
+    classList: { add: () => {}, remove: () => {}, toggle: () => {} },
+    getAttribute: () => "accueil",
+    querySelector: () => ({ textContent: "Accueil" }),
+    innerHTML: "",
+    style: {},
+  };
+  const contextObj: any = {
+    document: {
+      readyState: "interactive",
+      getElementById: () => dummyElement,
+      querySelectorAll: () => [dummyElement],
+      addEventListener: (event: string, cb: () => void) => { if (event === "DOMContentLoaded") cb(); },
+    },
+    localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+    fetch: async () => ({ ok: true, json: async () => ({}) }),
+    console,
+    setTimeout,
+    clearTimeout,
+    window: {},
+    // Pas de `crypto` du tout dans ce contexte, comme un WebView ancien / origine non sécurisée.
+  };
+  vm.createContext(contextObj);
+  vm.runInContext(fs.readFileSync("./www/app.js", "utf-8"), contextObj);
+
+  let id: string | undefined;
+  assert.doesNotThrow(() => { id = contextObj.newRequestId(); });
+  assert.equal(typeof id, "string");
+  assert.ok((id as string).length > 0);
+});
+
 test("Safe Array Contract Test for Models View - Prevents undefined.map error", () => {
   // Case 1: modelsData contains error or lacks providers property
   const modelsDataError: any = { error: "unauthorized" };

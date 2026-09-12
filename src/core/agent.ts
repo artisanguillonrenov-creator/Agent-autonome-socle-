@@ -202,7 +202,9 @@ export class Agent {
             rememberFact: (entity: string, attribute: string, value: string) => this.memory.facts.set(entity, attribute, value),
             // Enveloppe légère : ne change que le traceId par défaut d'un dispatch (regroupe
             // toutes les opérations de ce tour sous turnTraceId pour la corrélation côté
-            // client), sans dupliquer l'état de l'Orchestrator ni son API complète.
+            // client), sans dupliquer l'état de l'Orchestrator ni son API complète. Les skills
+            // qui ferment sur le ServiceOrchestrator d'origine (src/skills/runtime.ts) ne
+            // passent pas par cette enveloppe : elles lisent `traceId` ci-dessous directement.
             serviceOrchestrator: {
               registry: this.serviceOrchestrator.registry,
               dispatchCapability: (
@@ -213,6 +215,7 @@ export class Agent {
             planner: this.planner,
             skillRegistry: this.skills,
             toolCallId: toolCall.id,
+            traceId: turnTraceId,
           };
           const result = await this.skills.execute(skillName, parsedInput, context);
           const exactPending = this.pendingActionFromToolResult(result);

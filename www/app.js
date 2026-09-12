@@ -108,6 +108,15 @@ function getApiUrl(endpoint) {
   return `${base}${endpoint}`;
 }
 
+// crypto.randomUUID() throws (not just "undefined") on a non-secure origin or an old
+// WebView — the same fallback already used in conversationPersistence.js's newRequestId().
+function newRequestId() {
+  if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+    try { return window.crypto.randomUUID(); } catch (_) { /* fall through */ }
+  }
+  return 'web-' + Date.now() + '-' + Math.random().toString(16).slice(2);
+}
+
 async function fetchApi(endpoint, options = {}) {
   const url = getApiUrl(endpoint);
   const headers = {
@@ -932,7 +941,11 @@ function renderChatView() {
     // (voir Agent.step/httpApi.ts). Corrèle de façon fiable les opérations affichées en
     // direct pendant la requête, sans dépendre d'une fenêtre de temps qui peut faire
     // apparaître chez un client les opérations déclenchées par un autre client concurrent.
-    const requestId = crypto.randomUUID();
+    // Envoyé à la fois comme `requestId` (route directe httpApi.ts /api/chat) et
+    // `clientRequestId` (route réellement active en production : l'ingress de conversation
+    // durable — installConversationHttpIngress — intercepte /api/chat avant httpApi.ts et ne
+    // lit que ce second nom de champ).
+    const requestId = newRequestId();
     appendChatMessage('user', text);
     const timelineHost = document.createElement('div'); timelineHost.className = 'chat-timeline-host'; timelineHost.hidden = true; messages.appendChild(timelineHost);
     const pendingEl = appendChatMessage('agent pending', 'Jarvis is thinking...');
@@ -940,7 +953,7 @@ function renderChatView() {
     void monitorChatOperations(requestId, timelineHost, monitorControl);
 
     try {
-      const res = await fetchApi('/api/chat', { method: 'POST', body: JSON.stringify({ message: text, requestId }) });
+      const res = await fetchApi('/api/chat', { method: 'POST', body: JSON.stringify({ message: text, requestId, clientRequestId: requestId }) });
       pendingEl?.remove(); appendChatMessage('agent', res.response);
     } catch (err) {
       pendingEl?.remove();

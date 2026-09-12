@@ -340,6 +340,65 @@ test("dispatch_capability : deux tours concurrents (deux clients) ne mélangent 
   assert.notEqual(opsForA[0].taskId, opsForB[0].taskId);
 });
 
+test("software_development (skill runtime issue de createRuntimeSkills) hérite aussi du traceId du tour, pas seulement les skills passant par ctx.serviceOrchestrator", async () => {
+  // Revue Codex sur la PR #72 : createRuntimeSkills ferme sur le ServiceOrchestrator d'origine
+  // (pas sur ctx.serviceOrchestrator), donc software_development/deep_research/file_management
+  // contournaient l'enveloppe de traceId ajoutée dans Agent.step et retombaient sur un traceId
+  // auto-généré, invisible pour le filtre exact de www/app.js.
+  const { ServiceOrchestrator } = await import("../orchestration/serviceOrchestrator.js");
+  const { ServiceRegistry } = await import("../orchestration/serviceRegistry.js");
+  const { OperationStore } = await import("../orchestration/operationStore.js");
+
+  const registry = new ServiceRegistry("/does-not-exist");
+  registry.register({
+    id: "test_dev_service", name: "test dev", enabled: true, transport: "local", endpoint: "local",
+    capabilities: ["software_development"], priority: 1, riskByCapability: { software_development: "LOW" },
+  });
+  const adapter = {
+    dispatchTask: async (_endpoint: string, request: { task_id: string; trace_id: string }) => ({
+      success: true as const,
+      events: [{
+        schema_version: "1.0", event_id: `${request.task_id}-1`, task_id: request.task_id,
+        trace_id: request.trace_id, service: "test_dev_service", sequence: 1,
+        type: "TASK_COMPLETED" as const, timestamp: Date.now(), payload: { summary: "ok" },
+      }],
+      transportDurationMs: 1,
+    }),
+  } as any;
+  const store = new OperationStore();
+  const orchestrator = new ServiceOrchestrator({ registry, adapter, store });
+
+  let calls = 0;
+  const provider: LLMProvider = {
+    name: "software_dev_mock",
+    supportsNativeTools() { return true; },
+    async complete() {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          content: null,
+          toolCalls: [{
+            id: "call_dev", type: "function",
+            function: { name: "software_development", arguments: JSON.stringify({ objective: "ajoute un test", filePath: "src/x.ts" }) },
+          }],
+        };
+      }
+      return { content: "fait." };
+    },
+  };
+
+  const agent = new Agent({ llm: provider, embeddings: new LocalHashingEmbeddingProvider(), orchestrator });
+  // Skill runtime déjà enregistrée par le constructeur ; forcée ALWAYS pour ne pas dépendre
+  // du sélecteur sémantique (embedding hashé local) dans ce test.
+  agent.skills.get("software_development")!.exposure = "ALWAYS";
+
+  await agent.step("construis un truc", undefined, "req-turn-dev-1");
+
+  const ops = store.listOperations().filter((op) => op.capability === "software_development");
+  assert.equal(ops.length, 1);
+  assert.equal(ops[0].traceId, "req-turn-dev-1");
+});
+
 test("Native Tool Calling : gestion d'arguments JSON invalides (TEST F)", async () => {
   let calls = 0;
   let receivedErrorInToolResult = false;
