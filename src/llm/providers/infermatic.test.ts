@@ -215,6 +215,46 @@ test("InfermaticProvider formate un message assistant avec tool_calls et un rés
   }
 });
 
+test("InfermaticProvider préserve à l'identique 2+ toolCallId dans le même tour, sans message role:'user' synthétique dupliqué", async () => {
+  const originalFetch = globalThis.fetch;
+  let sentBody: any = null;
+  try {
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      sentBody = JSON.parse(init?.body as string);
+      return new Response(JSON.stringify({ choices: [{ message: { content: "suite" } }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const provider = new InfermaticProvider({ apiKey: "k", baseUrl: "https://api.totalgpt.ai/v1", model: "m" });
+    await provider.complete([
+      { role: "user", content: "donne-moi l'heure et mes tâches" },
+      {
+        role: "assistant",
+        content: null,
+        toolCalls: [
+          { id: "call_time_101", type: "function", function: { name: "get_current_time", arguments: "{}" } },
+          { id: "call_tasks_102", type: "function", function: { name: "list_tasks", arguments: '{"status":"pending"}' } },
+        ],
+      },
+      { role: "tool", toolCallId: "call_time_101", name: "get_current_time", content: "12:00" },
+      { role: "tool", toolCallId: "call_tasks_102", name: "list_tasks", content: "aucune tâche" },
+    ]);
+
+    // Exactement 4 messages envoyés : user, assistant(tool_calls), tool, tool — aucun
+    // role "user" synthétique ajouté après l'exécution des tools natifs.
+    assert.equal(sentBody.messages.length, 4);
+    assert.deepEqual(sentBody.messages.map((m: any) => m.role), ["user", "assistant", "tool", "tool"]);
+
+    assert.equal(sentBody.messages[2].tool_call_id, "call_time_101");
+    assert.equal(sentBody.messages[3].tool_call_id, "call_tasks_102");
+    assert.deepEqual(sentBody.messages[1].tool_calls.map((c: any) => c.id), ["call_time_101", "call_tasks_102"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("InfermaticProvider restitue les tool_calls (id, name, arguments) exactement tels que renvoyés, y compris s'il y en a plusieurs", async () => {
   const originalFetch = globalThis.fetch;
   try {

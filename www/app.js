@@ -110,6 +110,15 @@ function getApiUrl(endpoint) {
   return `${base}${endpoint}`;
 }
 
+// crypto.randomUUID() throws (not just "undefined") on a non-secure origin or an old
+// WebView — the same fallback already used in conversationPersistence.js's newRequestId().
+function newRequestId() {
+  if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+    try { return window.crypto.randomUUID(); } catch (_) { /* fall through */ }
+  }
+  return 'web-' + Date.now() + '-' + Math.random().toString(16).slice(2);
+}
+
 async function fetchApi(endpoint, options = {}) {
   const url = getApiUrl(endpoint);
   const headers = {
@@ -840,7 +849,7 @@ async function pollTimelineOperation(initialOperation, view) {
   }
 }
 
-async function monitorChatOperations(snapshotTaskIds, requestStartedAt, host, control, onDiscover) {
+async function monitorChatOperations(requestId, host, control, onDiscover) {
   const detectedTaskIds = new Set();
   const discover = async () => {
     let operations;
@@ -850,11 +859,10 @@ async function monitorChatOperations(snapshotTaskIds, requestStartedAt, host, co
       return;
     }
     for (const operation of operations) {
-      if (
-        snapshotTaskIds.has(operation.taskId) ||
-        detectedTaskIds.has(operation.taskId) ||
-        Number(operation.createdAt) < requestStartedAt
-      ) continue;
+      // Corrélation par identifiant explicite (traceId = requestId de ce tour), pas par
+      // fenêtre de temps : deux clients concurrents ne partagent jamais de requestId et ne
+      // peuvent donc jamais voir les opérations l'un de l'autre.
+      if (operation.traceId !== requestId || detectedTaskIds.has(operation.taskId)) continue;
       detectedTaskIds.add(operation.taskId);
       const view = createTimelineCard(host, operation);
       if (onDiscover) onDiscover(operation);
@@ -1131,14 +1139,19 @@ function showToast(message) {
 // conversationHttpIngress.ts) ; ce client est écrit pour un vrai streaming
 // token par token sans qu'aucun changement ne soit nécessaire côté front le
 // jour où un fournisseur LLM diffusera ses tokens en direct.
-async function streamChat(text, { onThought, onToken, onDone, onError, signal }) {
+async function streamChat(text, { onThought, onToken, onDone, onError, signal, clientRequestId }) {
   // POST plutôt que GET+query : un document ou un extrait de code collé long peut
   // dépasser une limite de longueur d'URL, et le contenu du message ne doit pas finir
   // dans les journaux d'accès HTTP (proxy, reverse-proxy, etc.).
   const url = getApiUrl('/api/chat/stream');
   const headers = { 'Content-Type': 'application/json' };
   if (state.token) headers['Authorization'] = `Bearer ${state.token}`;
-  const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ message: text }), signal });
+  // clientRequestId : identifiant de ce tour généré par l'appelant, transmis tel quel à
+  // service.handleTurn (conversationHttpIngress.ts) qui l'utilise comme traceId — voir
+  // Agent.step. Corrèle les opérations d'arrière-plan affichées en direct pendant CETTE
+  // requête précise, sans dépendre d'une fenêtre de temps qui mélangerait les opérations
+  // de clients concurrents (voir monitorChatOperations).
+  const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ message: text, clientRequestId }), signal });
   if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
 
   const reader = response.body.getReader();
@@ -1227,22 +1240,27 @@ function renderChatView() {
     setGenerating(true);
     activeOperationTaskId = null;
 
-    let operationSnapshot = null;
-    try { operationSnapshot = new Set(normalizeOperations(await fetchApi('/api/operations')).map((operation) => operation.taskId)); } catch {}
+    // requestId : identifiant unique de CE tour, généré avant l'envoi et transmis au serveur
+    // (voir Agent.step/httpApi.ts). Corrèle de façon fiable les opérations affichées en
+    // direct pendant la requête, sans dépendre d'une fenêtre de temps qui peut faire
+    // apparaître chez un client les opérations déclenchées par un autre client concurrent.
+    // Envoyé à la fois comme `requestId` (route directe httpApi.ts /api/chat) et
+    // `clientRequestId` (route réellement active en production : l'ingress de conversation
+    // durable — installConversationHttpIngress — intercepte /api/chat avant httpApi.ts et ne
+    // lit que ce second nom de champ).
+    const requestId = newRequestId();
     appendChatMessage('user', text);
     const timelineHost = document.createElement('div'); timelineHost.className = 'chat-timeline-host'; timelineHost.hidden = true; messages.appendChild(timelineHost);
     const monitorControl = { chatPending: true };
-    if (operationSnapshot) {
-      void monitorChatOperations(operationSnapshot, Date.now(), timelineHost, monitorControl, (operation) => {
-        // Une opération d'arrière-plan réelle (dispatch vers un service/spécialiste)
-        // vient d'être détectée : le bouton Stop pourra l'annuler pour de vrai
-        // via /api/operations/:id/cancel, au-delà du simple arrêt de l'affichage.
-        activeOperationTaskId = operation.taskId;
-        // Stop a déjà été cliqué avant que cette opération ne soit visible côté
-        // client (course entre le clic et la découverte) : on l'annule quand même.
-        if (stopRequested) void cancelOperation(operation.taskId);
-      });
-    }
+    void monitorChatOperations(requestId, timelineHost, monitorControl, (operation) => {
+      // Une opération d'arrière-plan réelle (dispatch vers un service/spécialiste)
+      // vient d'être détectée : le bouton Stop pourra l'annuler pour de vrai
+      // via /api/operations/:id/cancel, au-delà du simple arrêt de l'affichage.
+      activeOperationTaskId = operation.taskId;
+      // Stop a déjà été cliqué avant que cette opération ne soit visible côté
+      // client (course entre le clic et la découverte) : on l'annule quand même.
+      if (stopRequested) void cancelOperation(operation.taskId);
+    });
 
     const pendingEl = appendChatMessage('agent pending', '🧠 Réflexion en cours…');
     const contentEl = pendingEl ? pendingEl.querySelector('.msg-content') : null;
@@ -1251,6 +1269,7 @@ function renderChatView() {
 
     try {
       await streamChat(text, {
+        clientRequestId: requestId,
         signal: activeAbortController.signal,
         onThought: (thought) => { if (contentEl && !streamedText) contentEl.textContent = thought; },
         onToken: (token) => {

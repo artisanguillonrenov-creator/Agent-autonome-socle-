@@ -59,19 +59,22 @@ function validateRepeat(value:unknown):void {if(value!==undefined&&(!Number.isSa
 export function createRuntimeSkills(orchestrator:ServiceOrchestrator,planner:Planner,planRunner:PlanRunner,workflows:WorkflowRegistry,repositoryClient:GithubReadOnlyClient=createGithubReadOnlyClient(),vectorMemory:VectorMemory=new VectorMemory(new LocalHashingEmbeddingProvider())):SkillDefinition[]{
   const tasks=new TaskStore();const base=new Map(canonicalSkillCatalog.map(s=>[s.id!,{...s}]));
   const define=(id:string,parameters:SkillDefinition["parameters"],handler:NonNullable<SkillDefinition["handler"]>)=>Object.assign(base.get(id)!,{parameters,handler});
-  const dispatch=(capability:string,input:Record<string,unknown>,context:Record<string,unknown>,workspaceId?:string)=>orchestrator.dispatchCapability({action:"DISPATCH_CAPABILITY",capability,objective:String(input.objective??"").trim(),context,constraints:strings(input.constraints)},{executionMode:input.executionMode==="background"?"background":"foreground",workspaceId});
+  // traceId (Agent.step, corrélation timeline côté client) : ces skills ferment sur le
+  // ServiceOrchestrator d'origine plutôt que sur le SkillContext par appel, donc le traceId du
+  // tour en cours doit être lu explicitement sur `ctx` et transmis à chaque dispatch.
+  const dispatch=(capability:string,input:Record<string,unknown>,context:Record<string,unknown>,workspaceId?:string,traceId?:string)=>orchestrator.dispatchCapability({action:"DISPATCH_CAPABILITY",capability,objective:String(input.objective??"").trim(),context,constraints:strings(input.constraints)},{executionMode:input.executionMode==="background"?"background":"foreground",workspaceId,traceId});
 
-  define("software_development",schema({objective:{type:"string"},filePath:{type:"string"},instructions:{type:"string"},exactContent:{type:"string"},targetBranch:{type:"string"},targetPr:{type:"integer"},createIfMissing:{type:"boolean"},constraints:{type:"array"},executionMode:{type:"string",enum:["foreground","background"]}},["objective","filePath"]),async i=>{
+  define("software_development",schema({objective:{type:"string"},filePath:{type:"string"},instructions:{type:"string"},exactContent:{type:"string"},targetBranch:{type:"string"},targetPr:{type:"integer"},createIfMissing:{type:"boolean"},constraints:{type:"array"},executionMode:{type:"string",enum:["foreground","background"]}},["objective","filePath"]),async(i,ctx:SkillContext)=>{
     const directives=[typeof i.targetBranch==="string"?`TARGET_BRANCH=${i.targetBranch}`:null,Number.isInteger(i.targetPr)?`TARGET_PR=${i.targetPr}`:null,typeof i.instructions==="string"?i.instructions:null].filter(Boolean).join("\n");
-    return JSON.stringify(await dispatch("software_development",i,{filePath:i.filePath,instructions:directives,exactContent:i.exactContent,createIfMissing:i.createIfMissing===true,neverAutoMerge:true}));
+    return JSON.stringify(await dispatch("software_development",i,{filePath:i.filePath,instructions:directives,exactContent:i.exactContent,createIfMissing:i.createIfMissing===true,neverAutoMerge:true},undefined,ctx.traceId));
   });
-  define("deep_research",schema({objective:{type:"string"},queries:{type:"array"},maxResultsPerQuery:{type:"integer"},constraints:{type:"array"},workspaceId:{type:"string"}},["objective"]),async i=>{
+  define("deep_research",schema({objective:{type:"string"},queries:{type:"array"},maxResultsPerQuery:{type:"integer"},constraints:{type:"array"},workspaceId:{type:"string"}},["objective"]),async(i,ctx:SkillContext)=>{
     const workspaceId=typeof i.workspaceId==="string"?i.workspaceId:orchestrator.workspaces.create({name:"Recherche",ownerType:"ADHOC",ownerId:`research-${randomUUID()}`}).id;
-    const result=await dispatch("deep_research",i,{queries:i.queries,maxResultsPerQuery:i.maxResultsPerQuery},workspaceId);
+    const result=await dispatch("deep_research",i,{queries:i.queries,maxResultsPerQuery:i.maxResultsPerQuery},workspaceId,ctx.traceId);
     return JSON.stringify({...result,workspaceId,artifacts:orchestrator.artifacts.listByOperation(result.taskId)});
   });
-  define("file_management",schema({action:{type:"string",enum:["LIST","READ","WRITE","DELETE"]},workspaceId:{type:"string"},path:{type:"string"},content:{type:"string"},encoding:{type:"string"}},["action","workspaceId"]),async i=>{
-    const result=await dispatch("file_management",{...i,objective:`${i.action} workspace file`},{action:i.action,path:i.path,...(i.encoding==="base64"?{contentBase64:i.content}:{text:i.content})},String(i.workspaceId));
+  define("file_management",schema({action:{type:"string",enum:["LIST","READ","WRITE","DELETE"]},workspaceId:{type:"string"},path:{type:"string"},content:{type:"string"},encoding:{type:"string"}},["action","workspaceId"]),async(i,ctx:SkillContext)=>{
+    const result=await dispatch("file_management",{...i,objective:`${i.action} workspace file`},{action:i.action,path:i.path,...(i.encoding==="base64"?{contentBase64:i.content}:{text:i.content})},String(i.workspaceId),ctx.traceId);
     // projects.autoIndexing (nécessite projects.knowledgeRag) : maintient l'index RAG
     // cohérent avec le contenu réel du workspace — jamais de doublon (delete-then-insert
     // par source_key), jamais d'entrée fantôme après suppression d'un fichier.
