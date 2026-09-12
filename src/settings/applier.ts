@@ -60,6 +60,10 @@ export function applyAllEffectiveRuntimeSettings(agent: Agent, settingsStore = n
       config.llm.researchModel = val;
     } else if (key === "intelligence.utilityModel" && typeof val === "string") {
       config.llm.utilityModel = val;
+    } else if (key === "intelligence.reasoningModel" && typeof val === "string") {
+      config.llm.reasoningModel = val;
+    } else if (key === "intelligence.fastModel" && typeof val === "string") {
+      config.llm.fastModel = val;
     } else if (key === "intelligence.localModelPriority" && typeof val === "boolean") {
       config.llm.localModelPriority = val;
     } else if (key === "autonomy.globalRiskLevel" && typeof val === "string") {

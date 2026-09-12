@@ -17,6 +17,8 @@ import { WorkspaceStore } from "../workspaces/workspaceStore.js";
 import { ArtifactStore } from "../workspaces/artifactStore.js";
 import { ObservabilityStore } from "../observability/observabilityStore.js";
 import { ActivityStore } from "../observability/activityStore.js";
+import { tracer } from "../observability/tracer.js";
+import { HumanEditStore } from "../collaboration/humanEditStore.js";
 import { SETTINGS_CATALOG } from "../settings/catalog.js";
 import { localizedSettingsSections } from "../i18n/sections.js";
 import { SettingsStore, SettingScopeType } from "../settings/store.js";
@@ -33,6 +35,7 @@ const workspaceStore = new WorkspaceStore();
 const artifactStore = new ArtifactStore(workspaceStore);
 const observabilityStore = new ObservabilityStore();
 const activityStore = new ActivityStore();
+const humanEditStore = new HumanEditStore();
 const settingsStore = new SettingsStore();
 let lastServerError: string | null = null;
 
@@ -383,6 +386,76 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
       if (req.method === "GET" && planMetrics) {
         const value = observabilityStore.plan(decodeURIComponent(planMetrics[1]));
         sendJson(res, value ? 200 : 404, value ?? { error: "not_found" });
+        return;
+      }
+
+      // Observabilité & Tracing (Phase 2) : arbre d'exécution en direct (Planification ->
+      // Agent spécialiste -> Compétence) et coût financier estimé, lecture seule et
+      // best-effort (le Tracer n'échoue jamais, donc ces endpoints ne peuvent pas 500 à
+      // cause d'une trace corrompue).
+      if (req.method === "GET" && pathname === "/api/traces") {
+        const limit = Number(parsedUrl.searchParams.get("limit")) || 20;
+        sendJson(res, 200, { traces: tracer.listTraces(limit) });
+        return;
+      }
+
+      const traceMatch = pathname.match(/^\/api\/traces\/([^/]+)$/);
+      if (req.method === "GET" && traceMatch) {
+        const traceId = decodeURIComponent(traceMatch[1]);
+        const spans = tracer.getTrace(traceId);
+        if (!spans.length) {
+          sendJson(res, 404, { error: "TRACE_NOT_FOUND" });
+          return;
+        }
+        sendJson(res, 200, { traceId, spans, costUsd: tracer.estimatedCostUsd(traceId) });
+        return;
+      }
+
+      // Co-édition humaine bidirectionnelle (Human-in-the-Loop avancé) : l'utilisateur
+      // modifie directement un artefact généré depuis l'IHM Web. On persiste la nouvelle
+      // version puis on enfile un événement prioritaire (HumanEditStore) que l'agent actif
+      // (Agent.step pour une conversation directe, PlanRunner pour une mission active)
+      // consommera au prochain cycle utile — jamais appliqué "en silence".
+      const artifactContentMatch = pathname.match(/^\/api\/artifacts\/([^/]+)\/content$/);
+      if (req.method === "PATCH" && artifactContentMatch) {
+        const artifactId = decodeURIComponent(artifactContentMatch[1]);
+        let body: any;
+        try {
+          body = JSON.parse((await readBody(req)) || "{}");
+        } catch {
+          sendJson(res, 400, { error: "JSON invalide" });
+          return;
+        }
+        if (typeof body.content !== "string" || !body.content.trim()) {
+          sendJson(res, 400, { error: "content requis" });
+          return;
+        }
+        const existing = artifactStore.get(artifactId);
+        if (!existing) {
+          sendJson(res, 404, { error: "ARTIFACT_NOT_FOUND" });
+          return;
+        }
+        try {
+          const updated = artifactStore.updateContent(artifactId, Buffer.from(body.content, "utf-8"));
+          const edit = humanEditStore.record({
+            workspaceId: existing.workspaceId,
+            artifactId,
+            planRunId: existing.planRunId,
+            content: body.content,
+            note: typeof body.note === "string" ? body.note.slice(0, 500) : undefined,
+          });
+          activityStore.append({
+            dedupeKey: `human-edit-received:${edit.id}`,
+            planRunId: existing.planRunId,
+            eventType: "HUMAN_EDIT_RECEIVED",
+            message: `Human edit received for artifact ${artifactId}`,
+            metadata: { artifactId, workspaceId: existing.workspaceId },
+          });
+          sendJson(res, 200, { ok: true, artifact: updated, editId: edit.id });
+        } catch (e) {
+          const err = e as Error;
+          sendJson(res, err.message === "ARTIFACT_NOT_EDITABLE" ? 409 : 400, { error: err.message });
+        }
         return;
       }
 
