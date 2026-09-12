@@ -176,4 +176,22 @@ export const config = {
     smsAlerts: false,
     voiceAlerts: false,
   },
+  /** Brique multi-agents : équipes de profils spécialisés collaborant sur un même objectif. */
+  agentTeams: {
+    enabled: process.env.AGENT_TEAMS_ENABLED !== "false",
+    configPath: process.env.AGENT_PROFILES_PATH || "./config/agent-profiles.json",
+    maxRounds: int(process.env.AGENT_TEAM_MAX_ROUNDS, 4),
+  },
+  /** Brique MCP (Model Context Protocol) : découverte et exécution dynamique d'outils distants. */
+  mcp: {
+    enabled: process.env.MCP_ENABLED === "true",
+    configPath: process.env.MCP_SERVERS_PATH || "./config/mcp-servers.json",
+    connectTimeoutMs: int(process.env.MCP_CONNECT_TIMEOUT_MS, 10_000),
+    requestTimeoutMs: int(process.env.MCP_REQUEST_TIMEOUT_MS, 60_000),
+  },
+  /** Brique auto-réflexion / guardrail : validation critique du résultat par rapport à l'objectif, avec relance automatique. */
+  guardrail: {
+    enabled: process.env.GUARDRAIL_ENABLED === "true",
+    maxRetries: int(process.env.GUARDRAIL_MAX_RETRIES, 1),
+  },
 };

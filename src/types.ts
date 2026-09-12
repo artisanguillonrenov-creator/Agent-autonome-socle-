@@ -106,7 +106,7 @@ export type SkillKind = "SKILL" | "WORKFLOW" | "INTERNAL" | "FUTURE" | "SYSTEM" 
 export type SkillAvailability = "AVAILABLE" | "UNAVAILABLE" | "DISABLED";
 export type SkillExposure = "ALWAYS" | "DYNAMIC" | "NEVER";
 export type SkillRisk = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
-export type SkillExecutionTarget = "LOCAL_HANDLER" | "SERVICE_CAPABILITY" | "WORKFLOW" | "INTERNAL";
+export type SkillExecutionTarget = "LOCAL_HANDLER" | "SERVICE_CAPABILITY" | "WORKFLOW" | "INTERNAL" | "MCP_TOOL";
 export type SkillCategory = "Contrôle" | "Recherche" | "Fichiers" | "Communication" | "Technique" | "Workflows" | "Interne" | "Futur";
 
 export interface SkillContext {
@@ -114,6 +114,8 @@ export interface SkillContext {
   serviceOrchestrator?: any;
   planner?: any;
   skillRegistry?: any;
+  /** Brique multi-agents : coordinateur permettant de déléguer un objectif à une équipe de profils spécialisés. */
+  agentTeamCoordinator?: any;
   /** Native invocation identity; used for side-effect idempotency. */
   toolCallId?: string;
   /**

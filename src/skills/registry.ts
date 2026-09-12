@@ -4,7 +4,7 @@ import type { SkillContext, SkillDefinition } from "../types.js";
 import { SkillPreferenceStore } from "./preferences.js";
 import { tracer } from "../observability/tracer.js";
 
-const kinds=new Set(["SKILL","WORKFLOW","INTERNAL","FUTURE","SYSTEM","LEGACY"]), availability=new Set(["AVAILABLE","UNAVAILABLE","DISABLED"]), exposures=new Set(["ALWAYS","DYNAMIC","NEVER"]), risks=new Set(["LOW","MEDIUM","HIGH","CRITICAL"]), targets=new Set(["LOCAL_HANDLER","SERVICE_CAPABILITY","WORKFLOW","INTERNAL"]);
+const kinds=new Set(["SKILL","WORKFLOW","INTERNAL","FUTURE","SYSTEM","LEGACY"]), availability=new Set(["AVAILABLE","UNAVAILABLE","DISABLED"]), exposures=new Set(["ALWAYS","DYNAMIC","NEVER"]), risks=new Set(["LOW","MEDIUM","HIGH","CRITICAL"]), targets=new Set(["LOCAL_HANDLER","SERVICE_CAPABILITY","WORKFLOW","INTERNAL","MCP_TOOL"]);
 function normalized(skill:SkillDefinition):SkillDefinition {
   const legacy=!skill.id;
   const value:SkillDefinition={id:skill.id??skill.name,displayName:skill.displayName??skill.name,category:skill.category??"Contrôle",kind:skill.kind??"LEGACY",availability:skill.availability??(skill.name==="execute_code"?"DISABLED":"AVAILABLE"),exposure:skill.exposure??(skill.name==="execute_code"||["create_task","list_tasks","complete_task"].includes(skill.name)?"NEVER":"DYNAMIC"),risk:skill.risk??"LOW",executionTarget:skill.executionTarget??"LOCAL_HANDLER",aliases:skill.aliases??[],tags:skill.tags??[],requiresWorkspace:skill.requiresWorkspace??false,requiresConnector:skill.requiresConnector??false,defaultEnabled:skill.defaultEnabled??skill.name!=="execute_code",...skill};
