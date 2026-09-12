@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { LLMProvider, ToolDefinition } from "../llm/provider.js";
 import type { EmbeddingProvider } from "../llm/embeddings.js";
 import { MemoryManager } from "../memory/memoryManager.js";
@@ -136,11 +137,15 @@ export class Agent {
   /**
    * 11A durable calls pass AgentExecutionContext. Legacy direct callers may still pass a
    * workspaceId string; those calls retain the historical in-memory behavior.
+   * `chatRequestId` (optionnel) : identifiant fourni par l'appelant HTTP (ex. www/app.js)
+   * pour corréler de façon fiable les opérations dispatchées pendant CE tour précis, au lieu
+   * d'une heuristique par timestamp qui peut mélanger les opérations de clients concurrents.
    */
-  async step(userInput: string, workspaceOrContext?: string | AgentExecutionContext): Promise<AgentStepResult> {
+  async step(userInput: string, workspaceOrContext?: string | AgentExecutionContext, chatRequestId?: string): Promise<AgentStepResult> {
     const durableContext = typeof workspaceOrContext === "object" ? workspaceOrContext : undefined;
     const workspaceId = durableContext?.workspaceId ?? (typeof workspaceOrContext === "string" ? workspaceOrContext : undefined);
     const conversationId = durableContext?.conversationId ?? LEGACY_CONVERSATION_ID;
+    const turnTraceId = typeof chatRequestId === "string" && chatRequestId.trim() ? chatRequestId.trim() : `chat-${randomUUID()}`;
 
     if (!durableContext) {
       await this.memory.recordTurn({ role: "user", content: userInput }, workspaceId);
@@ -238,11 +243,23 @@ export class Agent {
           lastActionOrStep = `Appel outil natif: ${skillName}`;
           const context = {
             rememberFact: (entity: string, attribute: string, value: string) => this.memory.facts.set(entity, attribute, value),
-            serviceOrchestrator: this.serviceOrchestrator,
+            // Enveloppe légère : ne change que le traceId par défaut d'un dispatch (regroupe
+            // toutes les opérations de ce tour sous turnTraceId pour la corrélation côté
+            // client), sans dupliquer l'état de l'Orchestrator ni son API complète. Les skills
+            // qui ferment sur le ServiceOrchestrator d'origine (src/skills/runtime.ts) ne
+            // passent pas par cette enveloppe : elles lisent `traceId` ci-dessous directement.
+            serviceOrchestrator: {
+              registry: this.serviceOrchestrator.registry,
+              dispatchCapability: (
+                decision: Parameters<ServiceOrchestrator["dispatchCapability"]>[0],
+                opts?: Parameters<ServiceOrchestrator["dispatchCapability"]>[1],
+              ) => this.serviceOrchestrator.dispatchCapability(decision, { traceId: turnTraceId, ...opts }),
+            },
             planner: this.planner,
             skillRegistry: this.skills,
             agentTeamCoordinator: this.multiAgent,
             toolCallId: toolCall.id,
+            traceId: turnTraceId,
           };
           const result = await this.skills.execute(skillName, parsedInput, context);
           const exactPending = this.pendingActionFromToolResult(result);

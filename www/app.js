@@ -108,6 +108,15 @@ function getApiUrl(endpoint) {
   return `${base}${endpoint}`;
 }
 
+// crypto.randomUUID() throws (not just "undefined") on a non-secure origin or an old
+// WebView — the same fallback already used in conversationPersistence.js's newRequestId().
+function newRequestId() {
+  if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+    try { return window.crypto.randomUUID(); } catch (_) { /* fall through */ }
+  }
+  return 'web-' + Date.now() + '-' + Math.random().toString(16).slice(2);
+}
+
 async function fetchApi(endpoint, options = {}) {
   const url = getApiUrl(endpoint);
   const headers = {
@@ -833,7 +842,7 @@ async function pollTimelineOperation(initialOperation, view) {
   }
 }
 
-async function monitorChatOperations(snapshotTaskIds, requestStartedAt, host, control) {
+async function monitorChatOperations(requestId, host, control) {
   const detectedTaskIds = new Set();
   const discover = async () => {
     let operations;
@@ -843,11 +852,10 @@ async function monitorChatOperations(snapshotTaskIds, requestStartedAt, host, co
       return;
     }
     for (const operation of operations) {
-      if (
-        snapshotTaskIds.has(operation.taskId) ||
-        detectedTaskIds.has(operation.taskId) ||
-        Number(operation.createdAt) < requestStartedAt
-      ) continue;
+      // Corrélation par identifiant explicite (traceId = requestId de ce tour), pas par
+      // fenêtre de temps : deux clients concurrents ne partagent jamais de requestId et ne
+      // peuvent donc jamais voir les opérations l'un de l'autre.
+      if (operation.traceId !== requestId || detectedTaskIds.has(operation.taskId)) continue;
       detectedTaskIds.add(operation.taskId);
       const view = createTimelineCard(host, operation);
       void pollTimelineOperation(operation, view);
@@ -929,16 +937,23 @@ function renderChatView() {
     input.value = ''; resizeInput();
     sendButton.disabled = true; sendButton.textContent = 'Envoi…';
 
-    let operationSnapshot = null;
-    try { operationSnapshot = new Set(normalizeOperations(await fetchApi('/api/operations')).map((operation) => operation.taskId)); } catch {}
+    // requestId : identifiant unique de CE tour, généré avant l'envoi et transmis au serveur
+    // (voir Agent.step/httpApi.ts). Corrèle de façon fiable les opérations affichées en
+    // direct pendant la requête, sans dépendre d'une fenêtre de temps qui peut faire
+    // apparaître chez un client les opérations déclenchées par un autre client concurrent.
+    // Envoyé à la fois comme `requestId` (route directe httpApi.ts /api/chat) et
+    // `clientRequestId` (route réellement active en production : l'ingress de conversation
+    // durable — installConversationHttpIngress — intercepte /api/chat avant httpApi.ts et ne
+    // lit que ce second nom de champ).
+    const requestId = newRequestId();
     appendChatMessage('user', text);
     const timelineHost = document.createElement('div'); timelineHost.className = 'chat-timeline-host'; timelineHost.hidden = true; messages.appendChild(timelineHost);
     const pendingEl = appendChatMessage('agent pending', 'Jarvis is thinking...');
     const monitorControl = { chatPending: true };
-    if (operationSnapshot) void monitorChatOperations(operationSnapshot, Date.now(), timelineHost, monitorControl);
+    void monitorChatOperations(requestId, timelineHost, monitorControl);
 
     try {
-      const res = await fetchApi('/api/chat', { method: 'POST', body: JSON.stringify({ message: text }) });
+      const res = await fetchApi('/api/chat', { method: 'POST', body: JSON.stringify({ message: text, requestId, clientRequestId: requestId }) });
       pendingEl?.remove(); appendChatMessage('agent', res.response);
     } catch (err) {
       pendingEl?.remove();

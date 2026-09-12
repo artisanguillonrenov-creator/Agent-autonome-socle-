@@ -11,6 +11,7 @@ const { Agent } = await import("./agent.js");
 const { LocalHashingEmbeddingProvider } = await import("../llm/embeddings.js");
 const { MockProvider } = await import("../llm/providers/mock.js");
 const { builtinSkills } = await import("../skills/builtin/index.js");
+const { dispatchCapabilitySkill } = await import("../skills/builtin/dispatchCapability.js");
 const { selectRecentMessages } = await import("../memory/selectRecentMessages.js");
 const { config } = await import("../config.js");
 
@@ -247,6 +248,12 @@ test("Native Tool Calling : flux natif multi-outils simultanés (TEST B)", async
         if (m.toolCallId) toolCallIdsReceived.push(m.toolCallId);
       });
 
+      // Aucun message role:"user" synthétique ne doit être ajouté après l'exécution
+      // des tools natifs : seul le message utilisateur d'origine doit être présent.
+      const userMsgs = messages.filter((m) => m.role === "user");
+      assert.equal(userMsgs.length, 1);
+      assert.equal(userMsgs[0].content, "Donne-moi l'heure et mes tâches");
+
       return {
         content: "Voici l'heure actuelle et vous n'avez aucune tâche en attente.",
       };
@@ -260,9 +267,136 @@ test("Native Tool Calling : flux natif multi-outils simultanés (TEST B)", async
 
   assert.equal(calls, 2);
   assert.equal(result.iterations, 2);
-  assert.ok(toolCallIdsReceived.includes("call_time_101"));
-  assert.ok(toolCallIdsReceived.includes("call_tasks_102"));
+  assert.equal(toolCallIdsReceived.length, 2);
+  assert.deepEqual(toolCallIdsReceived, ["call_time_101", "call_tasks_102"]);
   assert.match(result.response, /heure/i);
+});
+
+test("dispatch_capability : deux tours concurrents (deux clients) ne mélangent jamais leurs opérations (corrélation par requestId, pas par timestamp)", async () => {
+  const { ServiceOrchestrator } = await import("../orchestration/serviceOrchestrator.js");
+  const { ServiceRegistry } = await import("../orchestration/serviceRegistry.js");
+  const { OperationStore } = await import("../orchestration/operationStore.js");
+
+  const registry = new ServiceRegistry("/does-not-exist");
+  registry.register({
+    id: "test_service", name: "test", enabled: true, transport: "local", endpoint: "local",
+    capabilities: ["cap"], priority: 1, riskByCapability: { cap: "LOW" },
+  });
+  const adapter = {
+    dispatchTask: async (_endpoint: string, request: { task_id: string; trace_id: string }) => ({
+      success: true as const,
+      events: [{
+        schema_version: "1.0", event_id: `${request.task_id}-1`, task_id: request.task_id,
+        trace_id: request.trace_id, service: "test_service", sequence: 1,
+        type: "TASK_COMPLETED" as const, timestamp: Date.now(), payload: { summary: "ok" },
+      }],
+      transportDurationMs: 1,
+    }),
+  } as any;
+  const store = new OperationStore();
+  const orchestrator = new ServiceOrchestrator({ registry, adapter, store });
+
+  const dispatchProvider = (): LLMProvider => {
+    let calls = 0;
+    return {
+      name: "dispatch_mock",
+      supportsNativeTools() { return true; },
+      async complete() {
+        calls += 1;
+        if (calls === 1) {
+          return {
+            content: null,
+            toolCalls: [{ id: "call_dispatch", type: "function", function: { name: "dispatch_capability", arguments: JSON.stringify({ capability: "cap", objective: "test" }) } }],
+          };
+        }
+        return { content: "fait." };
+      },
+    };
+  };
+
+  const agentA = new Agent({ llm: dispatchProvider(), embeddings: new LocalHashingEmbeddingProvider(), orchestrator });
+  const agentB = new Agent({ llm: dispatchProvider(), embeddings: new LocalHashingEmbeddingProvider(), orchestrator });
+  // exposure: "ALWAYS" pour ne pas dépendre de la sélection sémantique (embedding hashé
+  // local, non déterministe par rapport au texte de mission) : on veut ici tester la
+  // corrélation par requestId, pas le sélecteur de compétences.
+  for (const agent of [agentA, agentB]) {
+    for (const skill of builtinSkills) agent.skills.register(skill);
+    agent.skills.register({ ...dispatchCapabilitySkill, exposure: "ALWAYS" });
+  }
+
+  await Promise.all([
+    agentA.step("mission A", undefined, "req-client-A"),
+    agentB.step("mission B", undefined, "req-client-B"),
+  ]);
+
+  // Chaque client ne voit, en filtrant par son propre requestId, que sa propre opération —
+  // jamais celle de l'autre client concurrent.
+  const allOps = store.listOperations();
+  const opsForA = allOps.filter((op) => op.traceId === "req-client-A");
+  const opsForB = allOps.filter((op) => op.traceId === "req-client-B");
+  assert.equal(allOps.length, 2);
+  assert.equal(opsForA.length, 1);
+  assert.equal(opsForB.length, 1);
+  assert.notEqual(opsForA[0].taskId, opsForB[0].taskId);
+});
+
+test("software_development (skill runtime issue de createRuntimeSkills) hérite aussi du traceId du tour, pas seulement les skills passant par ctx.serviceOrchestrator", async () => {
+  // Revue Codex sur la PR #72 : createRuntimeSkills ferme sur le ServiceOrchestrator d'origine
+  // (pas sur ctx.serviceOrchestrator), donc software_development/deep_research/file_management
+  // contournaient l'enveloppe de traceId ajoutée dans Agent.step et retombaient sur un traceId
+  // auto-généré, invisible pour le filtre exact de www/app.js.
+  const { ServiceOrchestrator } = await import("../orchestration/serviceOrchestrator.js");
+  const { ServiceRegistry } = await import("../orchestration/serviceRegistry.js");
+  const { OperationStore } = await import("../orchestration/operationStore.js");
+
+  const registry = new ServiceRegistry("/does-not-exist");
+  registry.register({
+    id: "test_dev_service", name: "test dev", enabled: true, transport: "local", endpoint: "local",
+    capabilities: ["software_development"], priority: 1, riskByCapability: { software_development: "LOW" },
+  });
+  const adapter = {
+    dispatchTask: async (_endpoint: string, request: { task_id: string; trace_id: string }) => ({
+      success: true as const,
+      events: [{
+        schema_version: "1.0", event_id: `${request.task_id}-1`, task_id: request.task_id,
+        trace_id: request.trace_id, service: "test_dev_service", sequence: 1,
+        type: "TASK_COMPLETED" as const, timestamp: Date.now(), payload: { summary: "ok" },
+      }],
+      transportDurationMs: 1,
+    }),
+  } as any;
+  const store = new OperationStore();
+  const orchestrator = new ServiceOrchestrator({ registry, adapter, store });
+
+  let calls = 0;
+  const provider: LLMProvider = {
+    name: "software_dev_mock",
+    supportsNativeTools() { return true; },
+    async complete() {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          content: null,
+          toolCalls: [{
+            id: "call_dev", type: "function",
+            function: { name: "software_development", arguments: JSON.stringify({ objective: "ajoute un test", filePath: "src/x.ts" }) },
+          }],
+        };
+      }
+      return { content: "fait." };
+    },
+  };
+
+  const agent = new Agent({ llm: provider, embeddings: new LocalHashingEmbeddingProvider(), orchestrator });
+  // Skill runtime déjà enregistrée par le constructeur ; forcée ALWAYS pour ne pas dépendre
+  // du sélecteur sémantique (embedding hashé local) dans ce test.
+  agent.skills.get("software_development")!.exposure = "ALWAYS";
+
+  await agent.step("construis un truc", undefined, "req-turn-dev-1");
+
+  const ops = store.listOperations().filter((op) => op.capability === "software_development");
+  assert.equal(ops.length, 1);
+  assert.equal(ops[0].traceId, "req-turn-dev-1");
 });
 
 test("Native Tool Calling : gestion d'arguments JSON invalides (TEST F)", async () => {
