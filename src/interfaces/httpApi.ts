@@ -469,14 +469,23 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
 
       // 2. Chat & Streaming Chat Endpoints
       if (req.method === "POST" && (pathname === "/chat" || pathname === "/api/chat")) {
-        const body = JSON.parse((await readBody(req)) || "{}") as { message?: string; workspaceId?: string };
+        const body = JSON.parse((await readBody(req)) || "{}") as { message?: string; workspaceId?: string; requestId?: string };
         const message = (body.message ?? "").trim();
         if (!message) {
           sendJson(res, 400, { error: "message requis" });
           return;
         }
-        const result = await agent.step(message, typeof body.workspaceId === "string" && body.workspaceId.trim() ? body.workspaceId.trim() : undefined);
-        sendJson(res, 200, result);
+        // requestId (optionnel, généré côté client avant l'envoi) : sert à corréler de façon
+        // fiable, côté UI, les opérations dispatchées par CE tour précis (voir Agent.step),
+        // plutôt qu'une heuristique par timestamp qui peut mélanger les opérations de
+        // plusieurs clients concurrents.
+        const requestId = typeof body.requestId === "string" && body.requestId.trim() ? body.requestId.trim().slice(0, 200) : undefined;
+        const result = await agent.step(
+          message,
+          typeof body.workspaceId === "string" && body.workspaceId.trim() ? body.workspaceId.trim() : undefined,
+          requestId,
+        );
+        sendJson(res, 200, { ...result, requestId });
         return;
       }
 

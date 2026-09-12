@@ -833,7 +833,7 @@ async function pollTimelineOperation(initialOperation, view) {
   }
 }
 
-async function monitorChatOperations(snapshotTaskIds, requestStartedAt, host, control) {
+async function monitorChatOperations(requestId, host, control) {
   const detectedTaskIds = new Set();
   const discover = async () => {
     let operations;
@@ -843,11 +843,10 @@ async function monitorChatOperations(snapshotTaskIds, requestStartedAt, host, co
       return;
     }
     for (const operation of operations) {
-      if (
-        snapshotTaskIds.has(operation.taskId) ||
-        detectedTaskIds.has(operation.taskId) ||
-        Number(operation.createdAt) < requestStartedAt
-      ) continue;
+      // Corrélation par identifiant explicite (traceId = requestId de ce tour), pas par
+      // fenêtre de temps : deux clients concurrents ne partagent jamais de requestId et ne
+      // peuvent donc jamais voir les opérations l'un de l'autre.
+      if (operation.traceId !== requestId || detectedTaskIds.has(operation.taskId)) continue;
       detectedTaskIds.add(operation.taskId);
       const view = createTimelineCard(host, operation);
       void pollTimelineOperation(operation, view);
@@ -929,16 +928,19 @@ function renderChatView() {
     input.value = ''; resizeInput();
     sendButton.disabled = true; sendButton.textContent = 'Envoi…';
 
-    let operationSnapshot = null;
-    try { operationSnapshot = new Set(normalizeOperations(await fetchApi('/api/operations')).map((operation) => operation.taskId)); } catch {}
+    // requestId : identifiant unique de CE tour, généré avant l'envoi et transmis au serveur
+    // (voir Agent.step/httpApi.ts). Corrèle de façon fiable les opérations affichées en
+    // direct pendant la requête, sans dépendre d'une fenêtre de temps qui peut faire
+    // apparaître chez un client les opérations déclenchées par un autre client concurrent.
+    const requestId = crypto.randomUUID();
     appendChatMessage('user', text);
     const timelineHost = document.createElement('div'); timelineHost.className = 'chat-timeline-host'; timelineHost.hidden = true; messages.appendChild(timelineHost);
     const pendingEl = appendChatMessage('agent pending', 'Jarvis is thinking...');
     const monitorControl = { chatPending: true };
-    if (operationSnapshot) void monitorChatOperations(operationSnapshot, Date.now(), timelineHost, monitorControl);
+    void monitorChatOperations(requestId, timelineHost, monitorControl);
 
     try {
-      const res = await fetchApi('/api/chat', { method: 'POST', body: JSON.stringify({ message: text }) });
+      const res = await fetchApi('/api/chat', { method: 'POST', body: JSON.stringify({ message: text, requestId }) });
       pendingEl?.remove(); appendChatMessage('agent', res.response);
     } catch (err) {
       pendingEl?.remove();
