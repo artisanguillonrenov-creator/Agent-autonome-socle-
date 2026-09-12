@@ -607,16 +607,14 @@ function serviceEventToTimelineEntry(event) {
 
   switch (event && event.type) {
     case 'TASK_ACCEPTED':
-      label = '🧠 Planification de la tâche…';
+      label = 'Tâche acceptée';
       break;
-    case 'TASK_PROGRESS': {
-      const stageLabel = SERVICE_STAGE_LABELS[payload.stage] || (payload.message != null ? String(payload.message) : 'Progression');
-      label = `⚙️ ${stageLabel}`;
+    case 'TASK_PROGRESS':
+      label = SERVICE_STAGE_LABELS[payload.stage] || (payload.message != null ? String(payload.message) : 'Progression');
       if (ACTIVE_SERVICE_STAGES.has(payload.stage) || (payload.stage == null && payload.message != null)) {
         state = 'active-candidate';
       }
       break;
-    }
     case 'NEEDS_INPUT':
       label = 'Information utilisateur requise';
       state = 'active';
