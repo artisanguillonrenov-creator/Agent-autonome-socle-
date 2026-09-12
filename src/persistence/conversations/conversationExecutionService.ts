@@ -152,7 +152,11 @@ export class ConversationExecutionService {
           );
           await this.agent.memory.addStoredMessage(storedUser, context.workspaceId);
 
-          const result = await this.agent.step(normalizedDto.payload.message, context);
+          // clientRequestId sert de traceId de corrélation (voir Agent.step / B.2 des
+          // directives de correction) : sans lui, les opérations dispatchées pendant ce tour
+          // héritaient d'un traceId auto-généré que la timeline live de www/app.js ne peut
+          // jamais retrouver, puisque le client ne le connaît qu'après la fin du tour.
+          const result = await this.agent.step(normalizedDto.payload.message, context, normalizedDto.clientRequestId ?? undefined);
           const completedPayload: CompletedTurnPayload = {
             response: result.response,
             iterations: result.iterations,

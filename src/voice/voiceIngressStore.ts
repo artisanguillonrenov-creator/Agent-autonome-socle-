@@ -121,10 +121,16 @@ export class VoiceIngressStore {
     `).run(Date.now()).changes;
   }
 
+  /**
+   * Purge les lignes DONE, et RECOVERY_REQUIRED restées sans suite au-delà de `ttlMs`
+   * (B.5, directives de correction) — jamais RUNNING, qui reste une requête active en vol.
+   * Sans ça, une commande vocale qui échoue sans jamais être rejouée par le client restait
+   * indéfiniment en base : croissance non bornée de la table au fil des crashs/redémarrages.
+   */
   cleanupDone(ttlMs: number, now = Date.now()): number {
     if (!Number.isFinite(ttlMs) || ttlMs <= 0) return 0;
     const cutoff = now - ttlMs;
-    return getDb().prepare(`DELETE FROM agent_ingress_requests WHERE state='DONE' AND updated_at < ?`).run(cutoff).changes;
+    return getDb().prepare(`DELETE FROM agent_ingress_requests WHERE state IN ('DONE','RECOVERY_REQUIRED') AND updated_at < ?`).run(cutoff).changes;
   }
 
   parseStoredResponse(record: VoiceIngressRecord): unknown | undefined {

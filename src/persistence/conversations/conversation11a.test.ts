@@ -210,6 +210,42 @@ test("11A Service: régénère une cible durable sortie de la fenêtre mémoire 
   db.close();
 });
 
+test("11A Service: clientRequestId est propagé comme 3e argument d'Agent.step (traceId de corrélation, revue Codex sur la PR #72)", async () => {
+  // Sans ce fil, l'ingress HTTP durable (installConversationHttpIngress, la route réellement
+  // active en production pour /api/chat) appelait agent.step(message, context) à 2 arguments :
+  // le requestId envoyé par www/app.js n'atteignait jamais Agent.step, et les opérations
+  // dispatchées héritaient d'un traceId auto-généré invisible pour le filtre exact côté client.
+  const { db, repo } = repository();
+  await repo.initialize();
+  const conversationId = randomUUID();
+  await repo.initializeSession(conversationId, null);
+
+  const memory = new MemoryManager(new LocalHashingEmbeddingProvider(), repo, 3, 10);
+  let receivedChatRequestId: string | undefined;
+  const fakeAgent = {
+    memory,
+    async step(_message: string, _context: unknown, chatRequestId?: string) {
+      receivedChatRequestId = chatRequestId;
+      return { response: "ok", iterations: 1 };
+    },
+    async reflectAfterDurableTurn() { return null; },
+    applyCheckpointRuntimeState() { return true; },
+  } as unknown as Agent;
+  const service = new ConversationExecutionService(repo, new ConversationCoordinator(), fakeAgent);
+
+  const clientRequestId = randomUUID();
+  const result = await service.handleTurn({
+    requestKind: "MESSAGE",
+    conversationId,
+    clientRequestId,
+    payload: { message: "bonjour" },
+  });
+
+  assert.equal(result.result, "NEW");
+  assert.equal(receivedChatRequestId, clientRequestId);
+  db.close();
+});
+
 test("11A SQLite: pagination beforeSequence est stable", async () => {
   const { db, repo } = repository();
   await repo.initialize();

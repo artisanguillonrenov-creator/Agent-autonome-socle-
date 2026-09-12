@@ -74,7 +74,7 @@ test("QueuedAgent serializes concurrent interactive steps around the single Agen
   }
 });
 
-test("VoiceIngressStore hashes workspace and never purges unsafe states", () => {
+test("VoiceIngressStore hashes workspace and never purges RUNNING (une requête active en vol)", () => {
   const store = new VoiceIngressStore();
   const doneId = randomUUID();
   const runningId = randomUUID();
@@ -90,10 +90,35 @@ test("VoiceIngressStore hashes workspace and never purges unsafe states", () => 
   store.markRecoveryRequired(recoveryId, "crash");
 
   const deleted = store.cleanupDone(1, Date.now() + 10_000);
-  assert.ok(deleted >= 1);
+  assert.ok(deleted >= 2);
   assert.equal(store.get(doneId), null);
   assert.equal(store.get(runningId)?.state, "RUNNING");
+  // B.5 (directives de correction) : RECOVERY_REQUIRED n'est plus protégé indéfiniment —
+  // au-delà du TTL, il est purgé comme DONE, pour éviter une croissance non bornée de la
+  // table quand une commande vocale échoue sans jamais être rejouée par le client.
+  assert.equal(store.get(recoveryId), null);
+});
+
+test("VoiceIngressStore ne purge RECOVERY_REQUIRED (ni DONE) qu'après le délai TTL, pas avant", () => {
+  const store = new VoiceIngressStore();
+  const recoveryId = randomUUID();
+  const doneId = randomUUID();
+  const hash = hashVoiceRequest("commande", "ws-a");
+
+  assert.equal(store.begin(recoveryId, hash, "ws-a").kind, "NEW");
+  store.markRecoveryRequired(recoveryId, "crash");
+  assert.equal(store.begin(doneId, `${hash}-done`, "ws-a").kind, "NEW");
+  store.complete(doneId, { response: "ok" });
+
+  const deletedTooEarly = store.cleanupDone(3_600_000, Date.now());
+  assert.equal(deletedTooEarly, 0);
   assert.equal(store.get(recoveryId)?.state, "RECOVERY_REQUIRED");
+  assert.equal(store.get(doneId)?.state, "DONE");
+
+  const deletedAfterTtl = store.cleanupDone(1, Date.now() + 10_000);
+  assert.equal(deletedAfterTtl, 2);
+  assert.equal(store.get(recoveryId), null);
+  assert.equal(store.get(doneId), null);
 });
 
 test("Voice ingress is idempotent: DONE replay, RUNNING 202, payload mismatch 409 and recovery block", async () => {

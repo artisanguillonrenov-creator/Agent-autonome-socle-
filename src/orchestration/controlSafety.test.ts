@@ -116,6 +116,21 @@ test("les attentes émises par un service ne sont pas des approbations pre-dispa
   }
 });
 
+test("un service qui répond NEEDS_INPUT/NEEDS_PERMISSION en tout premier événement (avant RUNNING) est accepté", () => {
+  const store = new OperationStore();
+  for (const [id, type, expectedStatus] of [
+    ["dispatching-input", "NEEDS_INPUT", "WAITING_INPUT"],
+    ["dispatching-permission", "NEEDS_PERMISSION", "WAITING_PERMISSION"],
+  ] as const) {
+    store.createOperation({ taskId: id, traceId: id, idempotencyKey: id, objective: id, capability: "c", selectedService: "s", status: "DISPATCHING" });
+    const result = store.processEvent({ schema_version: "1.0", event_id: `e-${id}`, task_id: id, trace_id: id, service: "s",
+      sequence: 1, type, timestamp: 1, payload: {} });
+    assert.equal(result.applied, true);
+    assert.equal(result.duplicate, false);
+    assert.equal(store.getOperation(id)?.status, expectedStatus);
+  }
+});
+
 test("migration additive de service_operations conserve les lignes et ajoute les contrôles", () => {
   const columns = getDb().pragma("table_info(service_operations)") as Array<{ name: string }>;
   for (const name of ["risk_level", "approval_state", "approval_reason", "approval_requested_at", "approval_decided_at", "pending_request_json"])
