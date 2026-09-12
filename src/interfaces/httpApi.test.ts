@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { Agent } from "../core/agent.js";
 import { MockProvider } from "../llm/providers/mock.js";
 import { LocalHashingEmbeddingProvider } from "../llm/embeddings.js";
-import { startHttpApi } from "./httpApi.js";
+import { startHttpApi, assertApiTokenConfiguredForHttp } from "./httpApi.js";
 import { loadLLMConfig } from "../persistence/llmConfigStore.js";
 import { getDb } from "../persistence/db.js";
 import { config } from "../config.js";
@@ -840,5 +840,38 @@ test("Infermatic : base URL par défaut, catalogue dynamique, jamais de faux rep
     config.llm.infermaticBaseUrl = previousInfermaticBaseUrl;
     config.llm.provider = previousProvider;
     config.llm.model = previousModel;
+  }
+});
+
+test("assertApiTokenConfiguredForHttp (B.3) : refuse de démarrer sans API_TOKEN sur un déploiement hébergé (PORT défini)", () => {
+  const previousToken = config.api.token;
+  const previousPort = process.env.PORT;
+  try {
+    config.api.token = "";
+    process.env.PORT = "10000";
+    assert.throws(() => assertApiTokenConfiguredForHttp(new Set(["http"])), /API_TOKEN_REQUIRED/);
+    assert.throws(() => assertApiTokenConfiguredForHttp(["http"]), /API_TOKEN_REQUIRED/);
+  } finally {
+    config.api.token = previousToken;
+    if (previousPort === undefined) delete process.env.PORT; else process.env.PORT = previousPort;
+  }
+});
+
+test("assertApiTokenConfiguredForHttp (B.3) : ne bloque pas en local (PORT non défini) ni sans mode http, et n'exige rien si API_TOKEN est configuré", () => {
+  const previousToken = config.api.token;
+  const previousPort = process.env.PORT;
+  try {
+    config.api.token = "";
+    delete process.env.PORT;
+    assert.doesNotThrow(() => assertApiTokenConfiguredForHttp(new Set(["http"])));
+    assert.doesNotThrow(() => assertApiTokenConfiguredForHttp(new Set(["cli"])));
+
+    process.env.PORT = "10000";
+    assert.doesNotThrow(() => assertApiTokenConfiguredForHttp(new Set(["cli"])));
+    config.api.token = "configured-token";
+    assert.doesNotThrow(() => assertApiTokenConfiguredForHttp(new Set(["http"])));
+  } finally {
+    config.api.token = previousToken;
+    if (previousPort === undefined) delete process.env.PORT; else process.env.PORT = previousPort;
   }
 });

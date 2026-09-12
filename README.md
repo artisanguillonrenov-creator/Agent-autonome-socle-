@@ -89,7 +89,10 @@ utile pour discuter avec l'agent depuis un navigateur sans passer par la CLI.
 3. Build command : `npm install && npm run build`
 4. Start command : `npm start`
 5. Variables d'environnement (Environment) : au minimum `LLM_PROVIDER`, la clé du
-   fournisseur choisi, `LLM_MODEL`, et `AGENT_INTERFACE=http`
+   fournisseur choisi, `LLM_MODEL`, `AGENT_INTERFACE=http`, et **`API_TOKEN`**
+   (obligatoire dès que `AGENT_INTERFACE` inclut `http` sur un hébergement comme
+   Render — le serveur refuse de démarrer sans lui plutôt que d'exposer une API non
+   protégée ; toute requête doit alors envoyer `Authorization: Bearer <API_TOKEN>`)
 6. Déployer — l'URL publique (`https://....onrender.com`) sert la page de chat
 
 Limites du tier gratuit à connaître : le service peut se mettre en veille après

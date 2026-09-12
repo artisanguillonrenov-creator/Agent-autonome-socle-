@@ -2,7 +2,7 @@ import { createLLMProvider, resolveLLMSelection } from "./llm/providers/index.js
 import { createEmbeddingProvider } from "./llm/embeddingFactory.js";
 import { QueuedAgent } from "./core/queuedAgent.js";
 import { runCli } from "./interfaces/cli.js";
-import { startHttpApi } from "./interfaces/httpApi.js";
+import { startHttpApi, assertApiTokenConfiguredForHttp } from "./interfaces/httpApi.js";
 import { installConversationHttpIngress } from "./interfaces/conversationHttpIngress.js";
 import { installConversationWebUiIngress } from "./interfaces/conversationWebUiIngress.js";
 import { config } from "./config.js";
@@ -74,6 +74,7 @@ async function main(): Promise<void> {
   const modes = new Set(config.interface.modes);
 
   if (modes.has("http")) {
+    assertApiTokenConfiguredForHttp(modes);
     const backgroundRunner = new BackgroundRunner(agent.serviceOrchestrator);
     const scheduler = new Scheduler(agent.serviceOrchestrator);
     backgroundRunner.start();
