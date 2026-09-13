@@ -16,7 +16,7 @@ export class CommercialOfficeService {
     private readonly store = new CommercialOfficeStore(),
     private readonly emailProvider: EmailProvider = createEmailProvider(),
     private readonly notifications = new NotificationStore(),
-    private readonly llm: (role?: ModelRole) => LLMProvider = officeLlm,
+    private readonly llm: (role?: ModelRole) => LLMProvider = (role) => officeLlm("commercial_office", role),
   ) {}
 
   async handleTaskRequest(r: TaskRequest): Promise<ServiceEvent[]> {

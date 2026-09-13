@@ -27,6 +27,7 @@ import { getDb } from "../persistence/db.js";
 import type { ChatMessage } from "../types.js";
 import type { LLMProvider, ToolDefinition } from "../llm/provider.js";
 import { AgentTeamStore } from "../agents/agentTeamStore.js";
+import { BUREAU_SERVICE_IDS, getBureauLlmConfig, setBureauLlmConfig, type BureauServiceId } from "../orchestration/serviceRegistry.js";
 
 const taskStore = new TaskStore();
 const notificationStore = new NotificationStore();
@@ -927,6 +928,60 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
           ok: true,
           settings: settingsStore.getAllEffectiveSettings(scopeType, scopeId),
         });
+        return;
+      }
+
+      // Bureaux métier (Product/Creative/Commercial/Marketing Studio) : provider/modèle LLM
+      // dédié par bureau, stocké directement dans config/services.json. Absent = le bureau
+      // retombe sur le provider/modèle global actif de Jarvis (voir bureauContract.officeLlm) —
+      // ces bureaux partagent toujours les mêmes clés d'API/connecteurs globales, seul le
+      // choix du provider/modèle change.
+      if (req.method === "GET" && pathname === "/api/settings/services") {
+        const servicesConfigPath = join(process.cwd(), "config/services.json");
+        let services: unknown = [];
+        try {
+          services = existsSync(servicesConfigPath) ? JSON.parse(readFileSync(servicesConfigPath, "utf8")) : [];
+        } catch (e) {
+          sendJson(res, 500, { error: `SERVICES_CONFIG_UNREADABLE: ${(e as Error).message}` });
+          return;
+        }
+        sendJson(res, 200, {
+          services,
+          bureauLlm: Object.fromEntries(BUREAU_SERVICE_IDS.map((id) => [id, getBureauLlmConfig(id)])),
+        });
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/settings/services") {
+        let body: any;
+        try {
+          body = JSON.parse((await readBody(req)) || "{}");
+        } catch {
+          sendJson(res, 400, { error: "JSON invalide" });
+          return;
+        }
+
+        const overrides = body?.overrides && typeof body.overrides === "object" ? body.overrides : body;
+        if (!overrides || typeof overrides !== "object" || Array.isArray(overrides)) {
+          sendJson(res, 400, { error: "overrides requis : { [bureauId]: { provider?, model? } }" });
+          return;
+        }
+
+        const bureauLlm: Record<string, { provider?: LLMProviderName; model?: string }> = {};
+        try {
+          for (const [id, patch] of Object.entries(overrides)) {
+            if (!(BUREAU_SERVICE_IDS as readonly string[]).includes(id)) {
+              throw new Error(`UNKNOWN_BUREAU_SERVICE: ${id}`);
+            }
+            const p = (patch ?? {}) as { provider?: string | null; model?: string | null };
+            bureauLlm[id] = setBureauLlmConfig(id as BureauServiceId, { provider: p.provider, model: p.model });
+          }
+        } catch (e) {
+          sendJson(res, 400, { error: (e as Error).message });
+          return;
+        }
+
+        sendJson(res, 200, { ok: true, bureauLlm });
         return;
       }
 

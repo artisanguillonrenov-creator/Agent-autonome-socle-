@@ -1,9 +1,9 @@
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { RiskLevel } from "./contract.js";
 import { ConnectionStore, hasConfigOverride } from "../connections/store.js";
 import { canonicalSkillCatalog } from "../skills/catalog.js";
-import { config } from "../config.js";
+import { config, type LLMProviderName } from "../config.js";
 
 export type ServiceTransport = "local" | "task_http";
 export type ServiceAuth = { type: "none" } | { type: "bearer_env"; envVar: string };
@@ -28,10 +28,23 @@ export interface ServiceDefinition {
   requestTimeoutMs?: number;
   healthTimeoutMs?: number;
   source?: "FACTORY" | "DATABASE" | "ENVIRONMENT";
+  /**
+   * Bureaux métier (product_studio/creative_studio/commercial_office/marketing_office) :
+   * fournisseur/modèle LLM dédiés à ce service, stockés directement dans config/services.json.
+   * Absents = le bureau retombe sur le provider/modèle global actif de Jarvis (config.llm.*),
+   * qui partage déjà les mêmes clés d'API/connecteurs globales — voir bureauContract.officeLlm.
+   */
+  provider?: LLMProviderName;
+  model?: string;
 }
 
 const risks = new Set(["LOW", "MEDIUM", "HIGH", "CRITICAL"]);
 const permissions = new Set(["READ", "WRITE", "DELETE", "EXECUTE", "SEND", "PURCHASE", "COMPUTER_CONTROL"]);
+const llmProviderNames = new Set<string>(["anthropic", "openai", "openrouter", "ollama", "infermatic", "mock"]);
+
+/** Les seuls services pour lesquels un provider/modèle LLM par bureau a du sens (Chantier "Bureaux métier"). */
+export const BUREAU_SERVICE_IDS = ["product_studio", "creative_studio", "commercial_office", "marketing_office"] as const;
+export type BureauServiceId = (typeof BUREAU_SERVICE_IDS)[number];
 
 export function riskForCapability(s: ServiceDefinition, c: string): RiskLevel | null {
   const r = s.riskByCapability?.[c] ?? "LOW";
@@ -164,6 +177,13 @@ export function validateServiceDefinition(
     throw new Error("invalid healthTimeoutMs");
   }
 
+  if (r.provider !== undefined && (typeof r.provider !== "string" || !llmProviderNames.has(r.provider))) {
+    throw new Error("invalid provider");
+  }
+  if (r.model !== undefined && (typeof r.model !== "string" || !r.model.trim())) {
+    throw new Error("invalid model");
+  }
+
   return {
     ...r,
     id: r.id.trim(),
@@ -198,6 +218,75 @@ export function resolveServiceEndpoint(s: ServiceDefinition): ServiceDefinition 
   const transport = s.id === "software_factory" ? (isLocalMarker ? "local" : "task_http") : s.transport;
 
   return { ...s, endpoint, transport, source };
+}
+
+const defaultServicesConfigPath = () => join(process.cwd(), "config/services.json");
+
+function readServicesConfigRaw(path: string): Record<string, unknown>[] {
+  if (!existsSync(path)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export interface BureauLlmConfig {
+  provider?: LLMProviderName;
+  model?: string;
+}
+
+/**
+ * Lit à la volée (jamais mis en cache) le provider/modèle LLM configuré pour un bureau
+ * métier dans config/services.json. Absents = le bureau doit retomber sur le provider/modèle
+ * global actif de Jarvis — voir bureauContract.officeLlm, seul appelant prévu.
+ */
+export function getBureauLlmConfig(id: BureauServiceId, path: string = defaultServicesConfigPath()): BureauLlmConfig {
+  const raw = readServicesConfigRaw(path).find((s) => s && s.id === id);
+  if (!raw) return {};
+  const result: BureauLlmConfig = {};
+  if (typeof raw.provider === "string" && llmProviderNames.has(raw.provider)) result.provider = raw.provider as LLMProviderName;
+  if (typeof raw.model === "string" && raw.model.trim()) result.model = raw.model.trim();
+  return result;
+}
+
+/**
+ * Met à jour (ou efface, avec `null`/chaîne vide) le provider/modèle LLM d'un bureau métier
+ * directement dans config/services.json, en ne touchant à rien d'autre dans le fichier.
+ * Utilisé par POST /api/settings/services.
+ */
+export function setBureauLlmConfig(
+  id: BureauServiceId,
+  patch: { provider?: string | null; model?: string | null },
+  path: string = defaultServicesConfigPath(),
+): BureauLlmConfig {
+  if (!(BUREAU_SERVICE_IDS as readonly string[]).includes(id)) {
+    throw new Error(`UNKNOWN_BUREAU_SERVICE: ${id}`);
+  }
+  if (patch.provider !== undefined && patch.provider !== null && patch.provider !== "" && !llmProviderNames.has(patch.provider)) {
+    throw new Error(`INVALID_LLM_PROVIDER: ${patch.provider}`);
+  }
+  if (patch.model !== undefined && patch.model !== null && patch.model.trim() === "" && patch.model !== "") {
+    throw new Error("INVALID_LLM_MODEL");
+  }
+
+  const list = readServicesConfigRaw(path);
+  const entry = list.find((s) => s && s.id === id);
+  if (!entry) throw new Error(`SERVICE_NOT_FOUND: ${id}`);
+
+  if (patch.provider !== undefined) {
+    if (!patch.provider) delete entry.provider;
+    else entry.provider = patch.provider;
+  }
+  if (patch.model !== undefined) {
+    const trimmed = patch.model?.trim();
+    if (!trimmed) delete entry.model;
+    else entry.model = trimmed;
+  }
+
+  writeFileSync(path, `${JSON.stringify(list, null, 2)}\n`, "utf8");
+  return getBureauLlmConfig(id, path);
 }
 
 export class ServiceRegistry {

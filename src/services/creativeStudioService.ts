@@ -30,7 +30,7 @@ function identitySummary(identity: VisualIdentity): string {
 export class CreativeStudioService {
   constructor(
     private readonly store = new CreativeStudioStore(),
-    private readonly llm: (role?: ModelRole) => LLMProvider = officeLlm,
+    private readonly llm: (role?: ModelRole) => LLMProvider = (role) => officeLlm("creative_studio", role),
   ) {}
 
   async handleTaskRequest(r: TaskRequest): Promise<ServiceEvent[]> {

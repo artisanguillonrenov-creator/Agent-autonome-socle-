@@ -4,8 +4,9 @@ import { config } from "../config.js";
 import { createLLMProvider } from "../llm/providers/index.js";
 import { resolveModelForRole, type ModelRole } from "../llm/modelRouter.js";
 import type { LLMProvider } from "../llm/provider.js";
+import { getBureauLlmConfig, type BureauServiceId } from "../orchestration/serviceRegistry.js";
 
-export type BureauId = "product_studio" | "creative_studio" | "commercial_office" | "marketing_office";
+export type BureauId = BureauServiceId;
 
 /**
  * Sortie structurée commune aux quatre bureaux : machine-exploitable (Jarvis peut
@@ -95,15 +96,21 @@ export function failedEvent(r: TaskRequest, service: string, error: string, repl
 }
 
 /**
- * Modèle spécialisé (Chantier 8, intelligence.researchModel/utilityModel/codingModel)
- * si configuré pour `role`, sinon le modèle principal Jarvis actif — construit à chaque
- * appel (jamais mis en cache) pour refléter un changement de modèle/provider fait depuis
- * le panneau Modèles IA sans nécessiter de reconstruire le bureau. Jamais d'échec faute
- * de modèle spécialisé configuré.
+ * Résout le provider/modèle LLM d'un bureau métier (product_studio/creative_studio/
+ * commercial_office/marketing_office) : priorité au provider/modèle propre au bureau si
+ * configuré dans config/services.json (réglages "Bureaux métier"), sinon modèle spécialisé
+ * Chantier 8 (intelligence.researchModel/utilityModel/codingModel) si configuré pour `role`,
+ * sinon le provider/modèle principal Jarvis actif. Construit à chaque appel (jamais mis en
+ * cache) pour refléter tout changement fait depuis les panneaux Réglages sans reconstruire
+ * le bureau. Utilise toujours les clés d'API globales déjà chargées (config.llm.*) — un
+ * bureau ne change jamais de connecteur/infrastructure, seulement de provider/modèle.
+ * Jamais d'échec faute de modèle spécialisé ou de bureau configuré.
  */
-export function officeLlm(role?: ModelRole): LLMProvider {
-  const model = (role ? resolveModelForRole(role) : undefined) ?? config.llm.model;
-  return createLLMProvider({ provider: config.llm.provider, model, sanitizeReasoning: true });
+export function officeLlm(office: BureauId, role?: ModelRole): LLMProvider {
+  const officeConfig = getBureauLlmConfig(office);
+  const provider = officeConfig.provider ?? config.llm.provider;
+  const model = officeConfig.model ?? (role ? resolveModelForRole(role) : undefined) ?? config.llm.model;
+  return createLLMProvider({ provider, model, sanitizeReasoning: true });
 }
 
 /**

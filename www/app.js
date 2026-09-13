@@ -1441,13 +1441,26 @@ async function renderAutonomyView() {
 }
 
 // 4. SERVICES VIEW
+const BUREAU_OFFICES = [
+  { id: 'product_studio', name: 'Product Studio' },
+  { id: 'creative_studio', name: 'Creative Studio' },
+  { id: 'commercial_office', name: 'Commercial Office' },
+  { id: 'marketing_office', name: 'Marketing Office' },
+];
+
 async function renderServicesView() {
   const container = document.getElementById('view-services');
   container.innerHTML = `<div class="card"><div class="card-title">Chargement des services...</div></div>`;
 
   try {
-    const servicesData = await fetchApi('/api/services');
+    const [servicesData, bureauSettings, modelsData] = await Promise.all([
+      fetchApi('/api/services'),
+      fetchApi('/api/settings/services').catch(() => ({ bureauLlm: {} })),
+      fetchApi('/api/models').catch(() => ({ providers: [] })),
+    ]);
     const services = Array.isArray(servicesData) ? servicesData : Array.isArray(servicesData?.services) ? servicesData.services : [];
+    const bureauLlm = bureauSettings && typeof bureauSettings.bureauLlm === 'object' ? bureauSettings.bureauLlm : {};
+    const providers = Array.isArray(modelsData?.providers) ? modelsData.providers : [];
 
     container.innerHTML = `
       <h2>Registre des Services Extérieurs</h2>
@@ -1463,6 +1476,108 @@ async function renderServicesView() {
         `).join('')}
       </div>
     `;
+
+    const bureauSection = document.createElement('div');
+    bureauSection.style.marginTop = '24px';
+    const bureauTitle = document.createElement('h2');
+    bureauTitle.textContent = 'Bureaux Métier — Fournisseur & Modèle IA';
+    const bureauSubtext = document.createElement('div');
+    bureauSubtext.className = 'card-subtext';
+    bureauSubtext.textContent = "Par défaut, chaque bureau utilise le fournisseur/modèle global de Jarvis (mêmes clés d'API). Choisis un fournisseur et/ou un modèle différent uniquement pour ce bureau.";
+    bureauSection.append(bureauTitle, bureauSubtext);
+
+    const bureauGrid = document.createElement('div');
+    bureauGrid.className = 'card-grid';
+    bureauGrid.style.marginTop = '12px';
+
+    for (const office of BUREAU_OFFICES) {
+      const current = bureauLlm[office.id] || {};
+      const card = document.createElement('div');
+      card.className = 'card';
+
+      const title = document.createElement('div');
+      title.className = 'card-title';
+      title.textContent = office.name;
+      card.appendChild(title);
+
+      const providerGroup = document.createElement('div');
+      providerGroup.className = 'form-group';
+      providerGroup.style.marginTop = '8px';
+      const providerLabel = document.createElement('label');
+      providerLabel.className = 'form-label';
+      providerLabel.textContent = 'Fournisseur IA';
+      const providerSelect = document.createElement('select');
+      providerSelect.className = 'input-field';
+      const defaultOption = document.createElement('option');
+      defaultOption.value = '';
+      defaultOption.textContent = 'Fournisseur global de Jarvis (par défaut)';
+      providerSelect.appendChild(defaultOption);
+      for (const p of providers) {
+        const opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = `${p.name}${p.available ? '' : ' (non configuré)'}`;
+        if (current.provider === p.id) opt.selected = true;
+        providerSelect.appendChild(opt);
+      }
+      providerGroup.append(providerLabel, providerSelect);
+      card.appendChild(providerGroup);
+
+      const modelGroup = document.createElement('div');
+      modelGroup.className = 'form-group';
+      modelGroup.style.marginTop = '8px';
+      const modelLabel = document.createElement('label');
+      modelLabel.className = 'form-label';
+      modelLabel.textContent = 'Modèle IA';
+      const modelInput = document.createElement('input');
+      modelInput.type = 'text';
+      modelInput.className = 'input-field';
+      modelInput.placeholder = 'Modèle global de Jarvis actif';
+      modelInput.value = current.model || '';
+      modelGroup.append(modelLabel, modelInput);
+      card.appendChild(modelGroup);
+
+      const statusBox = document.createElement('div');
+      statusBox.style.marginTop = '8px';
+      statusBox.style.fontSize = '0.9rem';
+
+      const saveBtn = document.createElement('button');
+      saveBtn.className = 'btn btn-primary btn-sm';
+      saveBtn.style.marginTop = '12px';
+      saveBtn.textContent = 'Enregistrer';
+      saveBtn.addEventListener('click', async () => {
+        saveBtn.disabled = true;
+        statusBox.textContent = '';
+        try {
+          const result = await fetchApi('/api/settings/services', {
+            method: 'POST',
+            body: JSON.stringify({
+              overrides: {
+                [office.id]: {
+                  provider: providerSelect.value || null,
+                  model: modelInput.value.trim() || null,
+                },
+              },
+            }),
+          });
+          statusBox.style.color = 'var(--accent-success, #2ecc71)';
+          const applied = result?.bureauLlm?.[office.id];
+          statusBox.textContent = applied && (applied.provider || applied.model)
+            ? `Enregistré : ${applied.provider || 'fournisseur global'} / ${applied.model || 'modèle global'}`
+            : 'Enregistré : retour au fournisseur/modèle global de Jarvis.';
+        } catch (err) {
+          statusBox.style.color = 'var(--accent-danger)';
+          statusBox.textContent = err.message;
+        } finally {
+          saveBtn.disabled = false;
+        }
+      });
+      card.append(saveBtn, statusBox);
+
+      bureauGrid.appendChild(card);
+    }
+
+    bureauSection.appendChild(bureauGrid);
+    container.appendChild(bureauSection);
   } catch (err) {
     container.innerHTML = `<div class="card" style="border-color: var(--accent-danger);"><div class="card-title" style="color: var(--accent-danger);">${err.message}</div></div>`;
   }
