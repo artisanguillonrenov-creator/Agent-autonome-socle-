@@ -89,11 +89,11 @@ Center, dont la portée réelle est nettement plus large :
 
 ## Démarrage
 
-```bash
+bash
 npm install
 cp .env.example .env
 npm run dev
-```
+
 
 Par défaut, Jarvis utilise `LLM_PROVIDER=infermatic` avec
 `LLM_MODEL=Qwen-Qwen3.6-35B-A3B`. Renseignez `INFERMATIC_API_KEY` dans `.env`
@@ -111,7 +111,7 @@ les options).
 
 ## Commandes CLI
 
-```
+
 /help                      Affiche l'aide
 /skills                    Liste les compétences enregistrées
 /plan                      Affiche l'arbre de plan courant
@@ -119,7 +119,7 @@ les options).
 /checkpoint load <id>      Restaure un état sauvegardé
 /checkpoint list           Liste les checkpoints
 /exit                      Quitte
-```
+
 
 ## Étendre le socle
 
@@ -137,8 +137,8 @@ les options).
 
 ## Déployer un accès public (ex: Render, gratuit)
 
-Le serveur HTTP (`AGENT_INTERFACE=http`) sert aussi une page de chat à la racine (`/`) —
-utile pour discuter avec l'agent depuis un navigateur sans passer par la CLI.
+Le serveur HTTP (`AGENT_INTERFACE=http`) sert aussi une page de chat à la racine (`/`)
+— utile pour discuter avec l'agent depuis un navigateur sans passer par la CLI.
 
 1. Compte gratuit sur [render.com](https://render.com), connecté à GitHub
 2. **New > Web Service**, sélectionner ce dépôt
@@ -180,11 +180,13 @@ donc réellement effet, pas seulement CSS/JS.
 
 ## Tests
 
-```bash
+bash
 npm test
-```
+
 
 Tests de fumée (`node --test`) : embeddings déterministes/similarité,
 gestionnaire de budget de contexte, boucle agent (réponse simple, appel de
 compétence, sauvegarde/restauration de checkpoint) — sur fournisseur `mock`
 et base SQLite en mémoire, donc aucun réseau ni fichier requis.
+
+<!-- Fin du README.md -->
