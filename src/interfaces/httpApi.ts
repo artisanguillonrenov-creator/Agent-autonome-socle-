@@ -1749,6 +1749,57 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         sendJson(res, 200, { ok: true, facts: agent.memory.facts.all() });
         return;
       }
+      if (req.method === "POST" && pathname === "/api/memory/working") {
+        let body: any;
+        try {
+          body = JSON.parse((await readBody(req)) || "{}");
+        } catch {
+          sendJson(res, 400, { error: "JSON invalide" });
+          return;
+        }
+        if (!body.messages || !Array.isArray(body.messages)) {
+          sendJson(res, 400, { error: "messages requis" });
+          return;
+        }
+        const rawPayload = JSON.stringify(body);
+        if (rawPayload.includes("Bearer ") || rawPayload.includes("ghp_") || rawPayload.includes("sk-")) {
+          sendJson(res, 400, { error: "SECRET_VALUES_FORBIDDEN" });
+          return;
+        }
+        agent.memory.working.restore(body.messages);
+        sendJson(res, 200, { ok: true, workingCount: agent.memory.working.all().length });
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/memory/preferences") {
+        let body: any;
+        try {
+          body = JSON.parse((await readBody(req)) || "{}");
+        } catch {
+          sendJson(res, 400, { error: "JSON invalide" });
+          return;
+        }
+        if (!body.preferences || !Array.isArray(body.preferences)) {
+          sendJson(res, 400, { error: "preferences requis : [{ key, value }] " });
+          return;
+        }
+        const rawPayload = JSON.stringify(body);
+        if (rawPayload.includes("Bearer ") || rawPayload.includes("ghp_") || rawPayload.includes("sk-")) {
+          sendJson(res, 400, { error: "SECRET_VALUES_FORBIDDEN" });
+          return;
+        }
+        try {
+          for (const pref of body.preferences) {
+            if (typeof pref.key === "string" && typeof pref.value === "string") {
+              agent.memory.userModel.set(pref.key, pref.value);
+            }
+          }
+          sendJson(res, 200, { ok: true, preferencesCount: agent.memory.userModel.all().length });
+        } catch (e) {
+          sendJson(res, 500, { error: (e as Error).message });
+        }
+        return;
+      }
 
       // 10. Skills Endpoints
       if (req.method === "GET" && (pathname === "/skills" || pathname === "/api/skills")) {
