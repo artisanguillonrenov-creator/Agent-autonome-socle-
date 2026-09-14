@@ -77,29 +77,77 @@ export interface DiffFidelityInput {
  */
 const MAX_DIFF_CELLS = 4_000_000;
 
-function multisetIntersectionSize(a: string[], b: string[]): number {
-  const counts = new Map<string, number>();
-  for (const line of a) counts.set(line, (counts.get(line) ?? 0) + 1);
-  let intersection = 0;
-  for (const line of b) {
-    const remaining = counts.get(line) ?? 0;
-    if (remaining > 0) {
-      intersection += 1;
-      counts.set(line, remaining - 1);
+/**
+ * Longueur de la plus longue sous-suite strictement croissante (patience
+ * sorting, O(n log n)). `tails[k]` est la plus petite valeur de fin possible
+ * pour une sous-suite croissante de longueur k+1 vue jusqu'ici.
+ */
+function longestIncreasingSubsequenceLength(sequence: number[]): number {
+  const tails: number[] = [];
+  for (const value of sequence) {
+    let lo = 0;
+    let hi = tails.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (tails[mid] < value) lo = mid + 1;
+      else hi = mid;
     }
+    tails[lo] = value;
   }
-  return intersection;
+  return tails.length;
+}
+
+/**
+ * Estimation O((n+m) log(n+m)) — sensible à l'ORDRE des lignes, contrairement
+ * à une simple intersection de multiset — du nombre de lignes conservées
+ * "dans le même ordre relatif" entre deux versions. Technique du "patience
+ * diff" (celle utilisée par git/Mercurial pour les gros fichiers) : on
+ * n'ancre que sur les lignes qui apparaissent EXACTEMENT une fois de chaque
+ * côté (contenu non ambigu à apparier), puis on calcule la plus longue
+ * sous-suite croissante des positions correspondantes dans `b` — ces ancres
+ * forment le plus grand ensemble de lignes qui n'ont pas eu besoin d'être
+ * réordonnées les unes par rapport aux autres.
+ *
+ * Un fichier inversé (mêmes lignes, ordre totalement renversé) donne une
+ * séquence de positions strictement décroissante → LIS = 1 → quasiment
+ * aucune ligne "conservée en place", détecté correctement comme une
+ * réorganisation massive plutôt qu'une conservation totale (ce que
+ * fabriquerait à tort une intersection de multiset insensible à l'ordre).
+ *
+ * Limite connue et acceptée : les lignes dupliquées (non uniques d'un côté
+ * ou de l'autre) ne servent pas d'ancre, donc un contenu massivement
+ * dupliqué peut sous-estimer la rétention réelle. Documenté plutôt que
+ * masqué — cf. note "POINT ARCHITECTURAL" en tête de fichier : ce module
+ * reste un garde-fou contre les cas structurellement grossiers, pas une
+ * preuve de fidélité complète.
+ */
+function estimateOrderedRetainedLines(a: string[], b: string[]): number {
+  const countA = new Map<string, number>();
+  for (const line of a) countA.set(line, (countA.get(line) ?? 0) + 1);
+  const countB = new Map<string, number>();
+  for (const line of b) countB.set(line, (countB.get(line) ?? 0) + 1);
+
+  const positionInB = new Map<string, number>();
+  b.forEach((line, index) => {
+    if (countA.get(line) === 1 && countB.get(line) === 1) positionInB.set(line, index);
+  });
+
+  const sequence: number[] = [];
+  for (const line of a) {
+    const position = positionInB.get(line);
+    if (position !== undefined) sequence.push(position);
+  }
+  return longestIncreasingSubsequenceLength(sequence);
 }
 
 /**
  * Diff exact (LCS dynamique, O(n*m)) sur un segment déjà réduit à son "cœur"
- * réellement différent. Au-delà de `MAX_DIFF_CELLS`, bascule sur une
- * estimation O(n+m) par intersection de multiset (lignes communes aux deux
- * côtés, indépendamment de leur position) : un contenu réellement sans
- * rapport donne une intersection proche de zéro (détecté correctement comme
- * une réécriture massive) et un contenu très majoritairement identique
- * (juste réordonné, ou avec une poignée de lignes changées) donne une
- * intersection élevée — jamais l'inverse fabriqué faute de calcul exact.
+ * réellement différent. Au-delà de `MAX_DIFF_CELLS`, bascule sur
+ * `estimateOrderedRetainedLines` (O((n+m) log(n+m))) plutôt que de payer le
+ * coût quadratique — jamais une estimation qui fabriquerait un remplacement
+ * total (contenu réellement identique) ni une conservation totale
+ * fabriquée (contenu identique mais massivement réordonné, cf. fonction
+ * ci-dessus).
  */
 function diffCore(a: string[], b: string[]): { additions: number; deletions: number } {
   const n = a.length;
@@ -107,8 +155,8 @@ function diffCore(a: string[], b: string[]): { additions: number; deletions: num
   if (n === 0 && m === 0) return { additions: 0, deletions: 0 };
 
   if (n * m > MAX_DIFF_CELLS) {
-    const commonLines = multisetIntersectionSize(a, b);
-    return { additions: m - commonLines, deletions: n - commonLines };
+    const retained = estimateOrderedRetainedLines(a, b);
+    return { additions: Math.max(0, m - retained), deletions: Math.max(0, n - retained) };
   }
 
   const dp: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
