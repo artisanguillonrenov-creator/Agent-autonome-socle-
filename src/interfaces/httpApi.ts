@@ -28,8 +28,11 @@ import type { ChatMessage } from "../types.js";
 import type { LLMProvider, ToolDefinition } from "../llm/provider.js";
 import { AgentTeamStore } from "../agents/agentTeamStore.js";
 import { BUREAU_SERVICE_IDS, getBureauLlmConfig, setBureauLlmConfig, type BureauServiceId } from "../orchestration/serviceRegistry.js";
+import { MissionStore } from "../coordination/missionStore.js";
+import { processCallback } from "../coordination/callbackTransport.js";
 
 const taskStore = new TaskStore();
+const jarvisMissionStore = new MissionStore();
 const notificationStore = new NotificationStore();
 const triggerStore = new TriggerStore();
 const softwareFactoryService = new SoftwareFactoryService();
@@ -89,6 +92,28 @@ function isPublicRequest(method: string | undefined, pathname: string): boolean 
   if (method !== "GET") return false;
   return pathname === "/" || /^\/[^/]+\.(?:html|css|js|png|jpg|ico|svg)$/i.test(pathname);
 }
+
+/**
+ * Le callback asynchrone (PR-F) porte sa propre authentification HMAC
+ * (src/coordination/callbackTransport.ts) — jamais le jeton Bearer de l'API
+ * générale. Il est donc exempté du contrôle `isAuthorized`/API_TOKEN sans
+ * pour autant être "public" : `isPublicRequest` reste réservé au GET.
+ */
+function isCallbackEndpoint(method: string | undefined, pathname: string): boolean {
+  return method === "POST" && pathname === "/api/callbacks/jarvis";
+}
+
+const CALLBACK_ERROR_STATUS: Record<string, number> = {
+  CALLBACK_AUTH_NOT_CONFIGURED: 503,
+  CALLBACK_PAYLOAD_INVALID: 400,
+  CALLBACK_SIGNATURE_INVALID: 401,
+  CALLBACK_TIMESTAMP_INVALID: 401,
+  CALLBACK_CORRELATION_FAILED: 409,
+  MISSION_NOT_FOUND: 404,
+  CONTRACT_VERSION_UNSUPPORTED: 400,
+  MISSION_STATE_CONFLICT: 409,
+  EVENT_PAYLOAD_INVALID: 400,
+};
 
 const MIME_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -370,12 +395,12 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
     const pathname = parsedUrl.pathname;
 
     // Fail closed for every non-public endpoint when the server token is absent.
-    if (!isPublicRequest(req.method, pathname) && !config.api.token) {
+    if (!isPublicRequest(req.method, pathname) && !isCallbackEndpoint(req.method, pathname) && !config.api.token) {
       sendJson(res, 503, { error: "API_TOKEN_NOT_CONFIGURED" });
       return;
     }
 
-    if (!isPublicRequest(req.method, pathname) && !isAuthorized(req)) {
+    if (!isPublicRequest(req.method, pathname) && !isCallbackEndpoint(req.method, pathname) && !isAuthorized(req)) {
       sendJson(res, 401, { error: "unauthorized" });
       return;
     }
@@ -535,6 +560,29 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
 
         const events = await softwareFactoryService.handleTaskRequest(taskReq);
         sendJson(res, 200, { events });
+        return;
+      }
+
+      // PR-F : callback asynchrone authentifié (n8n / workers -> JARVIS-00).
+      // Authentification HMAC propre à cet endpoint — jamais le jeton Bearer
+      // de l'API générale (voir isCallbackEndpoint ci-dessus).
+      if (req.method === "POST" && pathname === "/api/callbacks/jarvis") {
+        const bodyStr = await readBody(req);
+        let body: unknown;
+        try {
+          body = JSON.parse(bodyStr || "{}");
+        } catch {
+          sendJson(res, 400, { error: "CALLBACK_PAYLOAD_INVALID", message: "JSON invalide." });
+          return;
+        }
+        try {
+          const result = processCallback(body, jarvisMissionStore);
+          sendJson(res, 200, result);
+        } catch (e) {
+          const err = e as Error & { code?: string };
+          const status = CALLBACK_ERROR_STATUS[err.code ?? ""] ?? 500;
+          sendJson(res, status, { error: err.code ?? "INTERNAL_ERROR", message: err.message });
+        }
         return;
       }
 
