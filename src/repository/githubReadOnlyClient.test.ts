@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { Octokit } from "@octokit/rest";
-import { createGithubReadOnlyClient } from "./githubReadOnlyClient.js";
+import { createGithubReadOnlyClient, GithubCiReadError } from "./githubReadOnlyClient.js";
 
 const TARGET = { owner: "acme", repo: "widgets" };
 
@@ -24,7 +24,12 @@ function mockOctokit(overrides: Record<string, unknown> = {}): Octokit {
         compareCommits: async () => ({
           data: { ahead_by: 2, behind_by: 0, total_commits: 2, files: [{ filename: "b.ts", status: "modified", additions: 1, deletions: 0, changes: 1 }] },
         }),
+        getCombinedStatusForRef: async () => ({ data: { state: "success", total_count: 0, statuses: [] } }),
         ...(overrides.repos as object),
+      },
+      checks: {
+        listForRef: async () => ({ data: { total_count: 0, check_runs: [] } }),
+        ...(overrides.checks as object),
       },
       git: {
         getTree: async () => ({
@@ -135,6 +140,151 @@ test("getCommit et compare mappent stats et fichiers", async () => {
 
 test("l'interface client n'expose aucune méthode d'écriture", async () => {
   const client = createGithubReadOnlyClient(mockOctokit());
+  const writeLikeNames = ["createOrUpdateFileContents", "createRef", "createPullRequest", "merge", "deleteFile", "push", "commit", "write"];
+  for (const name of writeLikeNames) {
+    assert.equal(Object.prototype.hasOwnProperty.call(client, name), false, `client ne doit pas exposer ${name}`);
+  }
+});
+
+test("getCiStatus : tous les check runs et statuses réussissent → success", async () => {
+  const client = createGithubReadOnlyClient(
+    mockOctokit({
+      checks: {
+        listForRef: async () => ({
+          data: {
+            total_count: 2,
+            check_runs: [
+              { name: "build", conclusion: "success", html_url: "https://gh/checks/1", details_url: null, started_at: "2024-01-01T00:00:00Z", completed_at: "2024-01-01T00:05:00Z" },
+              { name: "unit-tests", conclusion: "success", html_url: "https://gh/checks/2", details_url: null, started_at: "2024-01-01T00:00:00Z", completed_at: "2024-01-01T00:06:00Z" },
+            ],
+          },
+        }),
+      },
+      repos: {
+        getCombinedStatusForRef: async () => ({
+          data: { state: "success", total_count: 1, statuses: [{ context: "vercel/deploy", state: "success", target_url: "https://vercel.example", created_at: "2024-01-01T00:00:00Z", updated_at: "2024-01-01T00:01:00Z" }] },
+        }),
+      },
+    }),
+  );
+  const result = await client.getCiStatus(TARGET, "deadbeef");
+  assert.equal(result.sha, "deadbeef");
+  assert.equal(result.overallState, "success");
+  assert.equal(result.totalCount, 3);
+  assert.ok(result.checks.every((c) => c.state === "success"));
+});
+
+test("getCiStatus : un check échoue → failure, même si d'autres réussissent", async () => {
+  const client = createGithubReadOnlyClient(
+    mockOctokit({
+      checks: {
+        listForRef: async () => ({
+          data: {
+            total_count: 2,
+            check_runs: [
+              { name: "build", conclusion: "success", html_url: null, details_url: null, started_at: "2024-01-01T00:00:00Z", completed_at: "2024-01-01T00:05:00Z" },
+              { name: "unit-tests", conclusion: "failure", html_url: "https://gh/checks/2", details_url: null, started_at: "2024-01-01T00:00:00Z", completed_at: "2024-01-01T00:06:00Z" },
+            ],
+          },
+        }),
+      },
+    }),
+  );
+  const result = await client.getCiStatus(TARGET, "deadbeef");
+  assert.equal(result.overallState, "failure");
+  const failing = result.checks.find((c) => c.name === "unit-tests");
+  assert.equal(failing?.state, "failure");
+  assert.equal(failing?.url, "https://gh/checks/2");
+});
+
+test("getCiStatus : checks encore en cours (conclusion null) → pending", async () => {
+  const client = createGithubReadOnlyClient(
+    mockOctokit({
+      checks: {
+        listForRef: async () => ({
+          data: {
+            total_count: 1,
+            check_runs: [{ name: "build", conclusion: null, html_url: null, details_url: "https://gh/details/1", started_at: "2024-01-01T00:00:00Z", completed_at: null }],
+          },
+        }),
+      },
+    }),
+  );
+  const result = await client.getCiStatus(TARGET, "deadbeef");
+  assert.equal(result.overallState, "pending");
+  assert.equal(result.checks[0].state, "pending");
+  assert.equal(result.checks[0].completedAt, null);
+  assert.equal(result.checks[0].url, "https://gh/details/1");
+});
+
+test("getCiStatus : aucun check ni status disponible → no_ci (distinct de pending)", async () => {
+  const client = createGithubReadOnlyClient(mockOctokit());
+  const result = await client.getCiStatus(TARGET, "deadbeef");
+  assert.equal(result.overallState, "no_ci");
+  assert.equal(result.totalCount, 0);
+  assert.deepEqual(result.checks, []);
+});
+
+test("getCiStatus : erreur GitHub structurée sur les check runs", async () => {
+  const client = createGithubReadOnlyClient(
+    mockOctokit({
+      checks: {
+        listForRef: async () => {
+          const err = new Error("Not Found") as Error & { status: number };
+          err.status = 404;
+          throw err;
+        },
+      },
+    }),
+  );
+  await assert.rejects(
+    () => client.getCiStatus(TARGET, "unknown-sha"),
+    (err: unknown) => {
+      assert.ok(err instanceof GithubCiReadError);
+      assert.equal(err.status, 404);
+      assert.match(err.message, /unknown-sha/);
+      return true;
+    },
+  );
+});
+
+test("getCiStatus : plusieurs checks et statuses hétérogènes sont correctement agrégés", async () => {
+  const client = createGithubReadOnlyClient(
+    mockOctokit({
+      checks: {
+        listForRef: async () => ({
+          data: {
+            total_count: 3,
+            check_runs: [
+              { name: "lint", conclusion: "success", html_url: null, details_url: null, started_at: null, completed_at: "2024-01-01T00:01:00Z" },
+              { name: "e2e", conclusion: "skipped", html_url: null, details_url: null, started_at: null, completed_at: "2024-01-01T00:02:00Z" },
+              { name: "build", conclusion: null, html_url: null, details_url: null, started_at: "2024-01-01T00:00:00Z", completed_at: null },
+            ],
+          },
+        }),
+      },
+      repos: {
+        getCombinedStatusForRef: async () => ({
+          data: { state: "success", total_count: 1, statuses: [{ context: "codecov", state: "success", target_url: null, created_at: "2024-01-01T00:00:00Z", updated_at: "2024-01-01T00:01:00Z" }] },
+        }),
+      },
+    }),
+  );
+  const result = await client.getCiStatus(TARGET, "deadbeef");
+  assert.equal(result.totalCount, 4);
+  // aucun échec, mais un check ("build") encore en cours → overall = pending, pas success
+  assert.equal(result.overallState, "pending");
+  assert.equal(result.checks.find((c) => c.name === "e2e")?.state, "skipped");
+  assert.equal(result.checks.find((c) => c.name === "codecov")?.source, "status");
+});
+
+test("getCiStatus n'effectue aucune opération d'écriture GitHub (mock strictement lecture)", async () => {
+  // Le mock ne définit que des méthodes GET (checks.listForRef, repos.getCombinedStatusForRef) ;
+  // si l'implémentation appelait la moindre méthode d'écriture non stubbée ici, l'appel échouerait
+  // avec un TypeError avant même d'atteindre les assertions ci-dessous.
+  const client = createGithubReadOnlyClient(mockOctokit());
+  const result = await client.getCiStatus(TARGET, "deadbeef");
+  assert.equal(result.overallState, "no_ci");
   const writeLikeNames = ["createOrUpdateFileContents", "createRef", "createPullRequest", "merge", "deleteFile", "push", "commit", "write"];
   for (const name of writeLikeNames) {
     assert.equal(Object.prototype.hasOwnProperty.call(client, name), false, `client ne doit pas exposer ${name}`);

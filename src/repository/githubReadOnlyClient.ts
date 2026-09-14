@@ -77,6 +77,60 @@ export interface CompareResult {
   totalFiles: number;
 }
 
+/**
+ * État normalisé d'un check individuel (GitHub Checks API) ou d'un statut de
+ * commit (Commit Status API, historique/CI tierces). `pending` couvre à la
+ * fois "queued"/"in_progress"/"waiting"/"requested" côté Checks API et
+ * "pending" côté Status API — le détail brut GitHub n'est pas nécessaire pour
+ * la décision GO/NO-GO consommée par JARVIS-00.
+ */
+export type CiCheckState =
+  | "success"
+  | "failure"
+  | "neutral"
+  | "cancelled"
+  | "skipped"
+  | "timed_out"
+  | "action_required"
+  | "stale"
+  | "pending";
+
+/** État agrégé sur l'ensemble des checks/statuses trouvés pour un SHA. */
+export type CiOverallState = "success" | "failure" | "pending" | "no_ci";
+
+export interface CiCheckEntry {
+  name: string;
+  /** Distingue un check run (GitHub Actions/Checks API) d'un statut de commit (Status API). */
+  source: "check_run" | "status";
+  state: CiCheckState;
+  url: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+export interface CiStatusResult {
+  sha: string;
+  overallState: CiOverallState;
+  totalCount: number;
+  checks: CiCheckEntry[];
+}
+
+/**
+ * Erreur structurée levée par `getCiStatus` en cas d'échec d'appel GitHub
+ * (réseau, permission, SHA inconnu...). Ne masque jamais un échec en le
+ * transformant en résultat "no_ci" — un statut CI qu'on n'a pas pu lire n'est
+ * pas équivalent à une absence de CI.
+ */
+export class GithubCiReadError extends Error {
+  readonly status?: number;
+
+  constructor(message: string, status?: number) {
+    super(message);
+    this.name = "GithubCiReadError";
+    this.status = status;
+  }
+}
+
 export interface GithubReadOnlyClient {
   getDefaultBranch(ref: RepoRef): Promise<string>;
   getTree(ref: RepoRef, treeish: string): Promise<{ entries: TreeEntry[]; truncatedByGithub: boolean }>;
@@ -86,6 +140,13 @@ export interface GithubReadOnlyClient {
   getPullRequestDiff(ref: RepoRef, pullNumber: number): Promise<string>;
   getCommit(ref: RepoRef, sha: string): Promise<CommitSummary>;
   compare(ref: RepoRef, base: string, head: string): Promise<CompareResult>;
+  /**
+   * État CI réel d'un commit (Checks API + Commit Status API combinées).
+   * Pour la CI d'une PR, résoudre d'abord son `headSha` via `getPullRequest`
+   * puis appeler `getCiStatus` avec ce SHA — la CI d'une PR est celle de son
+   * commit de tête, il n'y a pas de notion distincte à modéliser.
+   */
+  getCiStatus(ref: RepoRef, sha: string): Promise<CiStatusResult>;
 }
 
 interface RawGithubFile {
@@ -110,6 +171,55 @@ function mapFile(f: RawGithubFile): PullRequestFileEntry {
   };
 }
 
+const FAILURE_STATES = new Set<CiCheckState>(["failure", "timed_out", "cancelled", "action_required", "stale"]);
+
+/** `conclusion === null` signifie que le check run n'est pas terminé (status queued/in_progress/waiting/requested). */
+function mapCheckRunConclusion(conclusion: string | null): CiCheckState {
+  if (conclusion === null) return "pending";
+  switch (conclusion) {
+    case "success":
+    case "failure":
+    case "neutral":
+    case "cancelled":
+    case "skipped":
+    case "timed_out":
+    case "action_required":
+    case "stale":
+      return conclusion;
+    default:
+      // Valeur de conclusion inconnue/future de l'API GitHub : traitée comme
+      // un échec potentiel plutôt qu'ignorée silencieusement.
+      return "failure";
+  }
+}
+
+function mapCommitStatusState(state: string): CiCheckState {
+  switch (state) {
+    case "success":
+      return "success";
+    case "pending":
+      return "pending";
+    case "failure":
+    case "error":
+      return "failure";
+    default:
+      return "failure";
+  }
+}
+
+function aggregateOverallState(checks: CiCheckEntry[]): CiOverallState {
+  if (checks.length === 0) return "no_ci";
+  if (checks.some((c) => FAILURE_STATES.has(c.state))) return "failure";
+  if (checks.some((c) => c.state === "pending")) return "pending";
+  return "success";
+}
+
+function toGithubCiReadError(err: unknown, context: string): GithubCiReadError {
+  const status = typeof err === "object" && err !== null && "status" in err ? (err as { status?: unknown }).status : undefined;
+  const detail = err instanceof Error ? err.message : String(err);
+  return new GithubCiReadError(`${context}: ${detail}`, typeof status === "number" ? status : undefined);
+}
+
 function defaultOctokit(): Octokit {
   const token = process.env.GITHUB_FACTORY_TOKEN || process.env.GITHUB_TOKEN || undefined;
   return new Octokit({ auth: token });
@@ -119,7 +229,8 @@ function defaultOctokit(): Octokit {
  * Construit le client Repository Intelligence à partir d'une instance Octokit
  * (injectable pour les tests). Seules des méthodes GET du REST API GitHub
  * sont appelées ici : repos.get, git.getTree, repos.getContent, pulls.get,
- * pulls.listFiles, repos.getCommit, repos.compareCommits.
+ * pulls.listFiles, repos.getCommit, repos.compareCommits, checks.listForRef,
+ * repos.getCombinedStatusForRef.
  */
 export function createGithubReadOnlyClient(octokit: Octokit = defaultOctokit()): GithubReadOnlyClient {
   return {
@@ -204,6 +315,45 @@ export function createGithubReadOnlyClient(octokit: Octokit = defaultOctokit()):
       const d = res.data;
       const files = (d.files || []).map(mapFile);
       return { aheadBy: d.ahead_by, behindBy: d.behind_by, totalCommits: d.total_commits, files, totalFiles: files.length };
+    },
+
+    async getCiStatus({ owner, repo }, sha) {
+      let checkRuns: Array<{ name: string; conclusion: string | null; html_url: string | null; details_url: string | null; started_at: string | null; completed_at: string | null }>;
+      try {
+        const res = await octokit.rest.checks.listForRef({ owner, repo, ref: sha, per_page: 100 });
+        checkRuns = res.data.check_runs;
+      } catch (err) {
+        throw toGithubCiReadError(err, `Échec de lecture des check runs GitHub pour ${sha}`);
+      }
+
+      let statuses: Array<{ context: string; state: string; target_url: string | null; created_at: string; updated_at: string }>;
+      try {
+        const res = await octokit.rest.repos.getCombinedStatusForRef({ owner, repo, ref: sha });
+        statuses = res.data.statuses;
+      } catch (err) {
+        throw toGithubCiReadError(err, `Échec de lecture des commit statuses GitHub pour ${sha}`);
+      }
+
+      const checkEntries: CiCheckEntry[] = checkRuns.map((c) => ({
+        name: c.name,
+        source: "check_run",
+        state: mapCheckRunConclusion(c.conclusion),
+        url: c.html_url ?? c.details_url ?? null,
+        startedAt: c.started_at ?? null,
+        completedAt: c.completed_at ?? null,
+      }));
+
+      const statusEntries: CiCheckEntry[] = statuses.map((s) => ({
+        name: s.context,
+        source: "status",
+        state: mapCommitStatusState(s.state),
+        url: s.target_url ?? null,
+        startedAt: s.created_at ?? null,
+        completedAt: s.updated_at ?? null,
+      }));
+
+      const checks = [...checkEntries, ...statusEntries];
+      return { sha, overallState: aggregateOverallState(checks), totalCount: checks.length, checks };
     },
   };
 }
