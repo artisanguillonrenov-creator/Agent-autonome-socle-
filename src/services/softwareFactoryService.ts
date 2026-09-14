@@ -122,6 +122,22 @@ export interface ParsedSoftwareTask {
   allowFullRewrite?: boolean;
 }
 
+/**
+ * Résultat résolu de `executeWorkflow()` — extrait en type nommé (PR-E) pour
+ * que `src/coordination/` puisse le référencer sans dupliquer sa forme
+ * (contrat "Software Factory result" / "branche / commit / PR" / "résultat
+ * diffFidelity" du plan V5). Comportement inchangé : c'était auparavant un
+ * type anonyme inline, littéralement identique.
+ */
+export interface SoftwareFactoryBuildOutcome {
+  branch: string;
+  commitSha: string;
+  prUrl: string;
+  prNumber: number;
+  summary: string;
+  diffFidelity: DiffFidelityResult;
+}
+
 export function parseRepoUrl(repoUrlStr?: string): { owner: string; repo: string } | null {
   if (!repoUrlStr || typeof repoUrlStr !== "string") return null;
   const clean = repoUrlStr.trim().replace(/\.git$/, "");
@@ -427,14 +443,7 @@ export class SoftwareFactoryService {
     params: ParsedSoftwareTask,
     taskId: string,
     onStep?: (stage: string, detail?: Record<string, unknown>) => void,
-  ): Promise<{
-    branch: string;
-    commitSha: string;
-    prUrl: string;
-    prNumber: number;
-    summary: string;
-    diffFidelity: DiffFidelityResult;
-  }> {
+  ): Promise<SoftwareFactoryBuildOutcome> {
     const { owner, repo, filePath, instructions, targetBranch, targetPr } = params;
     // Compatibilité des appels directs historiques de tests/usage interne : le chemin
     // runtime normal transmet toujours createIfMissing explicitement (false par défaut).
