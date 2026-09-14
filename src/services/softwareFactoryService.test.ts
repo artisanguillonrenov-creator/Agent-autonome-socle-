@@ -1418,6 +1418,8 @@ function mockOctokitForWriteFlow(overrides: {
   baseSha?: string;
   createOrUpdateFileContents?: (args: { content: string }) => Promise<{ data: unknown }>;
   createRefCalls?: { count: number };
+  /** Si fourni, getContent renvoie ce contenu existant au lieu de lever un 404. */
+  existingContent?: string;
 } = {}): Octokit {
   const baseSha = overrides.baseSha ?? "base-sha";
   const createRefCalls = overrides.createRefCalls;
@@ -1425,7 +1427,12 @@ function mockOctokitForWriteFlow(overrides: {
     rest: {
       repos: {
         get: async () => ({ data: { default_branch: "main" } }),
-        getContent: async () => { throw new Error("404 Not Found"); },
+        getContent:
+          overrides.existingContent !== undefined
+            ? async () => ({
+                data: { type: "file", content: Buffer.from(overrides.existingContent!, "utf-8").toString("base64"), encoding: "base64", sha: "existing-file-sha" },
+              })
+            : async () => { throw new Error("404 Not Found"); },
         createOrUpdateFileContents:
           overrides.createOrUpdateFileContents ??
           (async () => ({ data: { commit: { sha: "sha-after-write" } } })),
@@ -1603,4 +1610,464 @@ test("PR-B — expectedBaseSha absent (appelant historique) : comportement incha
     "task-no-expected-base",
   );
   assert.equal(res.commitSha, "sha-after-write");
+});
+
+// --- PR-D : diff/fidelity control ---
+
+test("PR-D.A — changement exact attendu sur fichier existant : diffFidelity PASS et exposé dans le résultat", async () => {
+  const octokit = mockOctokitForWriteFlow({ existingContent: "ligne1\nligne2\nligne3\nligne4\nligne5\nligne6" });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const res = await service.executeWorkflow(
+    {
+      owner: "artisanguillonrenov-creator",
+      repo: "Agent-autonome-socle-",
+      filePath: "docs/fidelity.md",
+      instructions: "Modifier la ligne 3",
+      exactContent: "ligne1\nligne2\nligne3-modifiee\nligne4\nligne5\nligne6",
+      expectedFilePath: "docs/fidelity.md",
+      expectedChangeType: "update",
+    },
+    "task-fidelity-a",
+  );
+  assert.equal(res.diffFidelity.fidelityStatus, "PASS");
+  assert.equal(res.diffFidelity.files[0].changeType, "modified");
+  assert.equal(res.commitSha, "sha-after-write");
+});
+
+test("PR-D.B — fichier inattendu (hors périmètre de la mission) : DIFF_FIDELITY_FAILED avant toute écriture", async () => {
+  const createRefCalls = { count: 0 };
+  let writeAttempted = false;
+  const octokit = mockOctokitForWriteFlow({
+    createRefCalls,
+    createOrUpdateFileContents: async () => { writeAttempted = true; return { data: { commit: { sha: "should-not-happen" } } }; },
+  });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  await assert.rejects(
+    () =>
+      service.executeWorkflow(
+        {
+          owner: "artisanguillonrenov-creator",
+          repo: "Agent-autonome-socle-",
+          filePath: "docs/unexpected.md",
+          instructions: "Créer un fichier",
+          exactContent: "contenu",
+          createIfMissing: true,
+          expectedFilePath: "docs/authorized.md",
+        },
+        "task-fidelity-b",
+      ),
+    (err: unknown) => {
+      assert.ok(err instanceof SoftwareFactoryWorkflowError);
+      assert.equal(err.code, "DIFF_FIDELITY_FAILED");
+      assert.equal(err.sideEffectState, "none");
+      return true;
+    },
+  );
+  assert.equal(createRefCalls.count, 0);
+  assert.equal(writeAttempted, false);
+});
+
+test("PR-D.C — suppression inattendue (contenu vidé) sur fichier existant : DIFF_FIDELITY_FAILED avant toute écriture", async () => {
+  const createRefCalls = { count: 0 };
+  let writeAttempted = false;
+  const octokit = mockOctokitForWriteFlow({
+    existingContent: "contenu important\nligne 2\nligne 3",
+    createRefCalls,
+    createOrUpdateFileContents: async () => { writeAttempted = true; return { data: { commit: { sha: "should-not-happen" } } }; },
+  });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  await assert.rejects(
+    () =>
+      service.executeWorkflow(
+        {
+          owner: "artisanguillonrenov-creator",
+          repo: "Agent-autonome-socle-",
+          filePath: "docs/fidelity.md",
+          instructions: "Ajouter une phrase",
+          exactContent: "",
+        },
+        "task-fidelity-c",
+      ),
+    (err: unknown) => {
+      assert.ok(err instanceof SoftwareFactoryWorkflowError);
+      assert.equal(err.code, "DIFF_FIDELITY_FAILED");
+      return true;
+    },
+  );
+  assert.equal(createRefCalls.count, 0);
+  assert.equal(writeAttempted, false);
+});
+
+test("PR-D.D — contenu hors périmètre modifié (réécriture massive non justifiée) : DIFF_FIDELITY_FAILED avant toute écriture", async () => {
+  const createRefCalls = { count: 0 };
+  let writeAttempted = false;
+  const originalContent = Array.from({ length: 20 }, (_, i) => `ligne originale ${i}`).join("\n");
+  const octokit = mockOctokitForWriteFlow({
+    existingContent: originalContent,
+    createRefCalls,
+    createOrUpdateFileContents: async () => { writeAttempted = true; return { data: { commit: { sha: "should-not-happen" } } }; },
+  });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  await assert.rejects(
+    () =>
+      service.executeWorkflow(
+        {
+          owner: "artisanguillonrenov-creator",
+          repo: "Agent-autonome-socle-",
+          filePath: "docs/fidelity.md",
+          instructions: "Corriger une faute de frappe",
+          exactContent: "contenu totalement différent, sans rapport avec l'original",
+        },
+        "task-fidelity-d",
+      ),
+    (err: unknown) => {
+      assert.ok(err instanceof SoftwareFactoryWorkflowError);
+      assert.equal(err.code, "DIFF_FIDELITY_FAILED");
+      return true;
+    },
+  );
+  assert.equal(createRefCalls.count, 0);
+  assert.equal(writeAttempted, false);
+});
+
+test("PR-D.E — création autorisée (fichier absent, expectedChangeType=create) : PASS, écriture normale", async () => {
+  const octokit = mockOctokitForWriteFlow();
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const res = await service.executeWorkflow(
+    {
+      owner: "artisanguillonrenov-creator",
+      repo: "Agent-autonome-socle-",
+      filePath: "docs/new-fidelity.md",
+      instructions: "Créer le fichier",
+      exactContent: "# Nouveau document",
+      createIfMissing: true,
+      expectedChangeType: "create",
+    },
+    "task-fidelity-e",
+  );
+  assert.equal(res.diffFidelity.fidelityStatus, "PASS");
+  assert.equal(res.diffFidelity.files[0].changeType, "created");
+  assert.equal(res.commitSha, "sha-after-write");
+});
+
+test("PR-D.F — création demandée alors que le fichier existe déjà : DIFF_FIDELITY_FAILED, jamais de remplacement silencieux", async () => {
+  const createRefCalls = { count: 0 };
+  let writeAttempted = false;
+  const octokit = mockOctokitForWriteFlow({
+    existingContent: "contenu préexistant que la mission ignorait",
+    createRefCalls,
+    createOrUpdateFileContents: async () => { writeAttempted = true; return { data: { commit: { sha: "should-not-happen" } } }; },
+  });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  await assert.rejects(
+    () =>
+      service.executeWorkflow(
+        {
+          owner: "artisanguillonrenov-creator",
+          repo: "Agent-autonome-socle-",
+          filePath: "docs/fidelity.md",
+          instructions: "Créer le fichier",
+          exactContent: "contenu qui écraserait l'existant",
+          createIfMissing: true,
+          expectedChangeType: "create",
+        },
+        "task-fidelity-f",
+      ),
+    (err: unknown) => {
+      assert.ok(err instanceof SoftwareFactoryWorkflowError);
+      assert.equal(err.code, "DIFF_FIDELITY_FAILED");
+      return true;
+    },
+  );
+  assert.equal(createRefCalls.count, 0, "aucune branche ne doit être créée : le fichier existant ne doit jamais être silencieusement remplacé");
+  assert.equal(writeAttempted, false);
+});
+
+test("PR-D.G — diff vide/inutile (contenu final identique à l'original) : comportement propre, PASS", async () => {
+  const identical = "ligne1\nligne2\nligne3\nligne4\nligne5\nligne6\nligne7";
+  const octokit = mockOctokitForWriteFlow({ existingContent: identical });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const res = await service.executeWorkflow(
+    {
+      owner: "artisanguillonrenov-creator",
+      repo: "Agent-autonome-socle-",
+      filePath: "docs/fidelity.md",
+      instructions: "Aucun changement réel",
+      exactContent: identical,
+    },
+    "task-fidelity-g",
+  );
+  assert.equal(res.diffFidelity.fidelityStatus, "PASS");
+  assert.equal(res.diffFidelity.additions, 0);
+  assert.equal(res.diffFidelity.deletions, 0);
+});
+
+test("PR-D.I — compatibilité avec SECRET_DETECTED : un secret bloque avant même d'atteindre le contrôle de fidélité", async () => {
+  const createRefCalls = { count: 0 };
+  const octokit = mockOctokitForWriteFlow({ createRefCalls });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  // Contenu qui échouerait de toute façon la fidélité (fichier inattendu) ET contient un secret :
+  // le secret guard (étage antérieur) doit se déclencher en premier.
+  await assert.rejects(
+    () =>
+      service.executeWorkflow(
+        {
+          owner: "artisanguillonrenov-creator",
+          repo: "Agent-autonome-socle-",
+          filePath: "docs/fidelity.md",
+          instructions: "Ajouter la config",
+          exactContent: "GITHUB_TOKEN=ghp_1234567890abcdefghij1234567890abcdef",
+          createIfMissing: true,
+          expectedFilePath: "docs/other.md", // aurait aussi échoué la fidélité
+        },
+        "task-fidelity-secret-priority",
+      ),
+    (err: unknown) => {
+      assert.ok(err instanceof SoftwareFactoryWorkflowError);
+      assert.equal(err.code, "SECRET_DETECTED", "le secret guard doit se déclencher avant le contrôle de fidélité");
+      return true;
+    },
+  );
+  assert.equal(createRefCalls.count, 0);
+});
+
+test("PR-D.J — compatibilité avec STALE_BASE : une base obsolète bloque avant même d'atteindre le contrôle de fidélité", async () => {
+  const createRefCalls = { count: 0 };
+  const octokit = mockOctokitForWriteFlow({ baseSha: "new-head-after-merge", createRefCalls });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  await assert.rejects(
+    () =>
+      service.executeWorkflow(
+        {
+          owner: "artisanguillonrenov-creator",
+          repo: "Agent-autonome-socle-",
+          filePath: "docs/fidelity.md",
+          instructions: "Créer le fichier",
+          exactContent: "contenu ok",
+          createIfMissing: true,
+          expectedBaseSha: "stale-sha",
+          expectedFilePath: "docs/other-file.md", // aurait aussi échoué la fidélité
+        },
+        "task-fidelity-stale-priority",
+      ),
+    (err: unknown) => {
+      assert.ok(err instanceof SoftwareFactoryWorkflowError);
+      assert.equal(err.code, "STALE_BASE", "la protection de base obsolète doit se déclencher avant le contrôle de fidélité");
+      return true;
+    },
+  );
+  assert.equal(createRefCalls.count, 0);
+});
+
+test("PR-D — aucun champ de fidélité fourni (appelant historique) : comportement inchangé, aucune régression", async () => {
+  const octokit = mockOctokitForWriteFlow({ existingContent: "contenu existant sans rapport avec le seuil de réécriture" });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const res = await service.executeWorkflow(
+    {
+      owner: "artisanguillonrenov-creator",
+      repo: "Agent-autonome-socle-",
+      filePath: "docs/fidelity.md",
+      instructions: "Remplacer tout le contenu",
+      exactContent: "contenu complètement réécrit, sans expectedFilePath/expectedChangeType/allowFullRewrite déclarés",
+    },
+    "task-fidelity-no-fields",
+  );
+  // Sans champs de fidélité déclarés, seul le garde-fou de réécriture massive
+  // (activé dès qu'un fichier existant est modifié) peut s'appliquer ; ici le
+  // fichier original ne dépasse pas le seuil de lignes (MIN_LINES_FOR_REWRITE_GUARD),
+  // donc PASS — la régression testée est l'absence de crash/de blocage inattendu.
+  assert.equal(res.diffFidelity.fidelityStatus, "PASS");
+});
+
+// --- Correction bloquante PR-D : les champs de fidélité/sécurité doivent
+// traverser le chemin runtime réel (TaskRequest.context → extractTaskParams
+// → executeWorkflow), pas seulement les appels directs à executeWorkflow. ---
+
+function mockOctokitForTaskRequestFlow(overrides: {
+  baseSha?: string;
+  existingContent?: string;
+  calls?: string[];
+} = {}): Octokit {
+  const baseSha = overrides.baseSha ?? "base-sha";
+  const calls = overrides.calls;
+  const record = (c: string) => { if (calls) calls.push(c); };
+  return {
+    rest: {
+      repos: {
+        get: async () => { record("repos.get"); return { data: { default_branch: "main" } }; },
+        getContent:
+          overrides.existingContent !== undefined
+            ? async () => { record("repos.getContent"); return { data: { type: "file", content: Buffer.from(overrides.existingContent!, "utf-8").toString("base64"), encoding: "base64", sha: "existing-file-sha" } }; }
+            : async () => { record("repos.getContent"); throw new Error("404 Not Found"); },
+        createOrUpdateFileContents: async () => { record("repos.createOrUpdateFileContents"); return { data: { commit: { sha: "sha-after-write" } } }; },
+        compareCommits: async () => { record("repos.compareCommits"); return { data: { files: [{ filename: "docs/runtime.md", status: "added" }] } }; },
+      },
+      git: {
+        getRef: async ({ ref }: { ref: string }) => {
+          record(`git.getRef:${ref}`);
+          if (ref.startsWith("heads/jarvis/")) throw new Error("404 Not Found");
+          return { data: { object: { sha: baseSha } } };
+        },
+        createRef: async () => { record("git.createRef"); return { data: {} }; },
+      },
+      pulls: {
+        list: async () => { record("pulls.list"); return { data: [] }; },
+        create: async () => { record("pulls.create"); return { data: { html_url: "https://github.com/org/repo/pull/77", number: 77 } }; },
+      },
+    },
+  } as unknown as Octokit;
+}
+
+function baseTaskRequest(context: Record<string, unknown>, taskId: string): TaskRequest {
+  return {
+    schema_version: "1.0",
+    task_id: taskId,
+    trace_id: `trace-${taskId}`,
+    idempotency_key: `idemp-${taskId}`,
+    capability: "software_development",
+    objective: "Tâche de test du chemin runtime",
+    context,
+    constraints: [],
+    priority: "medium",
+    permissions: [],
+  };
+}
+
+test("Chemin runtime 1 — expectedFilePath dans TaskRequest.context atteint réellement le fidelity gate", async () => {
+  const calls: string[] = [];
+  const octokit = mockOctokitForTaskRequestFlow({ calls });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const req = baseTaskRequest(
+    { filePath: "docs/runtime.md", instructions: "Créer le fichier", exactContent: "contenu", createIfMissing: true, expectedFilePath: "docs/authorized-only.md" },
+    "task-runtime-expected-file-path",
+  );
+  const events = await service.handleTaskRequest(req);
+  const failed = events.find((e) => e.type === "TASK_FAILED");
+  assert.ok(failed, "un événement TASK_FAILED doit être émis");
+  assert.equal(failed?.payload.error_code, "DIFF_FIDELITY_FAILED");
+  assert.equal(calls.includes("git.createRef"), false, "aucune branche ne doit être créée");
+  assert.equal(calls.includes("repos.createOrUpdateFileContents"), false, "aucun commit ne doit être tenté");
+});
+
+test("Chemin runtime 2 — expectedChangeType dans TaskRequest.context atteint réellement le fidelity gate", async () => {
+  const calls: string[] = [];
+  const octokit = mockOctokitForTaskRequestFlow({ calls, existingContent: "contenu préexistant que la mission ignorait" });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const req = baseTaskRequest(
+    { filePath: "docs/runtime.md", instructions: "Créer le fichier", exactContent: "contenu qui écraserait l'existant", createIfMissing: true, expectedChangeType: "create" },
+    "task-runtime-expected-change-type",
+  );
+  const events = await service.handleTaskRequest(req);
+  const failed = events.find((e) => e.type === "TASK_FAILED");
+  assert.ok(failed);
+  assert.equal(failed?.payload.error_code, "DIFF_FIDELITY_FAILED");
+  assert.equal(calls.includes("repos.createOrUpdateFileContents"), false);
+});
+
+test("Chemin runtime 3 — allowFullRewrite dans TaskRequest.context atteint réellement le fidelity gate (lève le blocage de réécriture massive)", async () => {
+  const originalContent = Array.from({ length: 20 }, (_, i) => `ligne originale ${i}`).join("\n");
+  const calls: string[] = [];
+  const octokit = mockOctokitForTaskRequestFlow({ calls, existingContent: originalContent });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  // Sans allowFullRewrite, cette même réécriture échouerait (ratio de rétention < 20%).
+  const reqBlocked = baseTaskRequest(
+    { filePath: "docs/runtime.md", instructions: "Réécrire le document", exactContent: "contenu totalement différent, sans rapport avec l'original" },
+    "task-runtime-rewrite-blocked",
+  );
+  const blockedEvents = await service.handleTaskRequest(reqBlocked);
+  assert.equal(blockedEvents.find((e) => e.type === "TASK_FAILED")?.payload.error_code, "DIFF_FIDELITY_FAILED");
+
+  // Avec allowFullRewrite=true transmis dans le contexte, la même réécriture doit réussir.
+  const reqAllowed = baseTaskRequest(
+    { filePath: "docs/runtime.md", instructions: "Réécrire le document", exactContent: "contenu totalement différent, sans rapport avec l'original", allowFullRewrite: true },
+    "task-runtime-rewrite-allowed",
+  );
+  const allowedEvents = await service.handleTaskRequest(reqAllowed);
+  const completed = allowedEvents.find((e) => e.type === "TASK_COMPLETED");
+  assert.ok(completed, "allowFullRewrite=true transmis via TaskRequest.context doit réellement lever le blocage");
+  assert.ok(calls.includes("repos.createOrUpdateFileContents"));
+});
+
+test("Chemin runtime 4 — expectedBaseSha dans TaskRequest.context atteint réellement STALE_BASE", async () => {
+  const calls: string[] = [];
+  const octokit = mockOctokitForTaskRequestFlow({ calls, baseSha: "new-head-after-someone-else-merged" });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const req = baseTaskRequest(
+    { filePath: "docs/runtime.md", instructions: "Créer le fichier", exactContent: "contenu", createIfMissing: true, expectedBaseSha: "stale-sha-from-when-mission-was-planned" },
+    "task-runtime-stale-base",
+  );
+  const events = await service.handleTaskRequest(req);
+  const failed = events.find((e) => e.type === "TASK_FAILED");
+  assert.ok(failed);
+  assert.equal(failed?.payload.error_code, "STALE_BASE");
+  assert.equal(calls.includes("git.createRef"), false);
+  assert.equal(calls.includes("repos.createOrUpdateFileContents"), false);
+});
+
+test("Chemin runtime 5 — une valeur invalide (expectedChangeType inconnu) est rejetée avant toute écriture GitHub", async () => {
+  const calls: string[] = [];
+  const octokit = mockOctokitForTaskRequestFlow({ calls });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const req = baseTaskRequest(
+    { filePath: "docs/runtime.md", instructions: "Créer le fichier", exactContent: "contenu", createIfMissing: true, expectedChangeType: "delete" },
+    "task-runtime-invalid-change-type",
+  );
+  const events = await service.handleTaskRequest(req);
+  const failed = events.find((e) => e.type === "TASK_FAILED");
+  assert.ok(failed);
+  assert.equal(failed?.payload.error_code, "EXPECTED_CHANGE_TYPE_INVALID");
+  assert.equal(calls.length, 0, "aucun appel GitHub, même en lecture, ne doit avoir lieu avant la validation des champs");
+});
+
+test("Chemin runtime — validation stricte des types pour les 4 champs (rejet avant toute écriture)", async () => {
+  const cases: Array<{ context: Record<string, unknown>; expectedCode: string }> = [
+    { context: { expectedBaseSha: "" }, expectedCode: "EXPECTED_BASE_SHA_INVALID" },
+    { context: { expectedBaseSha: 123 }, expectedCode: "EXPECTED_BASE_SHA_INVALID" },
+    { context: { expectedFilePath: "" }, expectedCode: "EXPECTED_FILE_PATH_INVALID" },
+    { context: { expectedFilePath: 123 }, expectedCode: "EXPECTED_FILE_PATH_INVALID" },
+    { context: { expectedChangeType: "delete" }, expectedCode: "EXPECTED_CHANGE_TYPE_INVALID" },
+    { context: { expectedChangeType: 1 }, expectedCode: "EXPECTED_CHANGE_TYPE_INVALID" },
+    { context: { allowFullRewrite: "true" }, expectedCode: "ALLOW_FULL_REWRITE_INVALID" },
+    { context: { allowFullRewrite: 1 }, expectedCode: "ALLOW_FULL_REWRITE_INVALID" },
+  ];
+  for (const { context, expectedCode } of cases) {
+    const calls: string[] = [];
+    const octokit = mockOctokitForTaskRequestFlow({ calls });
+    const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+    const req = baseTaskRequest(
+      { filePath: "docs/runtime.md", instructions: "Créer le fichier", exactContent: "contenu", createIfMissing: true, ...context },
+      `task-runtime-invalid-${expectedCode}`,
+    );
+    const events = await service.handleTaskRequest(req);
+    const failed = events.find((e) => e.type === "TASK_FAILED");
+    assert.equal(failed?.payload.error_code, expectedCode, `cas ${JSON.stringify(context)}`);
+    assert.equal(calls.length, 0, `aucun appel GitHub pour ${JSON.stringify(context)}`);
+  }
+});
+
+test("Chemin runtime — valeurs valides (create/update, booléen correct) ne sont jamais rejetées", async () => {
+  const calls: string[] = [];
+  const octokit = mockOctokitForTaskRequestFlow({ calls });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+  const req = baseTaskRequest(
+    { filePath: "docs/runtime.md", instructions: "Créer le fichier", exactContent: "contenu", createIfMissing: true, expectedChangeType: "create", allowFullRewrite: false, expectedFilePath: "docs/runtime.md" },
+    "task-runtime-valid-values",
+  );
+  const events = await service.handleTaskRequest(req);
+  assert.ok(events.find((e) => e.type === "TASK_COMPLETED"), "des valeurs valides ne doivent jamais être rejetées");
 });

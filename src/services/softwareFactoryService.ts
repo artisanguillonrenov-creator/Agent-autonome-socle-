@@ -6,6 +6,7 @@ import { createLLMProvider } from "../llm/providers/index.js";
 import type { LLMProvider } from "../llm/provider.js";
 import type { ChatMessage } from "../types.js";
 import { scanForSecrets } from "../repository/secretScanner.js";
+import { checkDiffFidelity, type DiffFidelityResult } from "./diffFidelity.js";
 
 export type SoftwareFactorySideEffectState = "none" | "partial" | "uncertain";
 
@@ -103,6 +104,22 @@ export interface ParsedSoftwareTask {
    * affectés.
    */
   expectedBaseSha?: string;
+  /**
+   * Chemin de fichier autorisé par la mission (plan V5 : "seuls les fichiers
+   * autorisés par la mission sont modifiés"). Si fourni et différent de
+   * `filePath`, `DIFF_FIDELITY_FAILED` avant tout accès GitHub. Absent :
+   * aucune vérification (comportement historique).
+   */
+  expectedFilePath?: string;
+  /**
+   * Intention déclarée par la mission. "create" exige que le fichier
+   * n'existe pas encore (sinon `DIFF_FIDELITY_FAILED` — une création ne
+   * remplace jamais silencieusement un fichier existant) ; "update" exige
+   * symétriquement qu'il existe déjà. Absent : aucune vérification.
+   */
+  expectedChangeType?: "create" | "update";
+  /** Autorise explicitement une réécriture qui ne conserverait presque aucune ligne d'origine (sinon bloquée par le garde-fou de fidélité). */
+  allowFullRewrite?: boolean;
 }
 
 export function parseRepoUrl(repoUrlStr?: string): { owner: string; repo: string } | null {
@@ -119,6 +136,39 @@ export function parseRepoUrl(repoUrlStr?: string): { owner: string; repo: string
   return null;
 }
 
+/**
+ * Valide un champ de fidélité/sécurité optionnel transmis depuis
+ * `taskReq.context` : absent (undefined/null) est toujours accepté (aucune
+ * vérification, comportement historique) ; présent mais du mauvais type ou
+ * de forme invalide lève une erreur structurée avant tout accès GitHub.
+ */
+function optionalNonEmptyString(ctx: Record<string, unknown>, field: string, code: string): string | undefined {
+  const value = ctx[field];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(`${code}: ${field} doit être une chaîne non vide si fourni.`);
+  }
+  return value;
+}
+
+function optionalChangeType(ctx: Record<string, unknown>): "create" | "update" | undefined {
+  const value = ctx.expectedChangeType;
+  if (value === undefined || value === null) return undefined;
+  if (value !== "create" && value !== "update") {
+    throw new Error('EXPECTED_CHANGE_TYPE_INVALID: expectedChangeType doit être "create" ou "update" si fourni.');
+  }
+  return value;
+}
+
+function optionalBoolean(ctx: Record<string, unknown>, field: string, code: string): boolean | undefined {
+  const value = ctx[field];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "boolean") {
+    throw new Error(`${code}: ${field} doit être un booléen si fourni.`);
+  }
+  return value;
+}
+
 export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
   const ctx = taskReq.context || {};
 
@@ -130,6 +180,16 @@ export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
   const objectiveStr = String(taskReq.objective || "").trim();
   const instructionsStr = String(ctx.instructions || "").trim();
   const createIfMissing = ctx.createIfMissing === true;
+
+  // Champs de fidélité/sécurité (PR-B/PR-D) : lus et validés strictement ici,
+  // avant tout accès réseau, pour que le chemin runtime réel
+  // (Jarvis "software_development" → dispatch → TaskRequest.context →
+  // extractTaskParams → executeWorkflow) bénéficie des mêmes garde-fous que
+  // les appels directs à executeWorkflow.
+  const expectedBaseSha = optionalNonEmptyString(ctx, "expectedBaseSha", "EXPECTED_BASE_SHA_INVALID");
+  const expectedFilePath = optionalNonEmptyString(ctx, "expectedFilePath", "EXPECTED_FILE_PATH_INVALID");
+  const expectedChangeType = optionalChangeType(ctx);
+  const allowFullRewrite = optionalBoolean(ctx, "allowFullRewrite", "ALLOW_FULL_REWRITE_INVALID");
   const targetBranchMatch = instructionsStr.match(/^\s*TARGET_BRANCH\s*=\s*(.*?)\s*$/im);
   const targetPrMatch = instructionsStr.match(/^\s*TARGET_PR\s*=\s*(.*?)\s*$/im);
   const targetBranch = targetBranchMatch?.[1]?.trim();
@@ -209,7 +269,20 @@ export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
 
   const instructions = (instructionsStr || objectiveStr || "Mettre à jour le code selon la spécification").trim();
 
-  return { owner, repo, filePath, instructions, exactContent, targetBranch, targetPr, createIfMissing };
+  return {
+    owner,
+    repo,
+    filePath,
+    instructions,
+    exactContent,
+    targetBranch,
+    targetPr,
+    createIfMissing,
+    expectedBaseSha,
+    expectedFilePath,
+    expectedChangeType,
+    allowFullRewrite,
+  };
 }
 
 /**
@@ -360,6 +433,7 @@ export class SoftwareFactoryService {
     prUrl: string;
     prNumber: number;
     summary: string;
+    diffFidelity: DiffFidelityResult;
   }> {
     const { owner, repo, filePath, instructions, targetBranch, targetPr } = params;
     // Compatibilité des appels directs historiques de tests/usage interne : le chemin
@@ -531,6 +605,31 @@ export class SoftwareFactoryService {
       );
     }
 
+    // 4c. Diff/fidelity control — avant TOUTE écriture GitHub, comme le secret
+    // guard ci-dessus. Couvre en un seul appel : fichier hors périmètre de la
+    // mission, création qui remplacerait silencieusement un fichier existant
+    // (et son symétrique), vidage de contenu non demandé, et réécriture qui ne
+    // conserverait presque aucune ligne d'origine (cf. src/services/diffFidelity.ts
+    // pour la logique complète, pure et testée indépendamment).
+    onStep?.("DIFF_FIDELITY_CHECK", { filePath });
+    const diffFidelity = checkDiffFidelity({
+      filePath,
+      expectedFilePath: params.expectedFilePath,
+      fileExistedBefore: fileExists,
+      expectedChangeType: params.expectedChangeType,
+      originalContent: existingContent,
+      updatedContent: updatedCode,
+      allowFullRewrite: params.allowFullRewrite,
+    });
+    if (diffFidelity.fidelityStatus === "FAIL") {
+      throw new SoftwareFactoryWorkflowError(
+        "DIFF_FIDELITY_FAILED",
+        diffFidelity.reason ?? "contrôle de fidélité du diff échoué.",
+        false,
+        "none",
+      );
+    }
+
     // 5. Une branche explicitement ciblée doit déjà exister; le mode historique
     // conserve la création de la branche unique par tâche.
     if (!usesExistingTarget) {
@@ -695,6 +794,7 @@ export class SoftwareFactoryService {
         prUrl,
         prNumber,
         summary: `Patch appliqué sur la branche unique '${branchName}' et Pull Request #${prNumber} ouverte (${prUrl}).`,
+        diffFidelity,
       };
     } catch (error: unknown) {
       throw asWorkflowFailure(error, "partial", false);
