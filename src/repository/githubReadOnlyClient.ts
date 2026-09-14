@@ -116,6 +116,27 @@ export interface CiStatusResult {
 }
 
 /**
+ * Statut de vérification de la protection de branche (plan V5 §9/§53).
+ * `MAIN_PROTECTION_UNVERIFIED` couvre toute impossibilité de lire le réglage
+ * (permission insuffisante, erreur réseau/technique) — jamais interprétée
+ * comme une preuve que la branche est protégée. `MAIN_PROTECTION_FAILED`
+ * signifie que la lecture a réussi mais que la protection est absente ou
+ * insuffisante (confirmé, pas supposé).
+ */
+export type MainProtectionStatus = "MAIN_PROTECTION_VERIFIED" | "MAIN_PROTECTION_UNVERIFIED" | "MAIN_PROTECTION_FAILED";
+
+export interface MainProtectionResult {
+  status: MainProtectionStatus;
+  branch: string;
+  /** `null` uniquement quand le statut est UNVERIFIED (donnée non lue). */
+  pullRequestRequired: boolean | null;
+  requiredChecksConfigured: boolean | null;
+  forcePushBlocked: boolean | null;
+  adminsEnforced: boolean | null;
+  reason: string;
+}
+
+/**
  * Erreur structurée levée par `getCiStatus` en cas d'échec d'appel GitHub
  * (réseau, permission, SHA inconnu...). Ne masque jamais un échec en le
  * transformant en résultat "no_ci" — un statut CI qu'on n'a pas pu lire n'est
@@ -153,6 +174,14 @@ export interface GithubReadOnlyClient {
    * partiel n'est jamais renvoyé.
    */
   getCiStatus(ref: RepoRef, sha: string): Promise<CiStatusResult>;
+  /**
+   * Lecture seule de la protection de branche (classic branch protection
+   * API). Ne modifie jamais de réglage. Si le token n'a pas la permission de
+   * lire ce réglage, renvoie `MAIN_PROTECTION_UNVERIFIED` — jamais
+   * `MAIN_PROTECTION_VERIFIED` par défaut : l'absence d'accès n'est jamais
+   * traitée comme une preuve de protection (plan V5 §53).
+   */
+  getMainProtectionStatus(ref: RepoRef, branch: string): Promise<MainProtectionResult>;
 }
 
 interface RawGithubFile {
@@ -260,7 +289,7 @@ function defaultOctokit(): Octokit {
  * (injectable pour les tests). Seules des méthodes GET du REST API GitHub
  * sont appelées ici : repos.get, git.getTree, repos.getContent, pulls.get,
  * pulls.listFiles, repos.getCommit, repos.compareCommits, checks.listForRef,
- * repos.getCombinedStatusForRef.
+ * repos.getCombinedStatusForRef, repos.getBranchProtection.
  */
 export function createGithubReadOnlyClient(octokit: Octokit = defaultOctokit()): GithubReadOnlyClient {
   return {
@@ -388,6 +417,76 @@ export function createGithubReadOnlyClient(octokit: Octokit = defaultOctokit()):
 
       const checks = [...checkEntries, ...statusEntries];
       return { sha, overallState: aggregateOverallState(checks), totalCount: checks.length, checks };
+    },
+
+    async getMainProtectionStatus({ owner, repo }, branch) {
+      try {
+        const res = await octokit.rest.repos.getBranchProtection({ owner, repo, branch });
+        const data = res.data;
+        const pullRequestRequired = Boolean(data.required_pull_request_reviews);
+        const checks = data.required_status_checks;
+        const requiredChecksConfigured = Boolean(checks && ((checks.contexts?.length ?? 0) > 0 || (checks.checks?.length ?? 0) > 0));
+        const forcePushBlocked = data.allow_force_pushes?.enabled !== true;
+        const adminsEnforced = Boolean(data.enforce_admins?.enabled);
+
+        // Critères durs (plan V5 §9) : PR obligatoire + force-push interdit. Les checks
+        // requis et l'application aux admins restent observés mais non bloquants ici
+        // ("required checks configurés si disponibles", plan V5 §53 — nuance explicite).
+        if (pullRequestRequired && forcePushBlocked) {
+          return {
+            status: "MAIN_PROTECTION_VERIFIED",
+            branch,
+            pullRequestRequired,
+            requiredChecksConfigured,
+            forcePushBlocked,
+            adminsEnforced,
+            reason: "PR obligatoire et interdiction de force-push confirmées par la protection de branche GitHub.",
+          };
+        }
+        return {
+          status: "MAIN_PROTECTION_FAILED",
+          branch,
+          pullRequestRequired,
+          requiredChecksConfigured,
+          forcePushBlocked,
+          adminsEnforced,
+          reason: "protection de branche lue avec succès mais insuffisante (PR obligatoire et/ou interdiction de force-push non confirmés).",
+        };
+      } catch (err) {
+        const status = typeof err === "object" && err !== null && "status" in err ? (err as { status?: unknown }).status : undefined;
+        if (status === 404) {
+          return {
+            status: "MAIN_PROTECTION_FAILED",
+            branch,
+            pullRequestRequired: false,
+            requiredChecksConfigured: false,
+            forcePushBlocked: false,
+            adminsEnforced: false,
+            reason: "aucune protection de branche retournée par GitHub pour cette branche (404 : branche non protégée).",
+          };
+        }
+        if (status === 403) {
+          return {
+            status: "MAIN_PROTECTION_UNVERIFIED",
+            branch,
+            pullRequestRequired: null,
+            requiredChecksConfigured: null,
+            forcePushBlocked: null,
+            adminsEnforced: null,
+            reason: "permission GitHub insuffisante pour lire la protection de branche (403) — jamais interprété comme une preuve de protection.",
+          };
+        }
+        const detail = err instanceof Error ? err.message : String(err);
+        return {
+          status: "MAIN_PROTECTION_UNVERIFIED",
+          branch,
+          pullRequestRequired: null,
+          requiredChecksConfigured: null,
+          forcePushBlocked: null,
+          adminsEnforced: null,
+          reason: `impossible de vérifier la protection de branche : ${detail}`,
+        };
+      }
     },
   };
 }

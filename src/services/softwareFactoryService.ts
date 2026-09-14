@@ -5,6 +5,7 @@ import { config, type LLMProviderName } from "../config.js";
 import { createLLMProvider } from "../llm/providers/index.js";
 import type { LLMProvider } from "../llm/provider.js";
 import type { ChatMessage } from "../types.js";
+import { scanForSecrets } from "../repository/secretScanner.js";
 
 export type SoftwareFactorySideEffectState = "none" | "partial" | "uncertain";
 
@@ -93,6 +94,15 @@ export interface ParsedSoftwareTask {
   targetPr?: number;
   /** Autorisation explicite de créer le fichier s'il n'existe pas. */
   createIfMissing?: boolean;
+  /**
+   * base_sha attendu par la mission qui a déclenché cette tâche (plan V5
+   * §10/§53). Si fourni, doit correspondre au HEAD réel de la branche par
+   * défaut au moment de l'exécution, faute de quoi `STALE_BASE` est levée
+   * avant toute écriture. Absent (undefined) par défaut : les appels
+   * historiques qui ne connaissent pas encore cette notion ne sont pas
+   * affectés.
+   */
+  expectedBaseSha?: string;
 }
 
 export function parseRepoUrl(repoUrlStr?: string): { owner: string; repo: string } | null {
@@ -382,6 +392,20 @@ export class SoftwareFactoryService {
       ref: `heads/${defaultBranch}`,
     });
     const baseSha = baseRef.data.object.sha;
+
+    // 2b. Protection base obsolète (plan V5 §10/§53) — avant toute écriture.
+    // Si la mission appelante connaît un base_sha attendu, il doit correspondre
+    // au HEAD réel lu à l'instant : jamais de poursuite silencieuse sur une base
+    // qui a bougé entre la planification et l'exécution.
+    if (params.expectedBaseSha !== undefined && params.expectedBaseSha !== baseSha) {
+      throw new SoftwareFactoryWorkflowError(
+        "STALE_BASE",
+        `Le HEAD réel de '${defaultBranch}' (${baseSha}) diffère du base_sha attendu par la mission (${params.expectedBaseSha}). Reprise/replanification requise ; aucune écriture n'a été effectuée.`,
+        true,
+        "none",
+      );
+    }
+
     const usesExistingTarget = targetPr !== undefined || targetBranch !== undefined;
     let targetBranchHeadBeforeUpdate: string | undefined;
 
@@ -487,6 +511,24 @@ export class SoftwareFactoryService {
     } else {
       onStep?.("GENERATING_CODE_UPDATE", { filePath });
       updatedCode = await this.generateCodeUpdate(existingContent, filePath, instructions);
+    }
+
+    // 4b. Secret guard — avant TOUTE écriture GitHub (branche, commit, PR), pas
+    // seulement avant le commit du fichier. Inspecte le contenu créé/modifié
+    // (updatedCode couvre aussi le diff : ce dépôt remplace le fichier entier,
+    // donc tout secret introduit par le diff est nécessairement présent dans
+    // updatedCode) ainsi que le texte destiné au message de commit et au corps
+    // de la PR (instructions). Le secret détecté n'est jamais logué en clair :
+    // seul le compte d'occurrences apparaît dans le message d'erreur.
+    onStep?.("SECRET_SCAN", { filePath });
+    const secretScan = scanForSecrets(updatedCode, instructions);
+    if (secretScan.detected) {
+      throw new SoftwareFactoryWorkflowError(
+        "SECRET_DETECTED",
+        `Un secret potentiel a été détecté dans le contenu destiné à GitHub (${secretScan.redactedCount} occurrence(s) masquée(s)). Écriture bloquée avant toute branche/commit/PR.`,
+        false,
+        "none",
+      );
     }
 
     // 5. Une branche explicitement ciblée doit déjà exister; le mode historique

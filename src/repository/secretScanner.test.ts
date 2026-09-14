@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { redactSecrets, isSensitivePath } from "./secretScanner.js";
+import { redactSecrets, isSensitivePath, scanForSecrets } from "./secretScanner.js";
 
 test("redactSecrets masque les jetons GitHub, AWS, Slack, OpenAI, JWT et clés privées", () => {
   const cases = [
@@ -45,4 +45,28 @@ test("isSensitivePath n'exclut pas les fichiers de code ordinaires", () => {
   for (const p of ["src/index.ts", "README.md", "package.json", "docs/keyboard-shortcuts.md", "src/environment.ts"]) {
     assert.equal(isSensitivePath(p), false, p);
   }
+});
+
+test("scanForSecrets : contenu propre ne détecte rien", () => {
+  const result = scanForSecrets("function add(a, b) { return a + b; }", "Instructions normales, rien de sensible.");
+  assert.equal(result.detected, false);
+  assert.equal(result.redactedCount, 0);
+});
+
+test("scanForSecrets : détecte un secret dans n'importe lequel des textes fournis", () => {
+  const result = scanForSecrets("code propre", "GITHUB_TOKEN=ghp_1234567890abcdefghij1234567890");
+  assert.equal(result.detected, true);
+  assert.equal(result.redactedCount, 1);
+});
+
+test("scanForSecrets : ne renvoie jamais le texte original quand un secret est détecté", () => {
+  const secret = "ghp_1234567890abcdefghij1234567890";
+  const result = scanForSecrets(`token=${secret}`);
+  assert.equal(result.safePreview.includes(secret), false);
+  assert.ok(result.safePreview.includes("[REDACTED_SECRET]"));
+});
+
+test("scanForSecrets : agrège le compte sur plusieurs textes", () => {
+  const result = scanForSecrets("token=ghp_1234567890abcdefghij1234567890", "AKIAABCDEFGHIJKLMNOP");
+  assert.equal(result.redactedCount, 2);
 });
