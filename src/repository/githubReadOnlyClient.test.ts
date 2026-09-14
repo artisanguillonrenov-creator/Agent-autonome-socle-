@@ -290,3 +290,123 @@ test("getCiStatus n'effectue aucune opération d'écriture GitHub (mock strictem
     assert.equal(Object.prototype.hasOwnProperty.call(client, name), false, `client ne doit pas exposer ${name}`);
   }
 });
+
+// --- Pagination CI : `getCiStatus` doit récupérer TOUTES les pages avant de
+// calculer `overallState`, pour Checks API et Commit Status API. Les tests
+// ci-dessous utilisent délibérément le même per_page que l'implémentation
+// réelle (`CI_PAGE_SIZE = 100`, cf. githubReadOnlyClient.ts) plutôt qu'un
+// seuil arbitraire, pour exercer le vrai découpage en pages tel qu'il sera
+// négocié avec GitHub.
+
+function makeCheckRun(name: string, conclusion: string | null): { name: string; conclusion: string | null; html_url: string | null; details_url: string | null; started_at: string | null; completed_at: string | null } {
+  return { name, conclusion, html_url: null, details_url: null, started_at: "2024-01-01T00:00:00Z", completed_at: conclusion === null ? null : "2024-01-01T00:05:00Z" };
+}
+
+function makeCommitStatus(context: string, state: string): { context: string; state: string; target_url: string | null; created_at: string; updated_at: string } {
+  return { context, state, target_url: null, created_at: "2024-01-01T00:00:00Z", updated_at: "2024-01-01T00:05:00Z" };
+}
+
+test("getCiStatus : plus de 100 check runs avec un failure sur la page suivante → overallState = failure", async () => {
+  const page1 = Array.from({ length: 100 }, (_, i) => makeCheckRun(`check-${i}`, "success"));
+  const page2 = [makeCheckRun("check-100-late", "failure")];
+  const pagesRequested: number[] = [];
+  const client = createGithubReadOnlyClient(
+    mockOctokit({
+      checks: {
+        listForRef: async (params: { page?: number }) => {
+          const page = params.page ?? 1;
+          pagesRequested.push(page);
+          if (page === 1) return { data: { total_count: 101, check_runs: page1 } };
+          if (page === 2) return { data: { total_count: 101, check_runs: page2 } };
+          return { data: { total_count: 101, check_runs: [] } };
+        },
+      },
+    }),
+  );
+  const result = await client.getCiStatus(TARGET, "deadbeef");
+  assert.deepEqual(pagesRequested, [1, 2]);
+  assert.equal(result.totalCount, 101);
+  assert.equal(result.overallState, "failure");
+  assert.ok(result.checks.some((c) => c.name === "check-100-late" && c.state === "failure"));
+});
+
+test("getCiStatus : plus de 100 commit statuses avec un failure sur la page suivante → overallState = failure", async () => {
+  const page1 = Array.from({ length: 100 }, (_, i) => makeCommitStatus(`ctx-${i}`, "success"));
+  const page2 = [makeCommitStatus("ctx-late-failure", "failure")];
+  const pagesRequested: number[] = [];
+  const client = createGithubReadOnlyClient(
+    mockOctokit({
+      repos: {
+        getCombinedStatusForRef: async (params: { page?: number }) => {
+          const page = params.page ?? 1;
+          pagesRequested.push(page);
+          if (page === 1) return { data: { state: "success", total_count: 101, statuses: page1 } };
+          if (page === 2) return { data: { state: "failure", total_count: 101, statuses: page2 } };
+          return { data: { state: "failure", total_count: 101, statuses: [] } };
+        },
+      },
+    }),
+  );
+  const result = await client.getCiStatus(TARGET, "deadbeef");
+  assert.deepEqual(pagesRequested, [1, 2]);
+  assert.equal(result.totalCount, 101);
+  assert.equal(result.overallState, "failure");
+  assert.ok(result.checks.some((c) => c.name === "ctx-late-failure" && c.state === "failure" && c.source === "status"));
+});
+
+test("getCiStatus : pagination multi-page avec succès partout → success, aucun élément perdu", async () => {
+  const checksPage1 = Array.from({ length: 100 }, (_, i) => makeCheckRun(`check-${i}`, "success"));
+  const checksPage2 = [makeCheckRun("check-100", "success")];
+  const statusesPage1 = Array.from({ length: 100 }, (_, i) => makeCommitStatus(`ctx-${i}`, "success"));
+  const statusesPage2 = [makeCommitStatus("ctx-100", "success")];
+  const client = createGithubReadOnlyClient(
+    mockOctokit({
+      checks: {
+        listForRef: async (params: { page?: number }) => {
+          const page = params.page ?? 1;
+          return { data: { total_count: 101, check_runs: page === 1 ? checksPage1 : page === 2 ? checksPage2 : [] } };
+        },
+      },
+      repos: {
+        getCombinedStatusForRef: async (params: { page?: number }) => {
+          const page = params.page ?? 1;
+          return { data: { state: "success", total_count: 101, statuses: page === 1 ? statusesPage1 : page === 2 ? statusesPage2 : [] } };
+        },
+      },
+    }),
+  );
+  const result = await client.getCiStatus(TARGET, "deadbeef");
+  // 101 check runs + 101 statuses, tous récupérés malgré la pagination sur 2 pages chacun.
+  assert.equal(result.totalCount, 202);
+  assert.equal(result.overallState, "success");
+  assert.ok(result.checks.some((c) => c.name === "check-100"), "le check de la 2e page ne doit pas être perdu");
+  assert.ok(result.checks.some((c) => c.name === "ctx-100"), "le status de la 2e page ne doit pas être perdu");
+});
+
+test("getCiStatus : erreur GitHub sur une page intermédiaire (page 2) → GithubCiReadError, jamais de résultat partiel", async () => {
+  const checksPage1 = Array.from({ length: 100 }, (_, i) => makeCheckRun(`check-${i}`, "success"));
+  let page2Called = false;
+  const client = createGithubReadOnlyClient(
+    mockOctokit({
+      checks: {
+        listForRef: async (params: { page?: number }) => {
+          const page = params.page ?? 1;
+          if (page === 1) return { data: { total_count: 150, check_runs: checksPage1 } };
+          page2Called = true;
+          const err = new Error("Service Unavailable") as Error & { status: number };
+          err.status = 503;
+          throw err;
+        },
+      },
+    }),
+  );
+  await assert.rejects(
+    () => client.getCiStatus(TARGET, "deadbeef"),
+    (err: unknown) => {
+      assert.ok(err instanceof GithubCiReadError);
+      assert.equal(err.status, 503);
+      return true;
+    },
+  );
+  assert.equal(page2Called, true, "le test doit réellement exercer une erreur sur la 2e page, pas seulement la 1re");
+});

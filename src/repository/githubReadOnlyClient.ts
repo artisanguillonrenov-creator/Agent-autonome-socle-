@@ -145,6 +145,12 @@ export interface GithubReadOnlyClient {
    * Pour la CI d'une PR, résoudre d'abord son `headSha` via `getPullRequest`
    * puis appeler `getCiStatus` avec ce SHA — la CI d'une PR est celle de son
    * commit de tête, il n'y a pas de notion distincte à modéliser.
+   *
+   * Pagine intégralement les deux APIs avant de calculer `overallState` —
+   * un check/status situé sur une page suivante ne peut donc jamais être
+   * ignoré. En cas d'erreur sur une page (y compris une page intermédiaire),
+   * la promesse est rejetée avec `GithubCiReadError` : aucun résultat
+   * partiel n'est jamais renvoyé.
    */
   getCiStatus(ref: RepoRef, sha: string): Promise<CiStatusResult>;
 }
@@ -218,6 +224,30 @@ function toGithubCiReadError(err: unknown, context: string): GithubCiReadError {
   const status = typeof err === "object" && err !== null && "status" in err ? (err as { status?: unknown }).status : undefined;
   const detail = err instanceof Error ? err.message : String(err);
   return new GithubCiReadError(`${context}: ${detail}`, typeof status === "number" ? status : undefined);
+}
+
+/** Taille de page utilisée pour paginer Checks API et Commit Status API — max autorisé par GitHub. */
+const CI_PAGE_SIZE = 100;
+
+/**
+ * Récupère explicitement toutes les pages d'une collection paginée GitHub
+ * (page/per_page), plutôt que de se fier à une seule page. Une page renvoyant
+ * moins de `CI_PAGE_SIZE` éléments marque la fin ; une page pleine déclenche
+ * toujours une requête supplémentaire (y compris quand le total est un
+ * multiple exact de `CI_PAGE_SIZE`), pour ne jamais tronquer silencieusement
+ * le résultat. Toute erreur sur une page — y compris une page intermédiaire —
+ * interrompt immédiatement l'agrégation : aucun résultat partiel n'est
+ * jamais renvoyé par cette fonction, l'appelant reçoit l'erreur brute.
+ */
+async function fetchAllPages<T>(fetchPage: (page: number) => Promise<T[]>): Promise<T[]> {
+  const all: T[] = [];
+  let page = 1;
+  for (;;) {
+    const items = await fetchPage(page);
+    all.push(...items);
+    if (items.length < CI_PAGE_SIZE) return all;
+    page += 1;
+  }
 }
 
 function defaultOctokit(): Octokit {
@@ -320,16 +350,20 @@ export function createGithubReadOnlyClient(octokit: Octokit = defaultOctokit()):
     async getCiStatus({ owner, repo }, sha) {
       let checkRuns: Array<{ name: string; conclusion: string | null; html_url: string | null; details_url: string | null; started_at: string | null; completed_at: string | null }>;
       try {
-        const res = await octokit.rest.checks.listForRef({ owner, repo, ref: sha, per_page: 100 });
-        checkRuns = res.data.check_runs;
+        checkRuns = await fetchAllPages(async (page) => {
+          const res = await octokit.rest.checks.listForRef({ owner, repo, ref: sha, per_page: CI_PAGE_SIZE, page });
+          return res.data.check_runs;
+        });
       } catch (err) {
         throw toGithubCiReadError(err, `Échec de lecture des check runs GitHub pour ${sha}`);
       }
 
       let statuses: Array<{ context: string; state: string; target_url: string | null; created_at: string; updated_at: string }>;
       try {
-        const res = await octokit.rest.repos.getCombinedStatusForRef({ owner, repo, ref: sha });
-        statuses = res.data.statuses;
+        statuses = await fetchAllPages(async (page) => {
+          const res = await octokit.rest.repos.getCombinedStatusForRef({ owner, repo, ref: sha, per_page: CI_PAGE_SIZE, page });
+          return res.data.statuses;
+        });
       } catch (err) {
         throw toGithubCiReadError(err, `Échec de lecture des commit statuses GitHub pour ${sha}`);
       }
