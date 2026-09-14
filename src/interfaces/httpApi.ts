@@ -1751,6 +1751,85 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         return;
       }
 
+      if (req.method === "POST" && pathname === "/api/memory/working") {
+        const bodyStr = await readBody(req);
+        let body: any;
+        try { body = JSON.parse(bodyStr || "{}"); } catch {
+          sendJson(res, 400, { error: "JSON invalide" });
+          return;
+        }
+
+        const workspaceId = typeof body.workspaceId === "string" ? body.workspaceId.trim() : undefined;
+        if (!workspaceId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(workspaceId)) {
+          sendJson(res, 400, { error: "workspaceId doit être un UUID valide" });
+          return;
+        }
+
+        const messages = body.messages;
+        if (!Array.isArray(messages) || messages.length < 1 || messages.length > 50) {
+          sendJson(res, 400, { error: "messages doit être un tableau de 1 à 50 éléments" });
+          return;
+        }
+        for (const m of messages) {
+          if (typeof m.role !== "string" || typeof m.content !== "string" || m.content.length > 10000) {
+            sendJson(res, 400, { error: "Chaque message doit contenir role (string) et content (string max 10000 caractères)" });
+            return;
+          }
+        }
+
+        const payloadText = [workspaceId, ...messages.map((m: any) => m.content)].join(" ");
+        const hasSecret = /Bearer\s+\S+/i.test(payloadText) || /sk-[A-Za-z0-9]{10,}/.test(payloadText) || /ghp_[A-Za-z0-9]{20,}/.test(payloadText);
+        if (hasSecret) {
+          sendJson(res, 400, { error: "VALEURS_SECRETES_DETECtees: les jetons et clés API sont interdits dans ce payload" });
+          return;
+        }
+
+        try {
+          const repo = createConversationRepository();
+          repo.importHistoricalMessages(workspaceId, messages as any);
+          sendJson(res, 200, { ok: true, messagesPersisted: messages.length, workspaceId });
+        } catch (e) {
+          sendJson(res, 500, { error: redactSecrets((e as Error).message) });
+        }
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/memory/preferences") {
+        const bodyStr = await readBody(req);
+        let body: any;
+        try { body = JSON.parse(bodyStr || "{}"); } catch {
+          sendJson(res, 400, { error: "JSON invalide" });
+          return;
+        }
+
+        const key = typeof body.key === "string" ? body.key.trim() : undefined;
+        const value = typeof body.value === "string" ? body.value : undefined;
+
+        if (!key || !value) {
+          sendJson(res, 400, { error: "key et value requis (strings non vides)" });
+          return;
+        }
+        if (key.length > 200 || value.length > 4000) {
+          sendJson(res, 400, { error: "Taille excessive pour key ou value" });
+          return;
+        }
+
+        const prefText = `${key}: ${value}`;
+        const hasSecretPref = /Bearer\s+\S+/i.test(prefText) || /sk-[A-Za-z0-9]{10,}/.test(prefText) || /ghp_[A-Za-z0-9]{20,}/.test(prefText);
+        if (hasSecretPref) {
+          sendJson(res, 400, { error: "VALEURS_SECRETES_DETECtees: les jetons et clés API sont interdits dans les préférences" });
+          return;
+        }
+
+        try {
+          const userModel = new UserModel();
+          userModel.set(key, value);
+          sendJson(res, 200, { ok: true, key, value, updatedAt: Date.now() });
+        } catch (e) {
+          sendJson(res, 500, { error: redactSecrets((e as Error).message) });
+        }
+        return;
+      }
       // 10. Skills Endpoints
       if (req.method === "GET" && (pathname === "/skills" || pathname === "/api/skills")) {
         sendJson(
