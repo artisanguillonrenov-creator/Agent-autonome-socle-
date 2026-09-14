@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { SkillCapabilityRegistry } from "./skillRegistry.js";
-import { loadSkillManifest, CODING_SKILL_CATEGORIES, type SkillManifestEntry } from "./skillManifestLoader.js";
+import { loadSkillManifest, CODING_SKILL_CATEGORIES, type SkillManifestEntry, type VerifyProofRefFn } from "./skillManifestLoader.js";
+import { REAL_SKILL_CATALOG } from "./skillCatalog.js";
+import { defineSkill } from "./skillManifest.js";
 
 function entry(overrides: Partial<SkillManifestEntry> = {}): SkillManifestEntry {
   return {
@@ -56,12 +58,61 @@ test("loadSkillManifest rejette une category inconnue sans faire planter le char
   assert.equal(registry.listSkills().length, 2);
 });
 
-test("loadSkillManifest applique toujours les règles de skillManifest.ts (ex. jamais AVAILABLE sans preuve)", () => {
+// --- Audit ChatGPT #90 point 1 : jamais d'auto-attestation AVAILABLE pour un manifeste externe. ---
+
+// --- A. proofRef syntaxiquement valide mais NON vérifié par la source de confiance → pas AVAILABLE ---
+test("A — un manifeste externe AVAILABLE avec un proofRef syntaxiquement valide mais non confirmé par verifyProofRef est dégradé en NOT_TESTED", () => {
   const registry = new SkillCapabilityRegistry();
-  const result = loadSkillManifest([entry({ status: "AVAILABLE" })], registry);
-  assert.equal(result.registered.length, 0);
-  assert.equal(result.errors.length, 1);
-  assert.match(result.errors[0]!.message, /SKILL_NOT_PROVEN/);
+  const alwaysRejects: VerifyProofRefFn = () => false;
+  const result = loadSkillManifest([entry({ status: "AVAILABLE", proofRefs: ["TEST:pretend.test.ts#case"] })], registry, { verifyProofRef: alwaysRejects });
+  assert.equal(result.registered.length, 1);
+  assert.equal(result.registered[0]!.status, "NOT_TESTED");
+  assert.equal(registry.getSkill("ext.architecture_review")?.status, "NOT_TESTED");
+  assert.equal(result.downgrades.length, 1);
+  assert.equal(result.downgrades[0]!.requestedStatus, "AVAILABLE");
+  assert.equal(result.downgrades[0]!.appliedStatus, "NOT_TESTED");
+});
+
+// --- B. AVAILABLE sans verifier fourni du tout → refus/downgrade ---
+test("B — un manifeste externe AVAILABLE sans aucun verifyProofRef fourni est dégradé en NOT_TESTED (jamais une auto-attestation acceptée par défaut)", () => {
+  const registry = new SkillCapabilityRegistry();
+  const result = loadSkillManifest([entry({ status: "AVAILABLE", proofRefs: ["TEST:nimportequoi"] })], registry);
+  assert.equal(result.errors.length, 0);
+  assert.equal(result.registered.length, 1);
+  assert.equal(result.registered[0]!.status, "NOT_TESTED");
+  assert.match(result.downgrades[0]!.reason, /aucun verifyProofRef fourni/);
+});
+
+// --- C. preuve validée par un verifier de confiance → AVAILABLE accepté ---
+test("C — un manifeste externe AVAILABLE dont au moins une proofRef est confirmée par verifyProofRef reste AVAILABLE", () => {
+  const registry = new SkillCapabilityRegistry();
+  const trustedRefs = new Set(["TEST:really.verified.ts#case"]);
+  const verifier: VerifyProofRefFn = (ref) => trustedRefs.has(ref);
+  const result = loadSkillManifest([entry({ status: "AVAILABLE", proofRefs: ["TEST:not.verified.ts", "TEST:really.verified.ts#case"] })], registry, { verifyProofRef: verifier });
+  assert.equal(result.registered.length, 1);
+  assert.equal(result.registered[0]!.status, "AVAILABLE");
+  assert.equal(result.downgrades.length, 0);
+});
+
+// --- D. NOT_TESTED externe reste chargeable normalement, avec ou sans verifier ---
+test("D — un manifeste externe NOT_TESTED se charge normalement, avec ou sans verifyProofRef", () => {
+  for (const options of [{}, { verifyProofRef: (() => false) as VerifyProofRefFn }]) {
+    const registry = new SkillCapabilityRegistry();
+    const result = loadSkillManifest([entry({ status: "NOT_TESTED" })], registry, options);
+    assert.equal(result.registered.length, 1);
+    assert.equal(result.registered[0]!.status, "NOT_TESTED");
+    assert.equal(result.downgrades.length, 0);
+  }
+});
+
+// --- E. aucune régression sur le catalogue interne audité (ne passe jamais par ce chargeur) ---
+test("E — REAL_SKILL_CATALOG (catalogue interne audité) n'est pas affecté par la règle de vérification externe", () => {
+  const availableEntries = REAL_SKILL_CATALOG.filter((s) => s.status === "AVAILABLE");
+  assert.ok(availableEntries.length > 0);
+  for (const skill of availableEntries) {
+    // defineSkill() direct (comme skillCatalog.ts), jamais loadSkillManifest() : aucune dégradation possible ici.
+    assert.doesNotThrow(() => defineSkill(skill));
+  }
 });
 
 test("CODING_SKILL_CATEGORIES couvre toutes les catégories attendues (§PHASE 13)", () => {

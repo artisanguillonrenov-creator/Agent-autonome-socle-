@@ -112,22 +112,6 @@ test("I — resolveCapability suit fallbackSkillId quand le candidat principal �
   assert.equal(result.attempts.length, 2);
 });
 
-// --- K. side_effects exige permission appropriée ---
-test("K — resolveCapability rejette un skill à side_effects si la permission requise n'est pas accordée", () => {
-  const registry = new SkillCapabilityRegistry();
-  registry.registerSkill(skill({ sideEffects: true, permissionLevel: "WRITE", riskLevel: "MEDIUM" }));
-  const result = resolveCapability(registry, "cap_x", { isPermissionGranted: (p) => p === "READ" });
-  assert.equal(result.resolved, false);
-  assert.equal(result.attempts[0]!.rejectionCode, "PERMISSION_DENIED");
-});
-
-test("K — resolveCapability accepte un skill à side_effects si la permission requise est accordée", () => {
-  const registry = new SkillCapabilityRegistry();
-  registry.registerSkill(skill({ sideEffects: true, permissionLevel: "WRITE", riskLevel: "MEDIUM" }));
-  const result = resolveCapability(registry, "cap_x", { isPermissionGranted: (p) => p === "WRITE" });
-  assert.equal(result.resolved, true);
-});
-
 test("resolveCapability rejette un skill hors de portée du service demandé (SCOPE_MISMATCH)", () => {
   const registry = new SkillCapabilityRegistry();
   registry.registerSkill(skill({ serviceScope: { type: "SINGLE_SERVICE", serviceId: "svc_a" } }));
@@ -136,12 +120,112 @@ test("resolveCapability rejette un skill hors de portée du service demandé (SC
   assert.equal(result.attempts[0]!.rejectionCode, "SCOPE_MISMATCH");
 });
 
-test("resolveCapability rejette un skill si un outil requis est indisponible (TOOLS_UNAVAILABLE)", () => {
+// ==================================================
+// Audit ChatGPT #90, point 2 — FAIL-CLOSED (mode EXECUTION par défaut)
+// ==================================================
+
+// --- F. sideEffects + aucun permission checker fourni → non résolu (jamais une autorisation implicite) ---
+test("F — resolveCapability (mode EXECUTION implicite) rejette un skill à sideEffects=true si aucun isPermissionGranted n'est fourni du tout", () => {
+  const registry = new SkillCapabilityRegistry();
+  registry.registerSkill(skill({ sideEffects: true, permissionLevel: "WRITE", riskLevel: "MEDIUM" }));
+  const result = resolveCapability(registry, "cap_x");
+  assert.equal(result.resolved, false);
+  assert.equal(result.attempts[0]!.rejectionCode, "PERMISSION_CHECK_MISSING");
+});
+
+// --- G. permission refusée → PERMISSION_DENIED ---
+test("G — resolveCapability rejette un skill à sideEffects=true si la permission requise n'est pas accordée", () => {
+  const registry = new SkillCapabilityRegistry();
+  registry.registerSkill(skill({ sideEffects: true, permissionLevel: "WRITE", riskLevel: "MEDIUM" }));
+  const result = resolveCapability(registry, "cap_x", { isPermissionGranted: (p) => p === "READ" });
+  assert.equal(result.resolved, false);
+  assert.equal(result.attempts[0]!.rejectionCode, "PERMISSION_DENIED");
+});
+
+// --- H. permission accordée → accepté ---
+test("H — resolveCapability accepte un skill à sideEffects=true si la permission requise est accordée", () => {
+  const registry = new SkillCapabilityRegistry();
+  registry.registerSkill(skill({ sideEffects: true, permissionLevel: "WRITE", riskLevel: "MEDIUM" }));
+  const result = resolveCapability(registry, "cap_x", { isPermissionGranted: (p) => p === "WRITE" });
+  assert.equal(result.resolved, true);
+});
+
+// --- I. toolsRequired non vide + aucun checker en mode EXECUTION → non résolu ---
+test("I — resolveCapability (mode EXECUTION implicite) rejette un skill avec toolsRequired si aucun areToolsAvailable n'est fourni du tout", () => {
+  const registry = new SkillCapabilityRegistry();
+  registry.registerSkill(skill({ toolsRequired: ["tool.x"] }));
+  const result = resolveCapability(registry, "cap_x");
+  assert.equal(result.resolved, false);
+  assert.equal(result.attempts[0]!.rejectionCode, "TOOLS_CHECK_MISSING");
+});
+
+// --- J. outils indisponibles → TOOLS_UNAVAILABLE ---
+test("J — resolveCapability rejette un skill si un outil requis est indisponible (checker fourni, répond false)", () => {
   const registry = new SkillCapabilityRegistry();
   registry.registerSkill(skill({ toolsRequired: ["tool.x"] }));
   const result = resolveCapability(registry, "cap_x", { areToolsAvailable: () => false });
   assert.equal(result.resolved, false);
   assert.equal(result.attempts[0]!.rejectionCode, "TOOLS_UNAVAILABLE");
+});
+
+// --- K. outils disponibles → accepté ---
+test("K — resolveCapability accepte un skill si les outils requis sont disponibles (checker fourni, répond true)", () => {
+  const registry = new SkillCapabilityRegistry();
+  registry.registerSkill(skill({ toolsRequired: ["tool.x"] }));
+  const result = resolveCapability(registry, "cap_x", { areToolsAvailable: () => true });
+  assert.equal(result.resolved, true);
+});
+
+// --- L. un skill de lecture sans effet de bord reste résoluble sans exiger de checkers ---
+test("L — un skill sideEffects=false et toolsRequired=[] reste résoluble en mode EXECUTION sans aucun checker fourni", () => {
+  const registry = new SkillCapabilityRegistry();
+  registry.registerSkill(skill({ sideEffects: false, toolsRequired: [] }));
+  const result = resolveCapability(registry, "cap_x");
+  assert.equal(result.resolved, true);
+});
+
+test("L bis — un skill sans effet de bord respecte quand même un isPermissionGranted fourni volontairement", () => {
+  const registry = new SkillCapabilityRegistry();
+  registry.registerSkill(skill({ sideEffects: false, permissionLevel: "READ" }));
+  const result = resolveCapability(registry, "cap_x", { isPermissionGranted: () => false });
+  assert.equal(result.resolved, false);
+  assert.equal(result.attempts[0]!.rejectionCode, "PERMISSION_DENIED");
+});
+
+// --- M. le fallback respecte exactement les mêmes règles fail-closed ---
+test("M — resolveCapability applique le fail-closed identiquement au candidat de fallback", () => {
+  const registry = new SkillCapabilityRegistry();
+  registry.registerSkill(skill({ skillId: "skill.primary", status: "BROKEN", proofRefs: [], fallbackSkillId: "skill.fallback" }));
+  registry.registerSkill(skill({ skillId: "skill.fallback", capabilitiesProvided: ["cap_other"], sideEffects: true, permissionLevel: "WRITE" }));
+  const result = resolveCapability(registry, "cap_x"); // aucun isPermissionGranted fourni
+  assert.equal(result.resolved, false);
+  assert.equal(result.attempts.length, 2);
+  assert.equal(result.attempts[1]!.rejectionCode, "PERMISSION_CHECK_MISSING");
+});
+
+// --- Mode ANALYSIS : bypass explicite, jamais implicite ---
+test("mode ANALYSIS ignore les contrôles permission/outils (résolution théorique), mais statut/preuve/dépendances restent vérifiés", () => {
+  const registry = new SkillCapabilityRegistry();
+  registry.registerSkill(skill({ sideEffects: true, permissionLevel: "WRITE", toolsRequired: ["tool.x"] }));
+  const result = resolveCapability(registry, "cap_x", { mode: "ANALYSIS" });
+  assert.equal(result.resolved, true);
+});
+
+test("mode ANALYSIS n'exempte jamais le statut/la preuve/les dépendances", () => {
+  const registry = new SkillCapabilityRegistry();
+  registry.registerSkill(skill({ status: "BROKEN", proofRefs: [] }));
+  const result = resolveCapability(registry, "cap_x", { mode: "ANALYSIS" });
+  assert.equal(result.resolved, false);
+  assert.equal(result.attempts[0]!.rejectionCode, "STATUS_NOT_AVAILABLE");
+});
+
+test("le mode EXECUTION est le défaut implicite (fail-closed) — jamais ANALYSIS sans le demander explicitement", () => {
+  const registry = new SkillCapabilityRegistry();
+  registry.registerSkill(skill({ sideEffects: true, permissionLevel: "WRITE" }));
+  const withoutMode = resolveCapability(registry, "cap_x");
+  const withExplicitExecution = resolveCapability(registry, "cap_x", { mode: "EXECUTION" });
+  assert.equal(withoutMode.resolved, false);
+  assert.deepEqual(withoutMode, withExplicitExecution);
 });
 
 // --- O/P. Aucune méthode d'écriture/fusion GitHub dans ce module ---

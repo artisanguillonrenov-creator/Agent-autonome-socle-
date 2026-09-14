@@ -18,12 +18,24 @@
  * que lues depuis `config` globalement : ce module reste une fonction pure
  * testable sans dépendre de l'état runtime, et la production peut y brancher
  * `riskPolicy.isPermissionGranted` tel quel.
+ *
+ * FAIL-CLOSED (audit ChatGPT #90, point 2) : en mode "EXECUTION" (le défaut —
+ * jamais l'inverse implicitement), un skill à `sideEffects=true` sans
+ * `isPermissionGranted` injecté, ou un skill avec `toolsRequired` non vide
+ * sans `areToolsAvailable` injecté, n'est JAMAIS sélectionné — l'absence de
+ * contrôleur n'est jamais interprétée comme une autorisation. Seul le mode
+ * "ANALYSIS", choisi explicitement par l'appelant, résout une capacité de
+ * façon purement théorique (planification) sans exiger ces contrôleurs — il
+ * ne dispense jamais des vérifications de statut/preuve/dépendances, qui
+ * restent absolues dans les deux modes.
  */
 
 import type { SkillDescriptor } from "./skillManifest.js";
 import { hasValidProof } from "./proof.js";
 import { SkillCapabilityRegistry } from "./skillRegistry.js";
 import type { PermissionType } from "../orchestration/riskPolicy.js";
+
+export type ResolutionMode = "EXECUTION" | "ANALYSIS";
 
 export type ResolutionRejectionCode =
   | "SCOPE_MISMATCH"
@@ -32,7 +44,9 @@ export type ResolutionRejectionCode =
   | "DEPENDENCY_MISSING"
   | "DEPENDENCY_CYCLE"
   | "TOOLS_UNAVAILABLE"
-  | "PERMISSION_DENIED";
+  | "TOOLS_CHECK_MISSING"
+  | "PERMISSION_DENIED"
+  | "PERMISSION_CHECK_MISSING";
 
 export interface ResolutionAttempt {
   skillId: string;
@@ -51,10 +65,27 @@ export interface ResolutionResult {
 export interface ResolveOptions {
   /** Ne considérer que les skills dont la portée couvre ce service (§PHASE 5 "services capables"). */
   serviceId?: string;
-  /** Injection testable de riskPolicy.isPermissionGranted — par défaut, tout est autorisé. */
+  /**
+   * "EXECUTION" (défaut, fail-closed) : un skill à `sideEffects=true` exige
+   * ce contrôleur — son absence rejette le skill (PERMISSION_CHECK_MISSING),
+   * jamais une autorisation implicite. "ANALYSIS" : résolution théorique,
+   * ce contrôleur est ignoré même fourni.
+   */
   isPermissionGranted?: (permission: PermissionType) => boolean;
-  /** Injection testable de la disponibilité effective des outils requis — par défaut, tout est disponible. */
+  /**
+   * "EXECUTION" (défaut, fail-closed) : un skill avec `toolsRequired` non vide
+   * exige ce contrôleur — son absence rejette le skill (TOOLS_CHECK_MISSING),
+   * jamais une disponibilité supposée. "ANALYSIS" : résolution théorique, ce
+   * contrôleur est ignoré même fourni.
+   */
   areToolsAvailable?: (toolsRequired: readonly string[]) => boolean;
+  /**
+   * "EXECUTION" (défaut) applique isPermissionGranted/areToolsAvailable en
+   * fail-closed. "ANALYSIS" doit être choisi EXPLICITEMENT par l'appelant
+   * pour une résolution théorique/planification qui ignore ces deux
+   * contrôles (statut/preuve/dépendances restent toujours vérifiés).
+   */
+  mode?: ResolutionMode;
 }
 
 function scopeMatchesService(skill: SkillDescriptor, serviceId?: string): boolean {
@@ -93,12 +124,35 @@ function evaluate(registry: SkillCapabilityRegistry, skill: SkillDescriptor, opt
   if (!skill.dependencies.every((depId) => isSkillUsable(registry, depId, new Set([skill.skillId])))) {
     return { skillId: skill.skillId, accepted: false, rejectionCode: "DEPENDENCY_MISSING", reason: "dépendance déclarée mais non AVAILABLE/prouvée (ou cycle)." };
   }
-  if (opts.areToolsAvailable && !opts.areToolsAvailable(skill.toolsRequired)) {
-    return { skillId: skill.skillId, accepted: false, rejectionCode: "TOOLS_UNAVAILABLE", reason: `outil(s) requis indisponible(s) : ${skill.toolsRequired.join(", ")}.` };
+  const mode: ResolutionMode = opts.mode ?? "EXECUTION";
+
+  // ANALYSIS : résolution purement théorique — ces deux contrôles sont ignorés,
+  // même si des contrôleurs ont été fournis (choix explicite de l'appelant,
+  // jamais un défaut implicite : voir ResolveOptions.mode). Statut/preuve/
+  // dépendances, eux, restent vérifiés inconditionnellement au-dessus.
+  if (mode === "EXECUTION") {
+    if (skill.toolsRequired.length > 0) {
+      if (!opts.areToolsAvailable) {
+        return { skillId: skill.skillId, accepted: false, rejectionCode: "TOOLS_CHECK_MISSING", reason: `toolsRequired non vide (${skill.toolsRequired.join(", ")}) mais aucun areToolsAvailable fourni — jamais supposé disponible en mode EXECUTION.` };
+      }
+      if (!opts.areToolsAvailable(skill.toolsRequired)) {
+        return { skillId: skill.skillId, accepted: false, rejectionCode: "TOOLS_UNAVAILABLE", reason: `outil(s) requis indisponible(s) : ${skill.toolsRequired.join(", ")}.` };
+      }
+    }
+
+    if (skill.sideEffects) {
+      if (!opts.isPermissionGranted) {
+        return { skillId: skill.skillId, accepted: false, rejectionCode: "PERMISSION_CHECK_MISSING", reason: `sideEffects=true (permission ${skill.permissionLevel}) mais aucun isPermissionGranted fourni — jamais autorisé implicitement en mode EXECUTION.` };
+      }
+      if (!opts.isPermissionGranted(skill.permissionLevel)) {
+        return { skillId: skill.skillId, accepted: false, rejectionCode: "PERMISSION_DENIED", reason: `permission requise non accordée : ${skill.permissionLevel}.` };
+      }
+    } else if (opts.isPermissionGranted && !opts.isPermissionGranted(skill.permissionLevel)) {
+      // Un skill sans effet de bord n'EXIGE pas de contrôleur, mais s'il en fournit un, on le respecte quand même.
+      return { skillId: skill.skillId, accepted: false, rejectionCode: "PERMISSION_DENIED", reason: `permission requise non accordée : ${skill.permissionLevel}.` };
+    }
   }
-  if (opts.isPermissionGranted && !opts.isPermissionGranted(skill.permissionLevel)) {
-    return { skillId: skill.skillId, accepted: false, rejectionCode: "PERMISSION_DENIED", reason: `permission requise non accordée : ${skill.permissionLevel}.` };
-  }
+
   return { skillId: skill.skillId, accepted: true };
 }
 
