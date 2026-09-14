@@ -25,6 +25,11 @@ function mockOctokit(overrides: Record<string, unknown> = {}): Octokit {
           data: { ahead_by: 2, behind_by: 0, total_commits: 2, files: [{ filename: "b.ts", status: "modified", additions: 1, deletions: 0, changes: 1 }] },
         }),
         getCombinedStatusForRef: async () => ({ data: { state: "success", total_count: 0, statuses: [] } }),
+        getBranchProtection: async () => {
+          const err = new Error("Branch not protected") as Error & { status: number };
+          err.status = 404;
+          throw err;
+        },
         ...(overrides.repos as object),
       },
       checks: {
@@ -444,4 +449,101 @@ test("getCiStatus : la pagination s'arrête correctement après la dernière pag
   assert.deepEqual(statusesPagesRequested, [1, 2], "idem pour la Commit Status API");
   assert.equal(result.totalCount, 200);
   assert.equal(result.overallState, "success");
+});
+
+// --- PR-B : lecteur de protection de branche (lecture seule) ---
+
+test("getMainProtectionStatus : ruleset lisible et protecteur → MAIN_PROTECTION_VERIFIED", async () => {
+  const client = createGithubReadOnlyClient(
+    mockOctokit({
+      repos: {
+        getBranchProtection: async () => ({
+          data: {
+            required_pull_request_reviews: { required_approving_review_count: 1 },
+            required_status_checks: { contexts: ["ci/build"], checks: [{ context: "ci/build", app_id: null }] },
+            enforce_admins: { enabled: true },
+            allow_force_pushes: { enabled: false },
+          },
+        }),
+      },
+    }),
+  );
+  const result = await client.getMainProtectionStatus(TARGET, "main");
+  assert.equal(result.status, "MAIN_PROTECTION_VERIFIED");
+  assert.equal(result.pullRequestRequired, true);
+  assert.equal(result.forcePushBlocked, true);
+  assert.equal(result.requiredChecksConfigured, true);
+  assert.equal(result.adminsEnforced, true);
+  assert.equal(result.branch, "main");
+});
+
+test("getMainProtectionStatus : protection absente (404) → MAIN_PROTECTION_FAILED, jamais VERIFIED", async () => {
+  const client = createGithubReadOnlyClient(mockOctokit()); // default : getBranchProtection lève 404
+  const result = await client.getMainProtectionStatus(TARGET, "main");
+  assert.equal(result.status, "MAIN_PROTECTION_FAILED");
+  assert.equal(result.pullRequestRequired, false);
+  assert.equal(result.forcePushBlocked, false);
+});
+
+test("getMainProtectionStatus : protection lue mais insuffisante (force-push autorisé) → MAIN_PROTECTION_FAILED", async () => {
+  const client = createGithubReadOnlyClient(
+    mockOctokit({
+      repos: {
+        getBranchProtection: async () => ({
+          data: {
+            required_pull_request_reviews: { required_approving_review_count: 1 },
+            required_status_checks: null,
+            enforce_admins: { enabled: false },
+            allow_force_pushes: { enabled: true }, // force-push AUTORISÉ : insuffisant malgré la revue obligatoire
+          },
+        }),
+      },
+    }),
+  );
+  const result = await client.getMainProtectionStatus(TARGET, "main");
+  assert.equal(result.status, "MAIN_PROTECTION_FAILED");
+  assert.equal(result.pullRequestRequired, true);
+  assert.equal(result.forcePushBlocked, false);
+});
+
+test("getMainProtectionStatus : permission GitHub insuffisante (403) → MAIN_PROTECTION_UNVERIFIED, jamais VERIFIED ni FAILED", async () => {
+  const client = createGithubReadOnlyClient(
+    mockOctokit({
+      repos: {
+        getBranchProtection: async () => {
+          const err = new Error("Resource not accessible by integration") as Error & { status: number };
+          err.status = 403;
+          throw err;
+        },
+      },
+    }),
+  );
+  const result = await client.getMainProtectionStatus(TARGET, "main");
+  assert.equal(result.status, "MAIN_PROTECTION_UNVERIFIED");
+  assert.equal(result.pullRequestRequired, null);
+  assert.equal(result.forcePushBlocked, null);
+  assert.match(result.reason, /permission/i);
+});
+
+test("getMainProtectionStatus : erreur technique indéterminée (ni 403 ni 404) → MAIN_PROTECTION_UNVERIFIED, jamais une preuve de protection", async () => {
+  const client = createGithubReadOnlyClient(
+    mockOctokit({
+      repos: {
+        getBranchProtection: async () => {
+          throw new Error("socket hang up");
+        },
+      },
+    }),
+  );
+  const result = await client.getMainProtectionStatus(TARGET, "main");
+  assert.equal(result.status, "MAIN_PROTECTION_UNVERIFIED");
+});
+
+test("getMainProtectionStatus n'effectue aucune opération d'écriture GitHub", async () => {
+  const client = createGithubReadOnlyClient(mockOctokit());
+  await client.getMainProtectionStatus(TARGET, "main");
+  const writeLikeNames = ["createOrUpdateFileContents", "createRef", "createPullRequest", "merge", "deleteFile", "push", "commit", "write", "updateBranchProtection"];
+  for (const name of writeLikeNames) {
+    assert.equal(Object.prototype.hasOwnProperty.call(client, name), false, `client ne doit pas exposer ${name}`);
+  }
 });

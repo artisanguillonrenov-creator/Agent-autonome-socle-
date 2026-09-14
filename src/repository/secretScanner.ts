@@ -42,6 +42,34 @@ export function redactSecrets(text: string): RedactionResult {
   return { text: out, redactedCount };
 }
 
+export interface SecretScanResult {
+  detected: boolean;
+  redactedCount: number;
+  /**
+   * Version masquée des textes inspectés — jamais le texte original. Utile
+   * pour un message d'erreur ou un log qui doit rester exploitable sans
+   * jamais reproduire le secret détecté en clair.
+   */
+  safePreview: string;
+}
+
+/**
+ * Garde-fou pré-écriture au-dessus de `redactSecrets` : bloque plutôt que
+ * masque-et-continue. Réutilise les mêmes motifs (aucune seconde
+ * implémentation de détection) ; n'expose que le compte et une version déjà
+ * masquée, jamais le texte d'origine, quel que soit l'appelant.
+ */
+export function scanForSecrets(...texts: string[]): SecretScanResult {
+  let redactedCount = 0;
+  const safeParts: string[] = [];
+  for (const text of texts) {
+    const redaction = redactSecrets(text);
+    redactedCount += redaction.redactedCount;
+    safeParts.push(redaction.text);
+  }
+  return { detected: redactedCount > 0, redactedCount, safePreview: safeParts.join("\n---\n") };
+}
+
 const SENSITIVE_PATH_PATTERNS: RegExp[] = [
   /(^|\/)\.env(\..+)?$/i,
   /(^|\/)\.npmrc$/i,

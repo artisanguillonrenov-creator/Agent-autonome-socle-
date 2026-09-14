@@ -4,6 +4,7 @@ import { Octokit } from "@octokit/rest";
 import {
   SoftwareFactoryService,
   SoftwareFactoryServer,
+  SoftwareFactoryWorkflowError,
   parseRepoUrl,
   extractTaskParams,
   cleanLLMCodeOutput,
@@ -1409,4 +1410,197 @@ test("TEST R — Serveur HTTP Software Factory POST /tasks", async () => {
     config.softwareFactory.token = previousFactoryToken;
     config.api.token = previousApiToken;
   }
+});
+
+// --- PR-B : secret guard pre-push + protection de base obsolète ---
+
+function mockOctokitForWriteFlow(overrides: {
+  baseSha?: string;
+  createOrUpdateFileContents?: (args: { content: string }) => Promise<{ data: unknown }>;
+  createRefCalls?: { count: number };
+} = {}): Octokit {
+  const baseSha = overrides.baseSha ?? "base-sha";
+  const createRefCalls = overrides.createRefCalls;
+  return {
+    rest: {
+      repos: {
+        get: async () => ({ data: { default_branch: "main" } }),
+        getContent: async () => { throw new Error("404 Not Found"); },
+        createOrUpdateFileContents:
+          overrides.createOrUpdateFileContents ??
+          (async () => ({ data: { commit: { sha: "sha-after-write" } } })),
+        compareCommits: async () => ({ data: { files: [{ filename: "docs/secret.md", status: "added" }] } }),
+      },
+      git: {
+        getRef: async ({ ref }: { ref: string }) => {
+          if (ref.startsWith("heads/jarvis/")) throw new Error("404 Not Found");
+          return { data: { object: { sha: baseSha } } };
+        },
+        createRef: async () => {
+          if (createRefCalls) createRefCalls.count += 1;
+          return { data: {} };
+        },
+      },
+      pulls: {
+        list: async () => ({ data: [] }),
+        create: async () => ({ data: { html_url: "https://github.com/org/repo/pull/42", number: 42 } }),
+      },
+    },
+  } as unknown as Octokit;
+}
+
+test("PR-B.A — secret guard : contenu propre laisse passer l'écriture normalement", async () => {
+  const octokit = mockOctokitForWriteFlow();
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const res = await service.executeWorkflow(
+    {
+      owner: "artisanguillonrenov-creator",
+      repo: "Agent-autonome-socle-",
+      filePath: "docs/secret.md",
+      instructions: "Créer un fichier de doc sans rien de sensible",
+      exactContent: "# Documentation publique\n\nAucun secret ici.",
+    },
+    "task-secret-clean",
+  );
+  assert.equal(res.commitSha, "sha-after-write");
+});
+
+test("PR-B.B — secret guard : un token GitHub dans le contenu bloque l'écriture avec SECRET_DETECTED", async () => {
+  const createRefCalls = { count: 0 };
+  let writeAttempted = false;
+  const octokit = mockOctokitForWriteFlow({
+    createRefCalls,
+    createOrUpdateFileContents: async () => {
+      writeAttempted = true;
+      return { data: { commit: { sha: "should-not-happen" } } };
+    },
+  });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const leakedToken = "ghp_1234567890abcdef1234567890abcdef1234";
+  await assert.rejects(
+    () =>
+      service.executeWorkflow(
+        {
+          owner: "artisanguillonrenov-creator",
+          repo: "Agent-autonome-socle-",
+          filePath: "docs/secret.md",
+          instructions: "Ajouter la config",
+          exactContent: `# Config\n\nGITHUB_TOKEN=${leakedToken}\n`,
+          createIfMissing: true,
+        },
+        "task-secret-leak",
+      ),
+    (err: unknown) => {
+      assert.ok(err instanceof SoftwareFactoryWorkflowError);
+      assert.equal(err.code, "SECRET_DETECTED");
+      assert.equal(err.sideEffectState, "none");
+      return true;
+    },
+  );
+  // Aucune écriture GitHub (ni branche, ni commit) n'a eu lieu après détection.
+  assert.equal(createRefCalls.count, 0, "aucune branche ne doit être créée après un secret détecté");
+  assert.equal(writeAttempted, false, "aucun commit ne doit être tenté après un secret détecté");
+});
+
+test("PR-B.C — secret guard : le secret détecté n'apparaît jamais en clair dans le message d'erreur", async () => {
+  const octokit = mockOctokitForWriteFlow();
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const leakedToken = "ghp_1234567890abcdef1234567890abcdef1234";
+  await assert.rejects(
+    () =>
+      service.executeWorkflow(
+        {
+          owner: "artisanguillonrenov-creator",
+          repo: "Agent-autonome-socle-",
+          filePath: "docs/secret.md",
+          instructions: "Ajouter la config",
+          exactContent: `GITHUB_TOKEN=${leakedToken}`,
+          createIfMissing: true,
+        },
+        "task-secret-no-leak-in-message",
+      ),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.equal(err.message.includes(leakedToken), false, "le token brut ne doit jamais apparaître dans le message d'erreur");
+      assert.match(err.message, /occurrence/);
+      return true;
+    },
+  );
+});
+
+test("PR-B.D — protection de base : base_sha attendu == HEAD réel, le workflow continue normalement", async () => {
+  const octokit = mockOctokitForWriteFlow({ baseSha: "current-head-sha" });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const res = await service.executeWorkflow(
+    {
+      owner: "artisanguillonrenov-creator",
+      repo: "Agent-autonome-socle-",
+      filePath: "docs/secret.md",
+      instructions: "Créer un fichier",
+      exactContent: "contenu ok",
+      expectedBaseSha: "current-head-sha",
+    },
+    "task-base-fresh",
+  );
+  assert.equal(res.commitSha, "sha-after-write");
+});
+
+test("PR-B.E — protection de base : base_sha attendu différent du HEAD réel lève STALE_BASE avant toute écriture", async () => {
+  const createRefCalls = { count: 0 };
+  let writeAttempted = false;
+  const octokit = mockOctokitForWriteFlow({
+    baseSha: "new-head-after-someone-else-merged",
+    createRefCalls,
+    createOrUpdateFileContents: async () => {
+      writeAttempted = true;
+      return { data: { commit: { sha: "should-not-happen" } } };
+    },
+  });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  await assert.rejects(
+    () =>
+      service.executeWorkflow(
+        {
+          owner: "artisanguillonrenov-creator",
+          repo: "Agent-autonome-socle-",
+          filePath: "docs/secret.md",
+          instructions: "Créer un fichier",
+          exactContent: "contenu ok",
+          expectedBaseSha: "stale-sha-from-when-mission-was-planned",
+        },
+        "task-base-stale",
+      ),
+    (err: unknown) => {
+      assert.ok(err instanceof SoftwareFactoryWorkflowError);
+      assert.equal(err.code, "STALE_BASE");
+      assert.equal(err.sideEffectState, "none");
+      assert.equal(err.replannable, true);
+      return true;
+    },
+  );
+  assert.equal(createRefCalls.count, 0, "aucune branche ne doit être créée sur une base obsolète");
+  assert.equal(writeAttempted, false, "aucun commit ne doit être tenté sur une base obsolète");
+});
+
+test("PR-B — expectedBaseSha absent (appelant historique) : comportement inchangé, aucune régression", async () => {
+  const octokit = mockOctokitForWriteFlow({ baseSha: "whatever-head" });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const res = await service.executeWorkflow(
+    {
+      owner: "artisanguillonrenov-creator",
+      repo: "Agent-autonome-socle-",
+      filePath: "docs/secret.md",
+      instructions: "Créer un fichier",
+      exactContent: "contenu ok",
+      // Pas de expectedBaseSha : le contrôle STALE_BASE ne doit pas s'appliquer.
+    },
+    "task-no-expected-base",
+  );
+  assert.equal(res.commitSha, "sha-after-write");
 });
