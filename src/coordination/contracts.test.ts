@@ -63,6 +63,42 @@ function failingDiffFidelity(): DiffFidelityResult {
   });
 }
 
+function mainProtectionVerified(): MainProtectionResult {
+  return {
+    status: "MAIN_PROTECTION_VERIFIED",
+    branch: "main",
+    pullRequestRequired: true,
+    requiredChecksConfigured: true,
+    forcePushBlocked: true,
+    adminsEnforced: true,
+    reason: "vérifié",
+  };
+}
+
+function mainProtectionUnverified(): MainProtectionResult {
+  return {
+    status: "MAIN_PROTECTION_UNVERIFIED",
+    branch: "main",
+    pullRequestRequired: null,
+    requiredChecksConfigured: null,
+    forcePushBlocked: null,
+    adminsEnforced: null,
+    reason: "permission GitHub insuffisante pour lire la protection de branche",
+  };
+}
+
+function mainProtectionFailed(): MainProtectionResult {
+  return {
+    status: "MAIN_PROTECTION_FAILED",
+    branch: "main",
+    pullRequestRequired: false,
+    requiredChecksConfigured: false,
+    forcePushBlocked: false,
+    adminsEnforced: false,
+    reason: "force-push autorisé",
+  };
+}
+
 function validAuditPacketInput(overrides: Partial<AuditPacketInput> = {}): AuditPacketInput {
   const contextVersion = createInitialContextVersion({ missionId: "m1", traceId: "t1", baseSha: "sha1", content: { objective: "x" } });
   return {
@@ -131,8 +167,8 @@ test("1 — AuditPacket survit à un aller-retour JSON", () => {
 });
 
 test("1 — ReviewerVerdict et HumanGateDecision survivent à un aller-retour JSON", () => {
-  const packet = buildAuditPacket(validAuditPacketInput());
-  const verdict = buildReviewerVerdict(packet, "GO_FUSION", ["CI verte", "fidélité PASS"]);
+  const packet = buildAuditPacket(validAuditPacketInput({ mainProtection: mainProtectionVerified() }));
+  const verdict = buildReviewerVerdict(packet, "GO_FUSION", ["CI verte", "fidélité PASS", "main protégée"]);
   assert.deepEqual(JSON.parse(JSON.stringify(verdict)), verdict);
 
   const request = buildHumanGateRequest({ missionId: "m1", traceId: "t1", kind: "MERGE_APPROVAL", summary: "Fusion ?" });
@@ -188,15 +224,6 @@ test("6 — le DiffFidelityResult réel (PR-D) est porté tel quel dans l'AuditP
 test("7 — paquet Reviewer complet : AuditPacket → ReviewerVerdict GO_FUSION quand toutes les preuves sont favorables", () => {
   const context1 = createInitialContextVersion({ missionId: "m1", traceId: "t1", baseSha: "sha1", content: { objective: "x" } });
   const context2 = advanceContextVersion(context1, { objective: "x", finding: "critic review done" });
-  const mainProtection: MainProtectionResult = {
-    status: "MAIN_PROTECTION_VERIFIED",
-    branch: "main",
-    pullRequestRequired: true,
-    requiredChecksConfigured: true,
-    forcePushBlocked: true,
-    adminsEnforced: true,
-    reason: "vérifié",
-  };
   const packet = buildAuditPacket({
     missionId: "m1",
     traceId: "t1",
@@ -208,7 +235,7 @@ test("7 — paquet Reviewer complet : AuditPacket → ReviewerVerdict GO_FUSION 
     ci: ciSuccess(),
     testResults: { ran: true, passed: 20, failed: 0 },
     risks: ["Aucun risque identifié"],
-    mainProtection,
+    mainProtection: mainProtectionVerified(),
   });
   const verdict = buildReviewerVerdict(packet, "GO_FUSION", ["CI verte", "fidélité PASS", "main protégée"]);
   assert.equal(verdict.status, "GO_FUSION");
@@ -223,27 +250,36 @@ test("REFUS_FUSION ne requiert aucune preuve favorable particulière", () => {
 });
 
 test("buildReviewerVerdict refuse GO_FUSION si la CI réelle n'est pas success (jamais la parole du builder)", () => {
-  const packet = buildAuditPacket(validAuditPacketInput({ ci: ciFailure() }));
+  const packet = buildAuditPacket(validAuditPacketInput({ ci: ciFailure(), mainProtection: mainProtectionVerified() }));
   assert.throws(() => buildReviewerVerdict(packet, "GO_FUSION", ["tout va bien selon le builder"]), ReviewerVerdictInconsistentError);
 });
 
 test("buildReviewerVerdict refuse GO_FUSION si le contrôle de fidélité (PR-D) n'est pas PASS", () => {
-  const packet = buildAuditPacket(validAuditPacketInput({ diffFidelity: failingDiffFidelity() }));
+  const packet = buildAuditPacket(validAuditPacketInput({ diffFidelity: failingDiffFidelity(), mainProtection: mainProtectionVerified() }));
   assert.throws(() => buildReviewerVerdict(packet, "GO_FUSION", ["diff ok selon le builder"]), ReviewerVerdictInconsistentError);
 });
 
-test("buildReviewerVerdict refuse GO_FUSION si la protection de main est confirmée insuffisante", () => {
-  const mainProtection: MainProtectionResult = {
-    status: "MAIN_PROTECTION_FAILED",
-    branch: "main",
-    pullRequestRequired: false,
-    requiredChecksConfigured: false,
-    forcePushBlocked: false,
-    adminsEnforced: false,
-    reason: "force-push autorisé",
-  };
-  const packet = buildAuditPacket(validAuditPacketInput({ mainProtection }));
-  assert.throws(() => buildReviewerVerdict(packet, "GO_FUSION", ["ci ok"]), ReviewerVerdictInconsistentError);
+// --- Correction post-audit PR-E : vérification positive obligatoire de la protection de main (plan V5 §53) ---
+
+test("1 — mainProtection absent + GO_FUSION => refus (l'absence de vérification n'est jamais une preuve de protection)", () => {
+  const packet = buildAuditPacket(validAuditPacketInput()); // pas de mainProtection
+  assert.throws(() => buildReviewerVerdict(packet, "GO_FUSION", ["ci ok", "fidélité ok"]), ReviewerVerdictInconsistentError);
+});
+
+test("2 — MAIN_PROTECTION_UNVERIFIED + GO_FUSION => refus", () => {
+  const packet = buildAuditPacket(validAuditPacketInput({ mainProtection: mainProtectionUnverified() }));
+  assert.throws(() => buildReviewerVerdict(packet, "GO_FUSION", ["ci ok", "fidélité ok"]), ReviewerVerdictInconsistentError);
+});
+
+test("3 — MAIN_PROTECTION_FAILED + GO_FUSION => refus", () => {
+  const packet = buildAuditPacket(validAuditPacketInput({ mainProtection: mainProtectionFailed() }));
+  assert.throws(() => buildReviewerVerdict(packet, "GO_FUSION", ["ci ok", "fidélité ok"]), ReviewerVerdictInconsistentError);
+});
+
+test("4 — MAIN_PROTECTION_VERIFIED + CI success + fidelity PASS => GO_FUSION accepté", () => {
+  const packet = buildAuditPacket(validAuditPacketInput({ mainProtection: mainProtectionVerified() }));
+  const verdict = buildReviewerVerdict(packet, "GO_FUSION", ["ci ok", "fidélité ok", "main protégée"]);
+  assert.equal(verdict.status, "GO_FUSION");
 });
 
 test("buildReviewerVerdict exige au moins une raison", () => {

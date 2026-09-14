@@ -225,12 +225,19 @@ export class ReviewerVerdictInconsistentError extends Error {
 
 /**
  * Construit un verdict Reviewer à partir d'un AuditPacket. `GO_FUSION` ne
- * peut jamais être construit contre des preuves défavorables (CI non
- * `success`, fidélité `FAIL`, ou protection de main confirmée insuffisante)
- * — le verdict lui-même refuse d'exister s'il contredit les preuves, plutôt
- * que de faire confiance à l'appelant. Ceci reste un contrat de données :
- * `GO_FUSION` n'exécute aucune fusion, c'est une recommandation destinée au
- * Human Gate (§14.L du plan V5) — jamais un chemin de fusion automatique.
+ * peut jamais être construit contre des preuves défavorables ou manquantes
+ * (CI non `success`, fidélité non `PASS`, ou protection de main non
+ * `MAIN_PROTECTION_VERIFIED`) — le verdict lui-même refuse d'exister s'il
+ * contredit les preuves, plutôt que de faire confiance à l'appelant. Ceci
+ * reste un contrat de données : `GO_FUSION` n'exécute aucune fusion, c'est
+ * une recommandation destinée au Human Gate (§14.L du plan V5) — jamais un
+ * chemin de fusion automatique.
+ *
+ * Vérification positive de la protection de main (plan V5 §53) : l'absence
+ * de vérification (`mainProtection` non fourni) et `MAIN_PROTECTION_UNVERIFIED`
+ * sont traités exactement comme `MAIN_PROTECTION_FAILED` pour `GO_FUSION` —
+ * l'absence de preuve n'est jamais interprétée comme une preuve de
+ * protection.
  */
 export function buildReviewerVerdict(auditPacket: AuditPacket, status: ReviewerVerdictStatus, reasons: string[]): ReviewerVerdict {
   if (!Array.isArray(reasons) || reasons.length === 0) {
@@ -247,8 +254,10 @@ export function buildReviewerVerdict(auditPacket: AuditPacket, status: ReviewerV
         `GO_FUSION impossible : contrôle de fidélité = '${auditPacket.diffFidelity.fidelityStatus}'.`,
       );
     }
-    if (auditPacket.mainProtection && auditPacket.mainProtection.status === "MAIN_PROTECTION_FAILED") {
-      throw new ReviewerVerdictInconsistentError("GO_FUSION impossible : protection de main confirmée insuffisante (MAIN_PROTECTION_FAILED).");
+    if (!auditPacket.mainProtection || auditPacket.mainProtection.status !== "MAIN_PROTECTION_VERIFIED") {
+      throw new ReviewerVerdictInconsistentError(
+        `GO_FUSION impossible : protection de main non vérifiée positivement (statut = '${auditPacket.mainProtection?.status ?? "absent"}', attendu 'MAIN_PROTECTION_VERIFIED').`,
+      );
     }
   }
   return {
