@@ -260,6 +260,43 @@ export function getDb(): Database.Database {
       last_error TEXT,
       updated_at INTEGER NOT NULL
     );
+
+    -- Fondations JARVIS-00 (Coordination IA), plan V5 §5/§6/§60 — voir src/coordination/.
+    CREATE TABLE IF NOT EXISTS jarvis00_missions (
+      mission_id TEXT PRIMARY KEY,
+      trace_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      row_version INTEGER NOT NULL,
+      last_event_sequence INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS jarvis00_mission_events (
+      event_id TEXT PRIMARY KEY,
+      mission_id TEXT NOT NULL,
+      trace_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL,
+      event_type TEXT NOT NULL,
+      timestamp INTEGER NOT NULL,
+      payload_json TEXT,
+      payload_ref TEXT,
+      created_at INTEGER NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_jarvis00_mission_events_seq ON jarvis00_mission_events(mission_id, sequence);
+
+    CREATE TABLE IF NOT EXISTS jarvis00_context_versions (
+      mission_id TEXT NOT NULL,
+      trace_id TEXT NOT NULL,
+      context_version INTEGER NOT NULL,
+      schema_version INTEGER NOT NULL,
+      base_sha TEXT NOT NULL,
+      previous_context_hash TEXT,
+      context_hash TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (mission_id, context_version)
+    );
   `);
 
   // Additive replacement of the short-lived V1 workflow execution schema. The
