@@ -188,3 +188,5 @@ Tests de fumée (`node --test`) : embeddings déterministes/similarité,
 gestionnaire de budget de contexte, boucle agent (réponse simple, appel de
 compétence, sauvegarde/restauration de checkpoint) — sur fournisseur `mock`
 et base SQLite en mémoire, donc aucun réseau ni fichier requis.
+
+<!-- JARVIS_CHANTIER_MODIFY_TEST -->
