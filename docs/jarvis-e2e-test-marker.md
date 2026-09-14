@@ -1,0 +1,1 @@
+JARVIS-00 E2E test infrastructure marker — validation file.
