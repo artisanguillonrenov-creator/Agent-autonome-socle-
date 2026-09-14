@@ -27,7 +27,7 @@ import { getDb } from "../persistence/db.js";
 import type { ChatMessage } from "../types.js";
 import type { LLMProvider, ToolDefinition } from "../llm/provider.js";
 import { AgentTeamStore } from "../agents/agentTeamStore.js";
-import { BUREAU_SERVICE_IDS, getBureauLlmConfig, setBureauLlmConfig, type BureauServiceId } from "../orchestration/serviceRegistry.js";
+import { BUREAU_SERVICE_IDS, getBureauLlmConfig, setBureauLlmConfig, type BureauServiceId } from "../orchestration/serviceRegistry.js";import { createConversationRepository } from "./persistence/conversations/conversationRepositoryFactory.js";
 
 const taskStore = new TaskStore();
 const notificationStore = new NotificationStore();
@@ -1747,6 +1747,45 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         }
         agent.memory.facts.set(body.entity, body.attribute, body.value);
         sendJson(res, 200, { ok: true, facts: agent.memory.facts.all() });
+        return;
+      }
+      /** Validation stricte des payloads : bornage, types et détection de secrets interdits. */
+      function validateSecrets(str: string): boolean {
+        return /Bearer\s+\S+|ghp_[A-Za-z0-9_]+|sk-[A-Za-z0-9]+|password\s*[:=]/i.test(str);
+      }
+
+      if (req.method === "POST" && pathname === "/api/memory/working") {
+        let body: any;
+        try { body = JSON.parse((await readBody(req)) || "{}"); } catch { sendJson(res, 400, { error: "JSON invalide" }); return; }
+        if (typeof body.conversationId !== "string" || body.conversationId.length !== 36) { sendJson(res, 400, { error: "conversationId requis (UUID)" }); return; }
+        if (!Array.isArray(body.messages) || body.messages.length === 0 || body.messages.length > 50) { sendJson(res, 400, { error: "messages doit être un tableau de 1 à 50 éléments" }); return; }
+        for (const m of body.messages) {
+          if (typeof m.role !== "string" || !["system","user","assistant","tool"].includes(m.role)) { sendJson(res, 400, { error: "role invalide" }); return; }
+          if (typeof m.content !== "string" || m.content.length > 4000) { sendJson(res, 400, { error: "content doit être une chaîne de ≤ 4000 caractères" }); return; }
+          if (validateSecrets(m.content)) { sendJson(res, 400, { error: "SECRET_VALUES_FORBIDDEN" }); return; }
+        }
+        const repo = createConversationRepository();
+        await repo.initializeSession(body.conversationId, null);
+        const stored = await repo.importHistoricalMessages(body.conversationId, body.messages as any);
+        agent.memory.restoreStoredMessages(stored, undefined);
+        sendJson(res, 200, { ok: true, count: stored.length });
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/memory/preferences") {
+        let body: any;
+        try { body = JSON.parse((await readBody(req)) || "{}"); } catch { sendJson(res, 400, { error: "JSON invalide" }); return; }
+        if (typeof body.conversationId !== "string" || body.conversationId.length !== 36) { sendJson(res, 400, { error: "conversationId requis (UUID)" }); return; }
+        if (typeof body.preferences !== "object" || body.preferences === null || Array.isArray(body.preferences)) { sendJson(res, 400, { error: "preferences doit être un objet" }); return; }
+        const raw = JSON.stringify(body.preferences);
+        if (raw.length > 2000) { sendJson(res, 400, { error: "preferences trop volumineux (max 2000 chars)" }); return; }
+        if (validateSecrets(raw)) { sendJson(res, 400, { error: "SECRET_VALUES_FORBIDDEN" }); return; }
+        const repo = createConversationRepository();
+        await repo.initializeSession(body.conversationId, null);
+        const prefMessage: any = { role: "system", content: `__JARVIS_PREFERENCES__: ${raw}` };
+        const stored = await repo.importHistoricalMessages(body.conversationId, [prefMessage]);
+        agent.memory.userModel.set("preferences", body.preferences);
+        sendJson(res, 200, { ok: true });
         return;
       }
 
