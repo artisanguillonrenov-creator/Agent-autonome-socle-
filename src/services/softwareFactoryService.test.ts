@@ -1418,6 +1418,8 @@ function mockOctokitForWriteFlow(overrides: {
   baseSha?: string;
   createOrUpdateFileContents?: (args: { content: string }) => Promise<{ data: unknown }>;
   createRefCalls?: { count: number };
+  /** Si fourni, getContent renvoie ce contenu existant au lieu de lever un 404. */
+  existingContent?: string;
 } = {}): Octokit {
   const baseSha = overrides.baseSha ?? "base-sha";
   const createRefCalls = overrides.createRefCalls;
@@ -1425,7 +1427,12 @@ function mockOctokitForWriteFlow(overrides: {
     rest: {
       repos: {
         get: async () => ({ data: { default_branch: "main" } }),
-        getContent: async () => { throw new Error("404 Not Found"); },
+        getContent:
+          overrides.existingContent !== undefined
+            ? async () => ({
+                data: { type: "file", content: Buffer.from(overrides.existingContent!, "utf-8").toString("base64"), encoding: "base64", sha: "existing-file-sha" },
+              })
+            : async () => { throw new Error("404 Not Found"); },
         createOrUpdateFileContents:
           overrides.createOrUpdateFileContents ??
           (async () => ({ data: { commit: { sha: "sha-after-write" } } })),
@@ -1603,4 +1610,281 @@ test("PR-B — expectedBaseSha absent (appelant historique) : comportement incha
     "task-no-expected-base",
   );
   assert.equal(res.commitSha, "sha-after-write");
+});
+
+// --- PR-D : diff/fidelity control ---
+
+test("PR-D.A — changement exact attendu sur fichier existant : diffFidelity PASS et exposé dans le résultat", async () => {
+  const octokit = mockOctokitForWriteFlow({ existingContent: "ligne1\nligne2\nligne3\nligne4\nligne5\nligne6" });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const res = await service.executeWorkflow(
+    {
+      owner: "artisanguillonrenov-creator",
+      repo: "Agent-autonome-socle-",
+      filePath: "docs/fidelity.md",
+      instructions: "Modifier la ligne 3",
+      exactContent: "ligne1\nligne2\nligne3-modifiee\nligne4\nligne5\nligne6",
+      expectedFilePath: "docs/fidelity.md",
+      expectedChangeType: "update",
+    },
+    "task-fidelity-a",
+  );
+  assert.equal(res.diffFidelity.fidelityStatus, "PASS");
+  assert.equal(res.diffFidelity.files[0].changeType, "modified");
+  assert.equal(res.commitSha, "sha-after-write");
+});
+
+test("PR-D.B — fichier inattendu (hors périmètre de la mission) : DIFF_FIDELITY_FAILED avant toute écriture", async () => {
+  const createRefCalls = { count: 0 };
+  let writeAttempted = false;
+  const octokit = mockOctokitForWriteFlow({
+    createRefCalls,
+    createOrUpdateFileContents: async () => { writeAttempted = true; return { data: { commit: { sha: "should-not-happen" } } }; },
+  });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  await assert.rejects(
+    () =>
+      service.executeWorkflow(
+        {
+          owner: "artisanguillonrenov-creator",
+          repo: "Agent-autonome-socle-",
+          filePath: "docs/unexpected.md",
+          instructions: "Créer un fichier",
+          exactContent: "contenu",
+          createIfMissing: true,
+          expectedFilePath: "docs/authorized.md",
+        },
+        "task-fidelity-b",
+      ),
+    (err: unknown) => {
+      assert.ok(err instanceof SoftwareFactoryWorkflowError);
+      assert.equal(err.code, "DIFF_FIDELITY_FAILED");
+      assert.equal(err.sideEffectState, "none");
+      return true;
+    },
+  );
+  assert.equal(createRefCalls.count, 0);
+  assert.equal(writeAttempted, false);
+});
+
+test("PR-D.C — suppression inattendue (contenu vidé) sur fichier existant : DIFF_FIDELITY_FAILED avant toute écriture", async () => {
+  const createRefCalls = { count: 0 };
+  let writeAttempted = false;
+  const octokit = mockOctokitForWriteFlow({
+    existingContent: "contenu important\nligne 2\nligne 3",
+    createRefCalls,
+    createOrUpdateFileContents: async () => { writeAttempted = true; return { data: { commit: { sha: "should-not-happen" } } }; },
+  });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  await assert.rejects(
+    () =>
+      service.executeWorkflow(
+        {
+          owner: "artisanguillonrenov-creator",
+          repo: "Agent-autonome-socle-",
+          filePath: "docs/fidelity.md",
+          instructions: "Ajouter une phrase",
+          exactContent: "",
+        },
+        "task-fidelity-c",
+      ),
+    (err: unknown) => {
+      assert.ok(err instanceof SoftwareFactoryWorkflowError);
+      assert.equal(err.code, "DIFF_FIDELITY_FAILED");
+      return true;
+    },
+  );
+  assert.equal(createRefCalls.count, 0);
+  assert.equal(writeAttempted, false);
+});
+
+test("PR-D.D — contenu hors périmètre modifié (réécriture massive non justifiée) : DIFF_FIDELITY_FAILED avant toute écriture", async () => {
+  const createRefCalls = { count: 0 };
+  let writeAttempted = false;
+  const originalContent = Array.from({ length: 20 }, (_, i) => `ligne originale ${i}`).join("\n");
+  const octokit = mockOctokitForWriteFlow({
+    existingContent: originalContent,
+    createRefCalls,
+    createOrUpdateFileContents: async () => { writeAttempted = true; return { data: { commit: { sha: "should-not-happen" } } }; },
+  });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  await assert.rejects(
+    () =>
+      service.executeWorkflow(
+        {
+          owner: "artisanguillonrenov-creator",
+          repo: "Agent-autonome-socle-",
+          filePath: "docs/fidelity.md",
+          instructions: "Corriger une faute de frappe",
+          exactContent: "contenu totalement différent, sans rapport avec l'original",
+        },
+        "task-fidelity-d",
+      ),
+    (err: unknown) => {
+      assert.ok(err instanceof SoftwareFactoryWorkflowError);
+      assert.equal(err.code, "DIFF_FIDELITY_FAILED");
+      return true;
+    },
+  );
+  assert.equal(createRefCalls.count, 0);
+  assert.equal(writeAttempted, false);
+});
+
+test("PR-D.E — création autorisée (fichier absent, expectedChangeType=create) : PASS, écriture normale", async () => {
+  const octokit = mockOctokitForWriteFlow();
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const res = await service.executeWorkflow(
+    {
+      owner: "artisanguillonrenov-creator",
+      repo: "Agent-autonome-socle-",
+      filePath: "docs/new-fidelity.md",
+      instructions: "Créer le fichier",
+      exactContent: "# Nouveau document",
+      createIfMissing: true,
+      expectedChangeType: "create",
+    },
+    "task-fidelity-e",
+  );
+  assert.equal(res.diffFidelity.fidelityStatus, "PASS");
+  assert.equal(res.diffFidelity.files[0].changeType, "created");
+  assert.equal(res.commitSha, "sha-after-write");
+});
+
+test("PR-D.F — création demandée alors que le fichier existe déjà : DIFF_FIDELITY_FAILED, jamais de remplacement silencieux", async () => {
+  const createRefCalls = { count: 0 };
+  let writeAttempted = false;
+  const octokit = mockOctokitForWriteFlow({
+    existingContent: "contenu préexistant que la mission ignorait",
+    createRefCalls,
+    createOrUpdateFileContents: async () => { writeAttempted = true; return { data: { commit: { sha: "should-not-happen" } } }; },
+  });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  await assert.rejects(
+    () =>
+      service.executeWorkflow(
+        {
+          owner: "artisanguillonrenov-creator",
+          repo: "Agent-autonome-socle-",
+          filePath: "docs/fidelity.md",
+          instructions: "Créer le fichier",
+          exactContent: "contenu qui écraserait l'existant",
+          createIfMissing: true,
+          expectedChangeType: "create",
+        },
+        "task-fidelity-f",
+      ),
+    (err: unknown) => {
+      assert.ok(err instanceof SoftwareFactoryWorkflowError);
+      assert.equal(err.code, "DIFF_FIDELITY_FAILED");
+      return true;
+    },
+  );
+  assert.equal(createRefCalls.count, 0, "aucune branche ne doit être créée : le fichier existant ne doit jamais être silencieusement remplacé");
+  assert.equal(writeAttempted, false);
+});
+
+test("PR-D.G — diff vide/inutile (contenu final identique à l'original) : comportement propre, PASS", async () => {
+  const identical = "ligne1\nligne2\nligne3\nligne4\nligne5\nligne6\nligne7";
+  const octokit = mockOctokitForWriteFlow({ existingContent: identical });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const res = await service.executeWorkflow(
+    {
+      owner: "artisanguillonrenov-creator",
+      repo: "Agent-autonome-socle-",
+      filePath: "docs/fidelity.md",
+      instructions: "Aucun changement réel",
+      exactContent: identical,
+    },
+    "task-fidelity-g",
+  );
+  assert.equal(res.diffFidelity.fidelityStatus, "PASS");
+  assert.equal(res.diffFidelity.additions, 0);
+  assert.equal(res.diffFidelity.deletions, 0);
+});
+
+test("PR-D.I — compatibilité avec SECRET_DETECTED : un secret bloque avant même d'atteindre le contrôle de fidélité", async () => {
+  const createRefCalls = { count: 0 };
+  const octokit = mockOctokitForWriteFlow({ createRefCalls });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  // Contenu qui échouerait de toute façon la fidélité (fichier inattendu) ET contient un secret :
+  // le secret guard (étage antérieur) doit se déclencher en premier.
+  await assert.rejects(
+    () =>
+      service.executeWorkflow(
+        {
+          owner: "artisanguillonrenov-creator",
+          repo: "Agent-autonome-socle-",
+          filePath: "docs/fidelity.md",
+          instructions: "Ajouter la config",
+          exactContent: "GITHUB_TOKEN=ghp_1234567890abcdefghij1234567890abcdef",
+          createIfMissing: true,
+          expectedFilePath: "docs/other.md", // aurait aussi échoué la fidélité
+        },
+        "task-fidelity-secret-priority",
+      ),
+    (err: unknown) => {
+      assert.ok(err instanceof SoftwareFactoryWorkflowError);
+      assert.equal(err.code, "SECRET_DETECTED", "le secret guard doit se déclencher avant le contrôle de fidélité");
+      return true;
+    },
+  );
+  assert.equal(createRefCalls.count, 0);
+});
+
+test("PR-D.J — compatibilité avec STALE_BASE : une base obsolète bloque avant même d'atteindre le contrôle de fidélité", async () => {
+  const createRefCalls = { count: 0 };
+  const octokit = mockOctokitForWriteFlow({ baseSha: "new-head-after-merge", createRefCalls });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  await assert.rejects(
+    () =>
+      service.executeWorkflow(
+        {
+          owner: "artisanguillonrenov-creator",
+          repo: "Agent-autonome-socle-",
+          filePath: "docs/fidelity.md",
+          instructions: "Créer le fichier",
+          exactContent: "contenu ok",
+          createIfMissing: true,
+          expectedBaseSha: "stale-sha",
+          expectedFilePath: "docs/other-file.md", // aurait aussi échoué la fidélité
+        },
+        "task-fidelity-stale-priority",
+      ),
+    (err: unknown) => {
+      assert.ok(err instanceof SoftwareFactoryWorkflowError);
+      assert.equal(err.code, "STALE_BASE", "la protection de base obsolète doit se déclencher avant le contrôle de fidélité");
+      return true;
+    },
+  );
+  assert.equal(createRefCalls.count, 0);
+});
+
+test("PR-D — aucun champ de fidélité fourni (appelant historique) : comportement inchangé, aucune régression", async () => {
+  const octokit = mockOctokitForWriteFlow({ existingContent: "contenu existant sans rapport avec le seuil de réécriture" });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const res = await service.executeWorkflow(
+    {
+      owner: "artisanguillonrenov-creator",
+      repo: "Agent-autonome-socle-",
+      filePath: "docs/fidelity.md",
+      instructions: "Remplacer tout le contenu",
+      exactContent: "contenu complètement réécrit, sans expectedFilePath/expectedChangeType/allowFullRewrite déclarés",
+    },
+    "task-fidelity-no-fields",
+  );
+  // Sans champs de fidélité déclarés, seul le garde-fou de réécriture massive
+  // (activé dès qu'un fichier existant est modifié) peut s'appliquer ; ici le
+  // fichier original ne dépasse pas le seuil de lignes (MIN_LINES_FOR_REWRITE_GUARD),
+  // donc PASS — la régression testée est l'absence de crash/de blocage inattendu.
+  assert.equal(res.diffFidelity.fidelityStatus, "PASS");
 });
