@@ -136,6 +136,39 @@ export function parseRepoUrl(repoUrlStr?: string): { owner: string; repo: string
   return null;
 }
 
+/**
+ * Valide un champ de fidélité/sécurité optionnel transmis depuis
+ * `taskReq.context` : absent (undefined/null) est toujours accepté (aucune
+ * vérification, comportement historique) ; présent mais du mauvais type ou
+ * de forme invalide lève une erreur structurée avant tout accès GitHub.
+ */
+function optionalNonEmptyString(ctx: Record<string, unknown>, field: string, code: string): string | undefined {
+  const value = ctx[field];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(`${code}: ${field} doit être une chaîne non vide si fourni.`);
+  }
+  return value;
+}
+
+function optionalChangeType(ctx: Record<string, unknown>): "create" | "update" | undefined {
+  const value = ctx.expectedChangeType;
+  if (value === undefined || value === null) return undefined;
+  if (value !== "create" && value !== "update") {
+    throw new Error('EXPECTED_CHANGE_TYPE_INVALID: expectedChangeType doit être "create" ou "update" si fourni.');
+  }
+  return value;
+}
+
+function optionalBoolean(ctx: Record<string, unknown>, field: string, code: string): boolean | undefined {
+  const value = ctx[field];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "boolean") {
+    throw new Error(`${code}: ${field} doit être un booléen si fourni.`);
+  }
+  return value;
+}
+
 export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
   const ctx = taskReq.context || {};
 
@@ -147,6 +180,16 @@ export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
   const objectiveStr = String(taskReq.objective || "").trim();
   const instructionsStr = String(ctx.instructions || "").trim();
   const createIfMissing = ctx.createIfMissing === true;
+
+  // Champs de fidélité/sécurité (PR-B/PR-D) : lus et validés strictement ici,
+  // avant tout accès réseau, pour que le chemin runtime réel
+  // (Jarvis "software_development" → dispatch → TaskRequest.context →
+  // extractTaskParams → executeWorkflow) bénéficie des mêmes garde-fous que
+  // les appels directs à executeWorkflow.
+  const expectedBaseSha = optionalNonEmptyString(ctx, "expectedBaseSha", "EXPECTED_BASE_SHA_INVALID");
+  const expectedFilePath = optionalNonEmptyString(ctx, "expectedFilePath", "EXPECTED_FILE_PATH_INVALID");
+  const expectedChangeType = optionalChangeType(ctx);
+  const allowFullRewrite = optionalBoolean(ctx, "allowFullRewrite", "ALLOW_FULL_REWRITE_INVALID");
   const targetBranchMatch = instructionsStr.match(/^\s*TARGET_BRANCH\s*=\s*(.*?)\s*$/im);
   const targetPrMatch = instructionsStr.match(/^\s*TARGET_PR\s*=\s*(.*?)\s*$/im);
   const targetBranch = targetBranchMatch?.[1]?.trim();
@@ -226,7 +269,20 @@ export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
 
   const instructions = (instructionsStr || objectiveStr || "Mettre à jour le code selon la spécification").trim();
 
-  return { owner, repo, filePath, instructions, exactContent, targetBranch, targetPr, createIfMissing };
+  return {
+    owner,
+    repo,
+    filePath,
+    instructions,
+    exactContent,
+    targetBranch,
+    targetPr,
+    createIfMissing,
+    expectedBaseSha,
+    expectedFilePath,
+    expectedChangeType,
+    allowFullRewrite,
+  };
 }
 
 /**

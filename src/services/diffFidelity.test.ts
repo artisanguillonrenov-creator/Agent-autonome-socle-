@@ -127,3 +127,54 @@ test("aucun champ expected fourni : comportement historique, aucune vérificatio
   });
   assert.equal(result.fidelityStatus, "PASS");
 });
+
+// --- Correction bloquante : le fallback au-delà de MAX_DIFF_CELLS ne doit
+// jamais fabriquer un remplacement total. ---
+
+test("diffLines : fichier volumineux (> seuil MAX_DIFF_CELLS), une seule ligne modifiée → diff exact grâce au retrait du préfixe/suffixe commun", () => {
+  // 2001 lignes : n*m pour le fichier ENTIER (~4 004 001) dépasserait déjà
+  // MAX_DIFF_CELLS (4 000 000) si on ne réduisait pas au "cœur" différent.
+  const lineCount = 2001;
+  const lines = Array.from({ length: lineCount }, (_, i) => `ligne ${i}`);
+  const original = lines.join("\n");
+  const modifiedLines = [...lines];
+  modifiedLines[1000] = "ligne 1000 MODIFIEE";
+  const updated = modifiedLines.join("\n");
+
+  const result = diffLines(original, updated);
+  // Une seule ligne change : le diff exact doit le refléter précisément,
+  // pas un remplacement des 2001 lignes.
+  assert.equal(result.additions, 1);
+  assert.equal(result.deletions, 1);
+});
+
+test("checkDiffFidelity : modification normale d'une seule ligne sur un très grand fichier → PASS, jamais DIFF_FIDELITY_FAILED", () => {
+  const lineCount = 2001;
+  const lines = Array.from({ length: lineCount }, (_, i) => `ligne ${i}`);
+  const original = lines.join("\n");
+  const modifiedLines = [...lines];
+  modifiedLines[1000] = "ligne 1000 MODIFIEE";
+  const updated = modifiedLines.join("\n");
+
+  const result = checkDiffFidelity({ filePath: "docs/big.md", fileExistedBefore: true, originalContent: original, updatedContent: updated });
+  assert.equal(result.fidelityStatus, "PASS", `un fichier volumineux avec une seule ligne modifiée ne doit jamais être traité comme une réécriture totale (reason: ${result.reason})`);
+  assert.equal(result.additions, 1);
+  assert.equal(result.deletions, 1);
+});
+
+test("diffCore (via diffLines) : cœur réellement volumineux et sans rapport (pas de préfixe/suffixe commun) → jamais 0 addition/deletion fabriqués, mais jamais non plus un faux 100% par construction", () => {
+  // Cas pathologique où le préfixe/suffixe commun ne réduit rien (première et
+  // dernière ligne déjà différentes) et où le "cœur" dépasse MAX_DIFF_CELLS :
+  // vérifie que le repli (intersection de multiset) reste cohérent — ni un
+  // remplacement total artificiel, ni une conservation totale artificielle
+  // quand le contenu est réellement sans rapport.
+  const n = 2500;
+  const original = Array.from({ length: n }, (_, i) => `orig-unique-line-${i}`).join("\n");
+  const updated = Array.from({ length: n }, (_, i) => `completely-different-unique-line-${i}`).join("\n");
+  const result = diffLines(original, updated);
+  // Aucune ligne n'est partagée entre les deux côtés (contenus tous uniques et distincts) :
+  // l'intersection de multiset est bien 0, donc additions=n, deletions=n ici — mais ce n'est
+  // pas une valeur fabriquée arbitrairement, elle découle du contenu réellement disjoint.
+  assert.equal(result.additions, n);
+  assert.equal(result.deletions, n);
+});

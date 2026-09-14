@@ -34,6 +34,24 @@ test("deep_research direct crée un workspace et ses deux artifacts",async()=>{c
 
 test("software_development encode TARGET_BRANCH et TARGET_PR dans instructions",async()=>{const h=harness(),calls:any[]=[];(h.orchestrator as any).dispatchCapability=async(d:any)=>{calls.push(d);return{taskId:"x",traceId:"t",status:"COMPLETED",selectedService:"s"};};const skill=h.get("software_development");for(const input of [{targetBranch:"branch"},{targetPr:42},{targetBranch:"branch",targetPr:42},{}])await skill.handler!({objective:"x",filePath:"a.ts",...input},{} as any);assert.match(calls[0].context.instructions,/^TARGET_BRANCH=branch$/);assert.match(calls[1].context.instructions,/^TARGET_PR=42$/);assert.match(calls[2].context.instructions,/TARGET_BRANCH=branch\nTARGET_PR=42/);assert.equal(calls[3].context.instructions,"");assert.equal(calls.every(c=>c.context.neverAutoMerge===true),true);});
 
+test("software_development transmet expectedBaseSha/expectedFilePath/expectedChangeType/allowFullRewrite jusqu'au contexte de dispatch (PR-D, correction bloquante)",async()=>{
+  const h=harness(),calls:any[]=[];
+  (h.orchestrator as any).dispatchCapability=async(d:any)=>{calls.push(d);return{taskId:"x",traceId:"t",status:"COMPLETED",selectedService:"s"};};
+  const skill=h.get("software_development");
+  await skill.handler!({objective:"x",filePath:"a.ts",expectedBaseSha:"sha123",expectedFilePath:"a.ts",expectedChangeType:"update",allowFullRewrite:true},{} as any);
+  assert.equal(calls[0].context.expectedBaseSha,"sha123");
+  assert.equal(calls[0].context.expectedFilePath,"a.ts");
+  assert.equal(calls[0].context.expectedChangeType,"update");
+  assert.equal(calls[0].context.allowFullRewrite,true);
+
+  // Absents de l'appel LLM : ne doivent pas être fabriqués (undefined transmis tel quel).
+  await skill.handler!({objective:"x",filePath:"b.ts"},{} as any);
+  assert.equal(calls[1].context.expectedBaseSha,undefined);
+  assert.equal(calls[1].context.expectedFilePath,undefined);
+  assert.equal(calls[1].context.expectedChangeType,undefined);
+  assert.equal(calls[1].context.allowFullRewrite,undefined);
+});
+
 test("monitor_web crée une vraie WATCH deep_research",async()=>{const h=harness(),result=JSON.parse(await h.get("execute_workflow").handler!({workflowName:"monitor_web",inputs:{title:"watch",objective:"observe",repeatIntervalMs:60000,firstRunAt:123,queries:["q"]}},{toolCallId:"watch-1"} as any));const task=new TaskStore().get(result.scheduleId)!;assert.equal(task.taskType,"WATCH");assert.equal(task.repeatIntervalMs,60000);const payload=JSON.parse((getDb().prepare("SELECT payload_json FROM tasks WHERE id=?").get(task.id) as any).payload_json);assert.equal(payload.capability,"deep_research");assert.deepEqual(payload.context.queries,["q"]);const scheduler=new Scheduler(h.orchestrator);await scheduler.tick(123);await new BackgroundRunner(h.orchestrator).tick();await scheduler.tick(124);assert.equal(h.orchestrator.store.listOperations()[0].status,"COMPLETED");assert.equal(h.orchestrator.store.listOperations()[0].workspaceId!==undefined,true);});
 
 test("workflow conserve les arrays, valide les types et applique le lifecycle",()=>{const h=harness(),compare=h.workflows.get("compare_sources")!;assert.deepEqual(h.workflows.compile(compare,{topic:"x",queries:["a","b"]}).steps[0].context.queries,["a","b"]);assert.throws(()=>h.workflows.compile(compare,{topic:2}),/WORKFLOW_INPUT_INVALID/);getDb().prepare("UPDATE workflows SET status='DRAFT' WHERE id='compare_sources'").run();assert.throws(()=>h.workflows.execute("compare_sources",{topic:"x"},h.planner,h.services,"draft"),/WORKFLOW_NOT_ACTIVE/);assert.equal(h.workflows.setStatus("compare_sources","ACTIVE",h.services),true);assert.equal(h.workflows.setStatus("compare_sources","DISABLED",h.services),true);assert.throws(()=>h.workflows.execute("compare_sources",{topic:"x"},h.planner,h.services,"disabled"),/WORKFLOW_NOT_ACTIVE/);assert.equal(h.workflows.setStatus("compare_sources","ACTIVE",h.services),true);assert.equal(h.workflows.setStatus("compare_sources","ARCHIVED",h.services),true);assert.throws(()=>h.workflows.setStatus("compare_sources","ACTIVE",h.services),/WORKFLOW_STATUS_TRANSITION_INVALID/);});

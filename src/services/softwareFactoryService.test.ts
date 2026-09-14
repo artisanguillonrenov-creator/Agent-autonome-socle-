@@ -1888,3 +1888,186 @@ test("PR-D — aucun champ de fidélité fourni (appelant historique) : comporte
   // donc PASS — la régression testée est l'absence de crash/de blocage inattendu.
   assert.equal(res.diffFidelity.fidelityStatus, "PASS");
 });
+
+// --- Correction bloquante PR-D : les champs de fidélité/sécurité doivent
+// traverser le chemin runtime réel (TaskRequest.context → extractTaskParams
+// → executeWorkflow), pas seulement les appels directs à executeWorkflow. ---
+
+function mockOctokitForTaskRequestFlow(overrides: {
+  baseSha?: string;
+  existingContent?: string;
+  calls?: string[];
+} = {}): Octokit {
+  const baseSha = overrides.baseSha ?? "base-sha";
+  const calls = overrides.calls;
+  const record = (c: string) => { if (calls) calls.push(c); };
+  return {
+    rest: {
+      repos: {
+        get: async () => { record("repos.get"); return { data: { default_branch: "main" } }; },
+        getContent:
+          overrides.existingContent !== undefined
+            ? async () => { record("repos.getContent"); return { data: { type: "file", content: Buffer.from(overrides.existingContent!, "utf-8").toString("base64"), encoding: "base64", sha: "existing-file-sha" } }; }
+            : async () => { record("repos.getContent"); throw new Error("404 Not Found"); },
+        createOrUpdateFileContents: async () => { record("repos.createOrUpdateFileContents"); return { data: { commit: { sha: "sha-after-write" } } }; },
+        compareCommits: async () => { record("repos.compareCommits"); return { data: { files: [{ filename: "docs/runtime.md", status: "added" }] } }; },
+      },
+      git: {
+        getRef: async ({ ref }: { ref: string }) => {
+          record(`git.getRef:${ref}`);
+          if (ref.startsWith("heads/jarvis/")) throw new Error("404 Not Found");
+          return { data: { object: { sha: baseSha } } };
+        },
+        createRef: async () => { record("git.createRef"); return { data: {} }; },
+      },
+      pulls: {
+        list: async () => { record("pulls.list"); return { data: [] }; },
+        create: async () => { record("pulls.create"); return { data: { html_url: "https://github.com/org/repo/pull/77", number: 77 } }; },
+      },
+    },
+  } as unknown as Octokit;
+}
+
+function baseTaskRequest(context: Record<string, unknown>, taskId: string): TaskRequest {
+  return {
+    schema_version: "1.0",
+    task_id: taskId,
+    trace_id: `trace-${taskId}`,
+    idempotency_key: `idemp-${taskId}`,
+    capability: "software_development",
+    objective: "Tâche de test du chemin runtime",
+    context,
+    constraints: [],
+    priority: "medium",
+    permissions: [],
+  };
+}
+
+test("Chemin runtime 1 — expectedFilePath dans TaskRequest.context atteint réellement le fidelity gate", async () => {
+  const calls: string[] = [];
+  const octokit = mockOctokitForTaskRequestFlow({ calls });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const req = baseTaskRequest(
+    { filePath: "docs/runtime.md", instructions: "Créer le fichier", exactContent: "contenu", createIfMissing: true, expectedFilePath: "docs/authorized-only.md" },
+    "task-runtime-expected-file-path",
+  );
+  const events = await service.handleTaskRequest(req);
+  const failed = events.find((e) => e.type === "TASK_FAILED");
+  assert.ok(failed, "un événement TASK_FAILED doit être émis");
+  assert.equal(failed?.payload.error_code, "DIFF_FIDELITY_FAILED");
+  assert.equal(calls.includes("git.createRef"), false, "aucune branche ne doit être créée");
+  assert.equal(calls.includes("repos.createOrUpdateFileContents"), false, "aucun commit ne doit être tenté");
+});
+
+test("Chemin runtime 2 — expectedChangeType dans TaskRequest.context atteint réellement le fidelity gate", async () => {
+  const calls: string[] = [];
+  const octokit = mockOctokitForTaskRequestFlow({ calls, existingContent: "contenu préexistant que la mission ignorait" });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const req = baseTaskRequest(
+    { filePath: "docs/runtime.md", instructions: "Créer le fichier", exactContent: "contenu qui écraserait l'existant", createIfMissing: true, expectedChangeType: "create" },
+    "task-runtime-expected-change-type",
+  );
+  const events = await service.handleTaskRequest(req);
+  const failed = events.find((e) => e.type === "TASK_FAILED");
+  assert.ok(failed);
+  assert.equal(failed?.payload.error_code, "DIFF_FIDELITY_FAILED");
+  assert.equal(calls.includes("repos.createOrUpdateFileContents"), false);
+});
+
+test("Chemin runtime 3 — allowFullRewrite dans TaskRequest.context atteint réellement le fidelity gate (lève le blocage de réécriture massive)", async () => {
+  const originalContent = Array.from({ length: 20 }, (_, i) => `ligne originale ${i}`).join("\n");
+  const calls: string[] = [];
+  const octokit = mockOctokitForTaskRequestFlow({ calls, existingContent: originalContent });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  // Sans allowFullRewrite, cette même réécriture échouerait (ratio de rétention < 20%).
+  const reqBlocked = baseTaskRequest(
+    { filePath: "docs/runtime.md", instructions: "Réécrire le document", exactContent: "contenu totalement différent, sans rapport avec l'original" },
+    "task-runtime-rewrite-blocked",
+  );
+  const blockedEvents = await service.handleTaskRequest(reqBlocked);
+  assert.equal(blockedEvents.find((e) => e.type === "TASK_FAILED")?.payload.error_code, "DIFF_FIDELITY_FAILED");
+
+  // Avec allowFullRewrite=true transmis dans le contexte, la même réécriture doit réussir.
+  const reqAllowed = baseTaskRequest(
+    { filePath: "docs/runtime.md", instructions: "Réécrire le document", exactContent: "contenu totalement différent, sans rapport avec l'original", allowFullRewrite: true },
+    "task-runtime-rewrite-allowed",
+  );
+  const allowedEvents = await service.handleTaskRequest(reqAllowed);
+  const completed = allowedEvents.find((e) => e.type === "TASK_COMPLETED");
+  assert.ok(completed, "allowFullRewrite=true transmis via TaskRequest.context doit réellement lever le blocage");
+  assert.ok(calls.includes("repos.createOrUpdateFileContents"));
+});
+
+test("Chemin runtime 4 — expectedBaseSha dans TaskRequest.context atteint réellement STALE_BASE", async () => {
+  const calls: string[] = [];
+  const octokit = mockOctokitForTaskRequestFlow({ calls, baseSha: "new-head-after-someone-else-merged" });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const req = baseTaskRequest(
+    { filePath: "docs/runtime.md", instructions: "Créer le fichier", exactContent: "contenu", createIfMissing: true, expectedBaseSha: "stale-sha-from-when-mission-was-planned" },
+    "task-runtime-stale-base",
+  );
+  const events = await service.handleTaskRequest(req);
+  const failed = events.find((e) => e.type === "TASK_FAILED");
+  assert.ok(failed);
+  assert.equal(failed?.payload.error_code, "STALE_BASE");
+  assert.equal(calls.includes("git.createRef"), false);
+  assert.equal(calls.includes("repos.createOrUpdateFileContents"), false);
+});
+
+test("Chemin runtime 5 — une valeur invalide (expectedChangeType inconnu) est rejetée avant toute écriture GitHub", async () => {
+  const calls: string[] = [];
+  const octokit = mockOctokitForTaskRequestFlow({ calls });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const req = baseTaskRequest(
+    { filePath: "docs/runtime.md", instructions: "Créer le fichier", exactContent: "contenu", createIfMissing: true, expectedChangeType: "delete" },
+    "task-runtime-invalid-change-type",
+  );
+  const events = await service.handleTaskRequest(req);
+  const failed = events.find((e) => e.type === "TASK_FAILED");
+  assert.ok(failed);
+  assert.equal(failed?.payload.error_code, "EXPECTED_CHANGE_TYPE_INVALID");
+  assert.equal(calls.length, 0, "aucun appel GitHub, même en lecture, ne doit avoir lieu avant la validation des champs");
+});
+
+test("Chemin runtime — validation stricte des types pour les 4 champs (rejet avant toute écriture)", async () => {
+  const cases: Array<{ context: Record<string, unknown>; expectedCode: string }> = [
+    { context: { expectedBaseSha: "" }, expectedCode: "EXPECTED_BASE_SHA_INVALID" },
+    { context: { expectedBaseSha: 123 }, expectedCode: "EXPECTED_BASE_SHA_INVALID" },
+    { context: { expectedFilePath: "" }, expectedCode: "EXPECTED_FILE_PATH_INVALID" },
+    { context: { expectedFilePath: 123 }, expectedCode: "EXPECTED_FILE_PATH_INVALID" },
+    { context: { expectedChangeType: "delete" }, expectedCode: "EXPECTED_CHANGE_TYPE_INVALID" },
+    { context: { expectedChangeType: 1 }, expectedCode: "EXPECTED_CHANGE_TYPE_INVALID" },
+    { context: { allowFullRewrite: "true" }, expectedCode: "ALLOW_FULL_REWRITE_INVALID" },
+    { context: { allowFullRewrite: 1 }, expectedCode: "ALLOW_FULL_REWRITE_INVALID" },
+  ];
+  for (const { context, expectedCode } of cases) {
+    const calls: string[] = [];
+    const octokit = mockOctokitForTaskRequestFlow({ calls });
+    const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+    const req = baseTaskRequest(
+      { filePath: "docs/runtime.md", instructions: "Créer le fichier", exactContent: "contenu", createIfMissing: true, ...context },
+      `task-runtime-invalid-${expectedCode}`,
+    );
+    const events = await service.handleTaskRequest(req);
+    const failed = events.find((e) => e.type === "TASK_FAILED");
+    assert.equal(failed?.payload.error_code, expectedCode, `cas ${JSON.stringify(context)}`);
+    assert.equal(calls.length, 0, `aucun appel GitHub pour ${JSON.stringify(context)}`);
+  }
+});
+
+test("Chemin runtime — valeurs valides (create/update, booléen correct) ne sont jamais rejetées", async () => {
+  const calls: string[] = [];
+  const octokit = mockOctokitForTaskRequestFlow({ calls });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+  const req = baseTaskRequest(
+    { filePath: "docs/runtime.md", instructions: "Créer le fichier", exactContent: "contenu", createIfMissing: true, expectedChangeType: "create", allowFullRewrite: false, expectedFilePath: "docs/runtime.md" },
+    "task-runtime-valid-values",
+  );
+  const events = await service.handleTaskRequest(req);
+  assert.ok(events.find((e) => e.type === "TASK_COMPLETED"), "des valeurs valides ne doivent jamais être rejetées");
+});
