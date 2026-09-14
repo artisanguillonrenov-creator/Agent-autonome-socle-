@@ -10,10 +10,12 @@ import { MissionNotFoundError } from "./types.js";
 import { JARVIS00_CONTRACTS_SCHEMA_VERSION, ContractVersionError } from "./contracts.js";
 import {
   CALLBACK_TIMESTAMP_WINDOW_MS,
+  CALLBACK_MAX_BODY_BYTES,
   CALLBACK_EVENT_TYPES,
   CallbackAuthNotConfiguredError,
   CallbackCorrelationFailedError,
   CallbackPayloadInvalidError,
+  CallbackSignatureMissingError,
   CallbackSignatureInvalidError,
   CallbackTimestampInvalidError,
   canonicalizeCallbackBody,
@@ -253,10 +255,37 @@ test("champs obligatoires manquants ou vides -> CallbackPayloadInvalidError", ()
   const envelope = makeEnvelope();
   const base = signedBody(envelope);
 
-  for (const field of ["event_id", "mission_id", "trace_id", "event_type", "signature"]) {
+  for (const field of ["event_id", "mission_id", "trace_id", "event_type"]) {
     const body = { ...base, [field]: "" };
     assert.throws(() => processCallback(body, store), CallbackPayloadInvalidError, `field=${field}`);
   }
+});
+
+// --- signature absente/vide : code dédié CALLBACK_SIGNATURE_MISSING, distinct de CALLBACK_PAYLOAD_INVALID ---
+
+test("champ signature absent ou vide -> CallbackSignatureMissingError (jamais CallbackPayloadInvalidError)", () => {
+  const store = new MissionStore();
+  seedMission(store, "mission-1", "trace-1");
+  const envelope = makeEnvelope();
+  const base = signedBody(envelope);
+
+  const withoutSignature = { ...base };
+  delete (withoutSignature as Record<string, unknown>).signature;
+  assert.throws(() => processCallback(withoutSignature, store), CallbackSignatureMissingError);
+
+  const emptySignature = { ...base, signature: "" };
+  assert.throws(() => processCallback(emptySignature, store), CallbackSignatureMissingError);
+
+  const whitespaceSignature = { ...base, signature: "   " };
+  assert.throws(() => processCallback(whitespaceSignature, store), CallbackSignatureMissingError);
+
+  assert.equal(store.listMissionEvents("mission-1").length, 0);
+});
+
+// --- Limite de taille du corps (correctif sécurité) ---
+
+test("CALLBACK_MAX_BODY_BYTES est fixée à 256 KiB et documentée", () => {
+  assert.equal(CALLBACK_MAX_BODY_BYTES, 256 * 1024);
 });
 
 test("event_type inconnu -> CallbackPayloadInvalidError", () => {

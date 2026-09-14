@@ -29,7 +29,7 @@ import type { LLMProvider, ToolDefinition } from "../llm/provider.js";
 import { AgentTeamStore } from "../agents/agentTeamStore.js";
 import { BUREAU_SERVICE_IDS, getBureauLlmConfig, setBureauLlmConfig, type BureauServiceId } from "../orchestration/serviceRegistry.js";
 import { MissionStore } from "../coordination/missionStore.js";
-import { processCallback } from "../coordination/callbackTransport.js";
+import { processCallback, CALLBACK_MAX_BODY_BYTES, CallbackPayloadTooLargeError } from "../coordination/callbackTransport.js";
 
 const taskStore = new TaskStore();
 const jarvisMissionStore = new MissionStore();
@@ -48,6 +48,33 @@ let lastServerError: string | null = null;
 async function readBody(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) chunks.push(chunk as Buffer);
+  return Buffer.concat(chunks).toString("utf-8");
+}
+
+/**
+ * Lecteur de corps HTTP à limite stricte, réservé à l'endpoint de callback
+ * (POST /api/callbacks/jarvis) — jamais utilisé par les autres routes.
+ * Cette route est exemptée du Bearer API général (auth HMAC propre), donc un
+ * client non authentifié pourrait sinon forcer une accumulation mémoire
+ * illimitée avant même le rejet de signature. Arrête la lecture et détruit
+ * la connexion dès que `maxBytes` est dépassé, sans jamais retenir l'excédent
+ * ni laisser le flux continuer à s'accumuler.
+ */
+async function readBodyWithLimit(req: IncomingMessage, maxBytes: number): Promise<string> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of req as AsyncIterable<Buffer>) {
+    total += chunk.length;
+    if (total > maxBytes) {
+      // Arrête immédiatement la lecture : aucun octet supplémentaire n'est
+      // accumulé dans `chunks` au-delà de la limite. La connexion elle-même
+      // n'est fermée qu'après l'envoi de la réponse 413 (voir l'appelant) —
+      // la détruire ici empêcherait la réponse structurée d'atteindre le
+      // client (RST silencieux au lieu d'un 413 exploitable).
+      throw new CallbackPayloadTooLargeError(maxBytes);
+    }
+    chunks.push(chunk);
+  }
   return Buffer.concat(chunks).toString("utf-8");
 }
 
@@ -106,6 +133,8 @@ function isCallbackEndpoint(method: string | undefined, pathname: string): boole
 const CALLBACK_ERROR_STATUS: Record<string, number> = {
   CALLBACK_AUTH_NOT_CONFIGURED: 503,
   CALLBACK_PAYLOAD_INVALID: 400,
+  CALLBACK_PAYLOAD_TOO_LARGE: 413,
+  CALLBACK_SIGNATURE_MISSING: 401,
   CALLBACK_SIGNATURE_INVALID: 401,
   CALLBACK_TIMESTAMP_INVALID: 401,
   CALLBACK_CORRELATION_FAILED: 409,
@@ -567,7 +596,21 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
       // Authentification HMAC propre à cet endpoint — jamais le jeton Bearer
       // de l'API générale (voir isCallbackEndpoint ci-dessus).
       if (req.method === "POST" && pathname === "/api/callbacks/jarvis") {
-        const bodyStr = await readBody(req);
+        let bodyStr: string;
+        try {
+          bodyStr = await readBodyWithLimit(req, CALLBACK_MAX_BODY_BYTES);
+        } catch (e) {
+          if (e instanceof CallbackPayloadTooLargeError) {
+            sendJson(res, 413, { error: e.code, message: e.message });
+            // Ferme la connexion une fois la réponse envoyée : un client qui a
+            // dépassé la limite ne doit pas pouvoir continuer à pousser des
+            // données sur cette même connexion.
+            req.destroy();
+            return;
+          }
+          sendJson(res, 400, { error: "CALLBACK_PAYLOAD_INVALID", message: "Erreur de lecture du corps de la requête." });
+          return;
+        }
         let body: unknown;
         try {
           body = JSON.parse(bodyStr || "{}");

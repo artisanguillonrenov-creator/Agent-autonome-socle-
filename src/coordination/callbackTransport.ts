@@ -37,6 +37,19 @@ import { assertSupportedContractVersion } from "./contracts.js";
 export const CALLBACK_TIMESTAMP_WINDOW_MS = 5 * 60 * 1000;
 
 /**
+ * Limite stricte du corps HTTP accepté par l'endpoint de callback (correctif
+ * sécurité post-audit) : cette route est volontairement exemptée du Bearer
+ * API général (son authentification HMAC lui est propre), donc un client
+ * non authentifié pourrait sinon forcer une accumulation mémoire illimitée
+ * avant même que la signature soit vérifiée. 256 KiB couvre largement une
+ * enveloppe JSON réaliste (identifiants + payload de décision/rapport de
+ * build) sans autoriser cet abus. Le lecteur HTTP (src/interfaces/httpApi.ts)
+ * doit arrêter la lecture dès que cette limite est dépassée, avant tout
+ * JSON.parse et avant toute vérification HMAC.
+ */
+export const CALLBACK_MAX_BODY_BYTES = 256 * 1024;
+
+/**
  * Vocabulaire connu des événements de callback. Un `event_type` absent de
  * cette liste est rejeté (`CALLBACK_PAYLOAD_INVALID`) plutôt qu'accepté à
  * l'aveugle — ce module ne fait qu'authentifier/corréler/journaliser
@@ -84,11 +97,33 @@ export class CallbackPayloadInvalidError extends Error {
   }
 }
 
+export class CallbackSignatureMissingError extends Error {
+  readonly code = "CALLBACK_SIGNATURE_MISSING" as const;
+  constructor() {
+    super("CALLBACK_SIGNATURE_MISSING : le champ signature est obligatoire et doit être une chaîne non vide.");
+    this.name = "CallbackSignatureMissingError";
+  }
+}
+
 export class CallbackSignatureInvalidError extends Error {
   readonly code = "CALLBACK_SIGNATURE_INVALID" as const;
   constructor() {
     super("CALLBACK_SIGNATURE_INVALID : la signature HMAC fournie ne correspond pas au corps canonique attendu.");
     this.name = "CallbackSignatureInvalidError";
+  }
+}
+
+/**
+ * Levée par le lecteur HTTP (src/interfaces/httpApi.ts) dès que le corps de
+ * la requête dépasse `CALLBACK_MAX_BODY_BYTES`, avant tout JSON.parse et
+ * avant toute vérification HMAC — jamais après avoir déjà accepté un corps
+ * hors limite, et jamais après une écriture MissionStore.
+ */
+export class CallbackPayloadTooLargeError extends Error {
+  readonly code = "CALLBACK_PAYLOAD_TOO_LARGE" as const;
+  constructor(limitBytes: number) {
+    super(`CALLBACK_PAYLOAD_TOO_LARGE : le corps du callback dépasse la limite autorisée (${limitBytes} octets).`);
+    this.name = "CallbackPayloadTooLargeError";
   }
 }
 
@@ -232,7 +267,10 @@ export function parseCallbackRequestBody(body: unknown): { envelope: CallbackEnv
   if (!raw.payload || typeof raw.payload !== "object" || Array.isArray(raw.payload)) {
     throw new CallbackPayloadInvalidError("payload est obligatoire et doit être un objet.");
   }
-  const signature = requireNonEmptyString(raw.signature, "signature");
+  if (typeof raw.signature !== "string" || raw.signature.trim() === "") {
+    throw new CallbackSignatureMissingError();
+  }
+  const signature = raw.signature;
 
   return {
     envelope: {
