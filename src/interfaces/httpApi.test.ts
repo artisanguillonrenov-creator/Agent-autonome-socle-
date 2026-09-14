@@ -8,6 +8,9 @@ import { loadLLMConfig } from "../persistence/llmConfigStore.js";
 import { getDb } from "../persistence/db.js";
 import { config } from "../config.js";
 import { NotificationStore } from "../autonomy/notificationStore.js";
+import { MissionStore } from "../coordination/missionStore.js";
+import { canonicalizeCallbackBody, computeCallbackSignature, CALLBACK_MAX_BODY_BYTES, type CallbackEnvelope } from "../coordination/callbackTransport.js";
+import { JARVIS00_CONTRACTS_SCHEMA_VERSION } from "../coordination/contracts.js";
 
 import fs from "node:fs";
 import vm from "node:vm";
@@ -909,5 +912,127 @@ test("assertApiTokenConfiguredForHttp (B.3) : ne bloque pas en local (PORT non d
   } finally {
     config.api.token = previousToken;
     if (previousPort === undefined) delete process.env.PORT; else process.env.PORT = previousPort;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PR-F : POST /api/callbacks/jarvis — limite stricte de taille de corps
+// (correctif sécurité post-audit) : le lecteur dédié à cette route doit
+// rejeter tout corps hors limite avant JSON.parse et avant toute
+// vérification HMAC/écriture MissionStore.
+// ---------------------------------------------------------------------------
+
+const CALLBACK_TEST_SECRET = "httpapi-test-callback-secret";
+
+function makeSignedCallbackBody(overrides: Partial<CallbackEnvelope> = {}): Record<string, unknown> {
+  const envelope: CallbackEnvelope = {
+    eventId: `evt-${Date.now()}-${Math.random()}`,
+    missionId: "http-callback-mission",
+    traceId: "http-callback-trace",
+    eventType: "BUILD_RESULT",
+    timestamp: Date.now(),
+    schemaVersion: JARVIS00_CONTRACTS_SCHEMA_VERSION,
+    payload: { ok: true },
+    ...overrides,
+  };
+  const canonicalBody = canonicalizeCallbackBody(envelope);
+  const signature = computeCallbackSignature(CALLBACK_TEST_SECRET, envelope.timestamp, canonicalBody);
+  return {
+    event_id: envelope.eventId,
+    mission_id: envelope.missionId,
+    trace_id: envelope.traceId,
+    event_type: envelope.eventType,
+    timestamp: envelope.timestamp,
+    schema_version: envelope.schemaVersion,
+    payload: envelope.payload,
+    signature,
+  };
+}
+
+test("POST /api/callbacks/jarvis : corps sous la limite -> comportement normal (200 APPLIED)", async () => {
+  const previousSecret = config.callback.hmacSecret;
+  config.callback.hmacSecret = CALLBACK_TEST_SECRET;
+  const agent = new Agent({ llm: new MockProvider(), embeddings: new LocalHashingEmbeddingProvider() });
+  const { server, baseUrl } = await startTestHttpApi(agent);
+  try {
+    const missionStore = new MissionStore();
+    missionStore.createMission({ missionId: "http-callback-mission", traceId: "http-callback-trace", projectId: "http-test" });
+
+    const body = makeSignedCallbackBody();
+    const response = await fetch(`${baseUrl}/api/callbacks/jarvis`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    assert.equal(response.status, 200);
+    const json = await response.json();
+    assert.equal(json.outcome, "APPLIED");
+  } finally {
+    config.callback.hmacSecret = previousSecret;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("POST /api/callbacks/jarvis : corps au-dessus de la limite -> 413 CALLBACK_PAYLOAD_TOO_LARGE, aucun événement MissionStore écrit", async () => {
+  const previousSecret = config.callback.hmacSecret;
+  config.callback.hmacSecret = CALLBACK_TEST_SECRET;
+  const agent = new Agent({ llm: new MockProvider(), embeddings: new LocalHashingEmbeddingProvider() });
+  const { server, baseUrl } = await startTestHttpApi(agent);
+  try {
+    const missionStore = new MissionStore();
+    missionStore.createMission({ missionId: "http-callback-mission-oversized", traceId: "http-callback-trace-oversized", projectId: "http-test" });
+
+    // Corps signé correctement (preuve que le rejet a lieu AVANT toute vérification
+    // HMAC/écriture, jamais après avoir accepté un body hors limite) mais dont le
+    // payload dépasse largement CALLBACK_MAX_BODY_BYTES (256 KiB).
+    const oversizedPayload = { blob: "x".repeat(CALLBACK_MAX_BODY_BYTES + 1024) };
+    const body = makeSignedCallbackBody({
+      missionId: "http-callback-mission-oversized",
+      traceId: "http-callback-trace-oversized",
+      payload: oversizedPayload,
+    });
+    const rawBody = JSON.stringify(body);
+    assert.ok(Buffer.byteLength(rawBody, "utf-8") > CALLBACK_MAX_BODY_BYTES, "le corps de test doit réellement dépasser la limite");
+
+    const response = await fetch(`${baseUrl}/api/callbacks/jarvis`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: rawBody,
+    });
+    assert.equal(response.status, 413);
+    const json = await response.json();
+    assert.equal(json.error, "CALLBACK_PAYLOAD_TOO_LARGE");
+
+    assert.equal(missionStore.listMissionEvents("http-callback-mission-oversized").length, 0);
+  } finally {
+    config.callback.hmacSecret = previousSecret;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("POST /api/callbacks/jarvis : aucune régression du callback HMAC existant (signature invalide toujours 401 après le correctif de limite)", async () => {
+  const previousSecret = config.callback.hmacSecret;
+  config.callback.hmacSecret = CALLBACK_TEST_SECRET;
+  const agent = new Agent({ llm: new MockProvider(), embeddings: new LocalHashingEmbeddingProvider() });
+  const { server, baseUrl } = await startTestHttpApi(agent);
+  try {
+    const missionStore = new MissionStore();
+    missionStore.createMission({ missionId: "http-callback-mission-badsig", traceId: "http-callback-trace-badsig", projectId: "http-test" });
+
+    const body = makeSignedCallbackBody({ missionId: "http-callback-mission-badsig", traceId: "http-callback-trace-badsig" });
+    body.signature = "0".repeat(64);
+
+    const response = await fetch(`${baseUrl}/api/callbacks/jarvis`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    assert.equal(response.status, 401);
+    const json = await response.json();
+    assert.equal(json.error, "CALLBACK_SIGNATURE_INVALID");
+    assert.equal(missionStore.listMissionEvents("http-callback-mission-badsig").length, 0);
+  } finally {
+    config.callback.hmacSecret = previousSecret;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
