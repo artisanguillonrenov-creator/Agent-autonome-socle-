@@ -27,7 +27,8 @@ import { getDb } from "../persistence/db.js";
 import type { ChatMessage } from "../types.js";
 import type { LLMProvider, ToolDefinition } from "../llm/provider.js";
 import { AgentTeamStore } from "../agents/agentTeamStore.js";
-import { BUREAU_SERVICE_IDS, getBureauLlmConfig, setBureauLlmConfig, type BureauServiceId } from "../orchestration/serviceRegistry.js";
+import { BUREAU_SERVICE_IDS, getBureauLlmConfig, setBureauLlmConfig, type BureauServiceId } from "../orchestration/serviceRegistry.js";import { createConversationRepository } from "../persistence/conversations/conversationRepositoryFactory.js";
+import { UserModel } from "../memory/userModel.js";
 
 const taskStore = new TaskStore();
 const notificationStore = new NotificationStore();
