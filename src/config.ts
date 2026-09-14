@@ -104,6 +104,15 @@ export const config = {
     /** Si vide, l'API n'est pas protégée — à ne jamais exposer publiquement dans ce cas. */
     token: process.env.API_TOKEN || "",
   },
+  callback: {
+    /**
+     * Secret HMAC-SHA256 pour l'authentification des callbacks asynchrones
+     * entrants (n8n / workers -> JARVIS-00, PR-F). Jamais généré
+     * automatiquement, jamais journalisé, jamais persisté, jamais renvoyé par
+     * l'API. Absent -> CALLBACK_AUTH_NOT_CONFIGURED.
+     */
+    hmacSecret: process.env.JARVIS_CALLBACK_HMAC_SECRET || "",
+  },
   agent: {
     maxIterations: int(process.env.AGENT_MAX_ITERATIONS, 5),
   },
