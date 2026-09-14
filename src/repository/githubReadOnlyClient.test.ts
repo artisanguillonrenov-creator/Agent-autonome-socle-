@@ -410,3 +410,38 @@ test("getCiStatus : erreur GitHub sur une page intermédiaire (page 2) → Githu
   );
   assert.equal(page2Called, true, "le test doit réellement exercer une erreur sur la 2e page, pas seulement la 1re");
 });
+
+test("getCiStatus : la pagination s'arrête correctement après la dernière page, y compris quand le total est un multiple exact de CI_PAGE_SIZE", async () => {
+  // Cas limite le plus piégeux : la page 1 renvoie exactement 100 éléments
+  // (== CI_PAGE_SIZE), ce qui ne suffit PAS à distinguer "il y a peut-être
+  // une page 2" de "il y en a exactement 100 au total". Une implémentation
+  // correcte doit donc toujours requêter une page 3 après une page 2 vide,
+  // et s'arrêter là — sans jamais boucler indéfiniment ni sur-requêter.
+  const checksPage1 = Array.from({ length: 100 }, (_, i) => makeCheckRun(`check-${i}`, "success"));
+  const checksPagesRequested: number[] = [];
+  const statusesPage1 = Array.from({ length: 100 }, (_, i) => makeCommitStatus(`ctx-${i}`, "success"));
+  const statusesPagesRequested: number[] = [];
+  const client = createGithubReadOnlyClient(
+    mockOctokit({
+      checks: {
+        listForRef: async (params: { page?: number }) => {
+          const page = params.page ?? 1;
+          checksPagesRequested.push(page);
+          return { data: { total_count: 100, check_runs: page === 1 ? checksPage1 : [] } };
+        },
+      },
+      repos: {
+        getCombinedStatusForRef: async (params: { page?: number }) => {
+          const page = params.page ?? 1;
+          statusesPagesRequested.push(page);
+          return { data: { state: "success", total_count: 100, statuses: page === 1 ? statusesPage1 : [] } };
+        },
+      },
+    }),
+  );
+  const result = await client.getCiStatus(TARGET, "deadbeef");
+  assert.deepEqual(checksPagesRequested, [1, 2], "doit requêter la page 2 (vide) pour confirmer la fin, puis s'arrêter — pas de page 3");
+  assert.deepEqual(statusesPagesRequested, [1, 2], "idem pour la Commit Status API");
+  assert.equal(result.totalCount, 200);
+  assert.equal(result.overallState, "success");
+});
