@@ -7,6 +7,7 @@ import type { LLMProvider } from "../llm/provider.js";
 import type { ChatMessage } from "../types.js";
 import { scanForSecrets } from "../repository/secretScanner.js";
 import { checkDiffFidelity, type DiffFidelityResult } from "./diffFidelity.js";
+import { runCommandInSandbox, type ExecutionResult } from "../execution/sandbox.js";
 
 export type SoftwareFactorySideEffectState = "none" | "partial" | "uncertain";
 
@@ -435,6 +436,21 @@ export class SoftwareFactoryService {
   }
 
   /**
+   * Validation sandboxée optionnelle (VAGUE 3) : exécute `config.softwareFactorySandbox.validationCommand`
+   * (ex. "node --check %FILE%", un lint, une compilation) dans un conteneur Docker éphémère,
+   * en ne montant JAMAIS le dépôt hôte ni le `.env` principal — uniquement le fichier généré,
+   * seul contenu du dossier temporaire monté dans le conteneur. Désactivée par défaut
+   * (validationCommand vide) : n'affecte alors jamais le workflow existant.
+   */
+  async runSandboxedValidation(filePath: string, content: string): Promise<ExecutionResult | null> {
+    const template = config.softwareFactorySandbox.validationCommand.trim();
+    if (!template) return null;
+    const command = template.replace("%FILE%", filePath).split(/\s+/).filter(Boolean);
+    const result = await runCommandInSandbox({ [filePath]: content }, command, config.softwareFactorySandbox.timeoutMs);
+    return result;
+  }
+
+  /**
    * Exécute le workflow GitHub avec branche unique par tâche (`jarvis/task-<task_id>`).
    * Les lectures restent side_effect_state=none ; toute mutation distante confirmée
    * bascule l'état à partial. Une mutation dont le résultat est inconnu est uncertain.
@@ -637,6 +653,22 @@ export class SoftwareFactoryService {
         false,
         "none",
       );
+    }
+
+    // 4d. Validation sandboxée optionnelle — avant toute écriture GitHub, comme les gardes
+    // ci-dessus. Désactivée par défaut (config.softwareFactorySandbox.validationCommand vide) :
+    // n'affecte alors jamais le comportement historique.
+    if (config.softwareFactorySandbox.validationCommand.trim()) {
+      onStep?.("SANDBOX_VALIDATION", { filePath });
+      const validation = await this.runSandboxedValidation(filePath, updatedCode);
+      if (validation && (validation.timedOut || (validation.exitCode !== undefined && validation.exitCode !== 0))) {
+        throw new SoftwareFactoryWorkflowError(
+          "SANDBOX_VALIDATION_FAILED",
+          `La validation sandboxée a échoué pour '${filePath}' : ${validation.timedOut ? "timeout" : `code de sortie ${validation.exitCode}`}. stderr: ${validation.stderr.slice(0, 500)}`,
+          true,
+          "none",
+        );
+      }
     }
 
     // 5. Une branche explicitement ciblée doit déjà exister; le mode historique

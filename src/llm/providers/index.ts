@@ -7,6 +7,7 @@ import { OllamaProvider } from "./ollama.js";
 import { InfermaticProvider } from "./infermatic.js";
 import { MockProvider } from "./mock.js";
 import { loadLLMConfig } from "../../persistence/llmConfigStore.js";
+import { withTracing } from "./tracedProvider.js";
 
 export interface LLMProviderOptions {
   provider?: LLMProviderName;
@@ -46,25 +47,31 @@ export function resolveLLMSelection(opts?: LLMProviderOptions): { provider: LLMP
 export function createLLMProvider(opts?: LLMProviderOptions): LLMProvider {
   const { provider: providerName, model: modelName } = resolveLLMSelection(opts);
 
-  switch (providerName) {
-    case "anthropic":
-      return new AnthropicProvider({ apiKey: config.llm.anthropicApiKey, model: modelName });
-    case "openai":
-      return new OpenAIProvider({ apiKey: config.llm.openaiApiKey, model: modelName });
-    case "openrouter":
-      return new OpenRouterProvider({ apiKey: config.llm.openrouterApiKey, model: modelName });
-    case "ollama":
-      return new OllamaProvider({ baseUrl: config.llm.ollamaBaseUrl, model: modelName });
-    case "infermatic":
-      return new InfermaticProvider({
-        apiKey: config.llm.infermaticApiKey,
-        baseUrl: config.llm.infermaticBaseUrl,
-        model: modelName,
-        sanitizeReasoning: opts?.sanitizeReasoning ?? false,
-      });
-    case "mock":
-      return new MockProvider();
-    default:
-      throw new Error(`Fournisseur LLM inconnu: ${providerName}`);
-  }
+  const provider = ((): LLMProvider => {
+    switch (providerName) {
+      case "anthropic":
+        return new AnthropicProvider({ apiKey: config.llm.anthropicApiKey, model: modelName });
+      case "openai":
+        return new OpenAIProvider({ apiKey: config.llm.openaiApiKey, model: modelName });
+      case "openrouter":
+        return new OpenRouterProvider({ apiKey: config.llm.openrouterApiKey, model: modelName });
+      case "ollama":
+        return new OllamaProvider({ baseUrl: config.llm.ollamaBaseUrl, model: modelName });
+      case "infermatic":
+        return new InfermaticProvider({
+          apiKey: config.llm.infermaticApiKey,
+          baseUrl: config.llm.infermaticBaseUrl,
+          model: modelName,
+          sanitizeReasoning: opts?.sanitizeReasoning ?? false,
+        });
+      case "mock":
+        return new MockProvider();
+      default:
+        throw new Error(`Fournisseur LLM inconnu: ${providerName}`);
+    }
+  })();
+
+  // Observabilité (Langfuse/Tracer) : chaque appel complete() de CE provider produit un
+  // span "llm" (modèle, prompt, latence, tokens in/out), quel que soit l'appelant.
+  return withTracing(provider);
 }
