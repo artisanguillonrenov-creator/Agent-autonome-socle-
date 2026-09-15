@@ -38,6 +38,7 @@ interface StateRow {
   trip_reason: string | null;
   window_cost_usd: number | null;
   checkpoint_id: string | null;
+  rearmed_at: number | null;
 }
 
 /**
@@ -67,6 +68,7 @@ const SCHEMA_SQL = `
     trip_reason TEXT,
     window_cost_usd REAL,
     checkpoint_id TEXT,
+    rearmed_at INTEGER,
     updated_at INTEGER NOT NULL
   );
 `;
@@ -96,7 +98,7 @@ export class FinancialCircuitBreaker {
   }
 
   private stateRow(): StateRow | undefined {
-    return this.db().prepare(`SELECT tripped, tripped_at, trip_reason, window_cost_usd, checkpoint_id FROM financial_circuit_breaker_state WHERE id='singleton'`).get() as
+    return this.db().prepare(`SELECT tripped, tripped_at, trip_reason, window_cost_usd, checkpoint_id, rearmed_at FROM financial_circuit_breaker_state WHERE id='singleton'`).get() as
       | StateRow
       | undefined;
   }
@@ -115,11 +117,19 @@ export class FinancialCircuitBreaker {
     }
   }
 
+  /**
+   * Coût glissant depuis max(début de la fenêtre horaire, dernier réarmement). Un réarmement
+   * humain doit réellement remettre le compteur à plat pour la décision opérationnelle : sans
+   * ce plancher, la dépense déjà facturée qui a causé le déclenchement resterait dans la
+   * fenêtre et re-déclencherait le gel dès l'appel suivant, rendant rearm() inopérant.
+   */
   windowCostUsd(now = Date.now()): number {
     try {
+      const rearmedAt = this.stateRow()?.rearmed_at ?? 0;
+      const windowStart = Math.max(now - this.windowMs, rearmedAt);
       const row = this.db()
         .prepare(`SELECT COALESCE(SUM(usd),0) AS total FROM financial_cost_events WHERE ts > ?`)
-        .get(now - this.windowMs) as { total: number };
+        .get(windowStart) as { total: number };
       return row.total;
     } catch {
       return 0;
@@ -180,9 +190,20 @@ export class FinancialCircuitBreaker {
     );
   }
 
-  /** Seule voie de sortie du gel : appel humain explicite (CLI/API), jamais automatique. */
+  /**
+   * Seule voie de sortie du gel : appel humain explicite (CLI/API), jamais automatique. Pose
+   * aussi un plancher `rearmed_at` (voir windowCostUsd) — sans quoi la dépense déjà facturée
+   * qui a causé le déclenchement re-déclencherait le gel dès le prochain appel.
+   */
   rearm(): FinancialCircuitBreakerStatus {
-    this.db().prepare(`UPDATE financial_circuit_breaker_state SET tripped=0, updated_at=? WHERE id='singleton'`).run(Date.now());
+    const now = Date.now();
+    this.db()
+      .prepare(`
+        INSERT INTO financial_circuit_breaker_state(id, tripped, rearmed_at, updated_at)
+        VALUES('singleton', 0, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET tripped = 0, rearmed_at = excluded.rearmed_at, updated_at = excluded.updated_at
+      `)
+      .run(now, now);
     return this.status();
   }
 
