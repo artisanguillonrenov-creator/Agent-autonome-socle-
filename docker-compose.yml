@@ -1,0 +1,83 @@
+# Vague 10B/10C : orchestration multi-services avec isolation réseau.
+# Copier .env.docker.example vers .env avant `docker compose up -d`.
+
+services:
+  jarvis-core:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: jarvis-core:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Docker Compose résout ce nom d'hôte via son réseau interne — jamais localhost entre conteneurs.
+      DATABASE_URL: postgres://${POSTGRES_USER:-jarvis}:${POSTGRES_PASSWORD:-changeme}@jarvis-db:5432/${POSTGRES_DB:-jarvis}
+    ports:
+      - "${PORT:-3000}:3000"
+    volumes:
+      # Session/checkpoints/SQLite de secours — nommé et persistant (Vague 10B).
+      - jarvis-data:/app/data
+      # Volume de travail cloisonné dédié à la sandbox Software Factory (Vague 10C) — jamais
+      # partagé avec le code source applicatif ni le .env.
+      - jarvis-sandbox-tmp:/tmp/jarvis-sandbox
+      # Docker-in-Docker via socket monté (Vague 10C) : permet à softwareFactoryService de
+      # lancer des micro-conteneurs sandbox isolés. Restriction stricte recommandée en
+      # production : remplacer ce montage direct par un proxy à surface réduite (ex.
+      # tecnativa/docker-socket-proxy, n'autorisant que CONTAINERS=1 + EVENTS=1) plutôt que
+      # d'exposer l'intégralité de l'API Docker de l'hôte.
+      - /var/run/docker.sock:/var/run/docker.sock
+    # Le conteneur tourne en utilisateur non-root "node" (Dockerfile) ; l'accès au socket
+    # Docker de l'hôte nécessite d'appartenir au groupe propriétaire du socket. Régler
+    # DOCKER_GID sur `stat -c '%g' /var/run/docker.sock` de l'hôte (souvent 999 ou le gid du
+    # groupe "docker").
+    group_add:
+      - "${DOCKER_GID:-999}"
+    networks:
+      - backend-network
+      - sandbox-network
+    depends_on:
+      - jarvis-db
+
+  jarvis-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-jarvis}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: ${POSTGRES_DB:-jarvis}
+    volumes:
+      # Volume nommé persistant (Vague 10B) : les données de session survivent à la recréation du conteneur.
+      - jarvis-db-data:/var/lib/postgresql/data
+    networks:
+      - backend-network
+    # Jamais exposé publiquement : aucune section "ports" ici — seul jarvis-core, sur le
+    # même réseau backend-network, peut atteindre ce service (par nom DNS interne).
+
+  mcp-server-bridge:
+    # Conteneur isolé hébergeant les outils/serveurs MCP tiers (Vague 10B). Remplacer
+    # `command` par le point d'entrée réel d'un serveur MCP déclaré dans config/mcp-servers.json.
+    image: node:22-alpine
+    restart: unless-stopped
+    working_dir: /mcp
+    command: ["node", "-e", "console.log('[mcp-server-bridge] placeholder actif — montez vos serveurs MCP tiers ici'); setInterval(() => {}, 60000);"]
+    volumes:
+      - ./config/mcp-servers.json:/mcp/mcp-servers.json:ro
+    networks:
+      - sandbox-network
+
+networks:
+  # Réseau applicatif (jarvis-core <-> jarvis-db) : non "internal" pour conserver l'accès
+  # sortant de jarvis-core vers les fournisseurs LLM/webhooks externes.
+  backend-network:
+    driver: bridge
+  # Réseau d'isolation pour les capacités sensibles (sandbox Software Factory, MCP tiers) :
+  # aucun accès sortant propre à ce réseau (isolement des outils tiers).
+  sandbox-network:
+    driver: bridge
+    internal: true
+
+volumes:
+  jarvis-data:
+  jarvis-db-data:
+  jarvis-sandbox-tmp:

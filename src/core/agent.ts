@@ -43,6 +43,7 @@ import { EventEmitter } from "node:events";
 import { CONTRACT_SCHEMA_VERSION, type AgentInterruptReason, type AgentInterruptSignal } from "../orchestration/contract.js";
 import { autonomyEventBus, type AutonomyEvent } from "../autonomy/eventBus.js";
 import { SemanticCache } from "../context/semanticCache.js";
+import { composeDynamicRulesSection } from "../personality/dynamicRules.js";
 
 const LEGACY_CONVERSATION_ID = "__legacy__";
 /** Auto-correction des erreurs d'outils (VAGUE 5) : plafond strict d'essais consécutifs avant de forcer une réponse finale sans outil. */
@@ -714,7 +715,8 @@ export class Agent {
       `PLANIFICATION : utilise 'execute_mission' uniquement pour un objectif réellement multi-étapes. Capabilities actuellement planifiables : ${this.serviceOrchestrator.registry.listServices().filter((service) => service.enabled).flatMap((service) => service.capabilities).filter((value, index, array) => array.indexOf(value) === index).join(", ") || "aucune"}.`,
       "ENRICHISSEMENT VISUEL : Structure TOUTES tes réponses complexes (listes, classements, comparaisons, synthèses) sous forme de tableaux Markdown, listes à puces thématiques et liens cliquables.",
       "RÈGLE DE FORMAT : Utilise les outils natifs mis à ta disposition. Ne rédiges JAMAIS de structures techniques JSON ou balises XML dans le texte adressé à l'utilisateur.",
-    ].join("\n");
+      composeDynamicRulesSection(),
+    ].filter(Boolean).join("\n");
   }
 
   saveCheckpoint(label: string, conversationId?: string): string {

@@ -24,6 +24,8 @@ import { PersonalityPolicyEngine } from "./personality/personalityPolicyEngine.j
 import { AgentTeamStore } from "./agents/agentTeamStore.js";
 import { AutonomyPlanner } from "./autonomy/planner.js";
 import { Heartbeat } from "./autonomy/heartbeat.js";
+import { AudioStreamManager } from "./voice/audioStreamManager.js";
+import { startAutonomyWatchers } from "./autonomy/watchers.js";
 
 async function main(): Promise<void> {
   registerChantier10Settings();
@@ -129,6 +131,15 @@ async function main(): Promise<void> {
     const conversationRuntime = installConversationHttpIngress(server, conversationService);
     const webConversationRuntime = installConversationWebUiIngress(server);
 
+    // Vague 9A/9B/9C : streaming audio bidirectionnel (WebSocket), désactivé par défaut
+    // (AUDIO_STREAMING_ENABLED=true requis) — n'affecte jamais le chat texte existant.
+    const audioStreamManager = config.audio.enabled ? new AudioStreamManager(agent) : undefined;
+    audioStreamManager?.attach(server);
+
+    // Vague 11A : observateurs d'état (fichiers du Document Workbench, cycle de vie des
+    // conteneurs sandbox) — best-effort, ne bloque jamais le démarrage.
+    const autonomyWatchers = startAutonomyWatchers();
+
     const shutdown = () => {
       backgroundRunner.stop();
       scheduler.stop();
@@ -136,6 +147,8 @@ async function main(): Promise<void> {
       autonomyPlanner.stop();
       heartbeat.stop();
       retentionScheduler.stop();
+      autonomyWatchers.dispose();
+      audioStreamManager?.dispose();
       webConversationRuntime.dispose();
       conversationRuntime.dispose();
       voiceRuntime.dispose();

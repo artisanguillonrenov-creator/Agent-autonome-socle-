@@ -29,7 +29,9 @@
     "exceljs": "^4.4.0",
     "pdf-parse": "^2.4.5",
     "pg": "^8.23.0",
+    "puppeteer-core": "^23.9.0",
     "unzipper": "^0.10.14",
+    "ws": "^8.18.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
@@ -38,6 +40,7 @@
     "@types/dockerode": "^4.0.1",
     "@types/node": "^22.20.2",
     "@types/unzipper": "^0.10.11",
+    "@types/ws": "^8.5.13",
     "patch-package": "^8.0.1",
     "tsx": "^4.19.0",
     "typescript": "^5.5.4"

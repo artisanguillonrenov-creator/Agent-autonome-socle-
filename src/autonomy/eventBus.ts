@@ -13,7 +13,9 @@ export type AutonomyEventType =
   | "PRIORITY_COMMAND"
   | "WORKBENCH_DOCUMENT_CHANGED"
   | "SOFTWARE_FACTORY_PR_EVENT"
-  | "VOICE_COMMAND_RECEIVED";
+  | "VOICE_COMMAND_RECEIVED"
+  /** Vague 11A : cycle de vie anormal (die/oom/kill) d'un conteneur sandbox de la Software Factory — voir autonomy/watchers.ts. */
+  | "SANDBOX_CONTAINER_EVENT";
 
 export interface AutonomyEvent {
   type: AutonomyEventType;

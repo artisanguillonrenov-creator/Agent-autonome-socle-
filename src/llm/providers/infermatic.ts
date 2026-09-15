@@ -72,6 +72,16 @@ interface CompatibilityToolEnvelope {
   };
 }
 
+/** Vague 8B : format multimodal OpenAI-compatible (content[] avec blocs text/image_url), utilisé par Infermatic/Qwen-VL et la plupart des passerelles compatibles. */
+function toMultimodalContent(m: ChatMessage): Array<Record<string, unknown>> {
+  const parts: Array<Record<string, unknown>> = [];
+  if (m.content) parts.push({ type: "text", text: m.content });
+  for (const image of m.images ?? []) {
+    parts.push({ type: "image_url", image_url: { url: `data:${image.mimeType};base64,${image.base64}` } });
+  }
+  return parts;
+}
+
 function formatNativeMessages(messages: ChatMessage[]): InfermaticMessage[] {
   return messages.map((m) => {
     if (m.role === "tool") {
@@ -92,6 +102,10 @@ function formatNativeMessages(messages: ChatMessage[]): InfermaticMessage[] {
         msgObj.tool_calls = m.toolCalls;
       }
       return msgObj;
+    }
+
+    if (m.role === "user" && m.images && m.images.length > 0) {
+      return { role: "user", content: toMultimodalContent(m) };
     }
 
     return {
@@ -277,6 +291,11 @@ export class InfermaticProvider implements LLMProvider {
     // Du point de vue de l'Agent, ce provider sait toujours produire des ToolCall structurés :
     // soit nativement, soit via le fallback de compatibilité ci-dessous.
     return true;
+  }
+
+  /** Vague 8B : heuristique par nom de modèle — aucune API de capacités n'est exposée par Infermatic. */
+  supportsVision(): boolean {
+    return /vl|vision|qwen.*-vl|pixtral|llava/i.test(this.opts.model);
   }
 
   private buildBaseBody(messages: InfermaticMessage[], options: CompletionOptions): Record<string, unknown> {

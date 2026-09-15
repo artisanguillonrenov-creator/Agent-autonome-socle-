@@ -14,6 +14,11 @@ export class OpenAIProvider implements LLMProvider {
     this.model = opts.model;
   }
 
+  /** Vague 8B : famille gpt-4o / gpt-4-turbo / gpt-4-vision accepte des blocs image en entrée. */
+  supportsVision(): boolean {
+    return /gpt-4o|gpt-4-turbo|gpt-4-vision|\bo1\b/i.test(this.opts.model);
+  }
+
   async complete(messages: ChatMessage[], options: CompletionOptions = {}): Promise<LLMCompletionResult> {
     if (!this.opts.apiKey) {
       throw new Error("OPENAI_API_KEY manquant : impossible d'appeler le fournisseur openai.");
@@ -29,7 +34,13 @@ export class OpenAIProvider implements LLMProvider {
         model: this.opts.model,
         messages: messages.map((m) => ({
           role: m.role,
-          content: m.content ?? "",
+          content:
+            m.images && m.images.length > 0
+              ? [
+                  ...(m.content ? [{ type: "text", text: m.content }] : []),
+                  ...m.images.map((image) => ({ type: "image_url", image_url: { url: `data:${image.mimeType};base64,${image.base64}` } })),
+                ]
+              : m.content ?? "",
         })),
         max_tokens: options.maxTokens ?? 1024,
         temperature: options.temperature,

@@ -12,12 +12,14 @@ export type NotificationType =
   | "APPROVAL_REQUIRED"
   | "COMMERCIAL_ATTENTION_REQUIRED"
   /** Vague 7C : un événement d'arrière-plan filtré CRITICAL/REQUIRES_REFLEXION a réveillé le LLM nominal — voir AutonomyPlanner. */
-  | "AUTONOMY_EVENT_HANDLED";
+  | "AUTONOMY_EVENT_HANDLED"
+  /** Vague 8A : le disjoncteur financier a gelé l'agent — validation humaine requise pour réarmer (voir src/context/financialCircuitBreaker.ts). */
+  | "COST_CIRCUIT_BREAKER_TRIPPED";
 export interface Notification { id: string; type: NotificationType; severity: "info" | "warning" | "error"; title: string; message: string; taskId?: string; operationTaskId?: string; createdAt: number; readAt?: number }
 export type NotificationListener = (notification: Notification) => void | Promise<void>;
 
 /** activity.emailAlerts : types de notification jugés suffisamment importants pour justifier une alerte e-mail (Jarvis -> utilisateur). */
-const ALERT_WORTHY = new Set<NotificationType>(["RECOVERY_REQUIRED", "BACKGROUND_FAILED", "APPROVAL_REQUIRED", "COMMERCIAL_ATTENTION_REQUIRED", "AUTONOMY_EVENT_HANDLED"]);
+const ALERT_WORTHY = new Set<NotificationType>(["RECOVERY_REQUIRED", "BACKGROUND_FAILED", "APPROVAL_REQUIRED", "COMMERCIAL_ATTENTION_REQUIRED", "AUTONOMY_EVENT_HANDLED", "COST_CIRCUIT_BREAKER_TRIPPED"]);
 
 function map(row: any): Notification { return { id: row.id, type: row.type, severity: row.severity, title: row.title, message: row.message, taskId: row.task_id ?? undefined, operationTaskId: row.operation_task_id ?? undefined, createdAt: row.created_at, readAt: row.read_at ?? undefined }; }
 

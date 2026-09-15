@@ -9,6 +9,12 @@ export interface ToolCall {
   };
 }
 
+/** Vague 8B (vision multi-modale) : pièce jointe image encodée en base64, agnostique du fournisseur. */
+export interface ChatImageAttachment {
+  base64: string;
+  mimeType: string;
+}
+
 export interface ChatMessage {
   role: ChatRole;
   content: string | null;
@@ -18,6 +24,12 @@ export interface ChatMessage {
   toolCallId?: string;
   /** Liste des appels d'outils générés par l'assistant, quand role === "assistant" */
   toolCalls?: ToolCall[];
+  /**
+   * Vague 8B : pièces jointes image (role "user" uniquement). Purement additif — un provider
+   * qui ne supporte pas la vision (supportsVision() absent/false) ignore ce champ sans erreur ;
+   * seul un provider vision-capable (voir LLMProvider.supportsVision) doit le lire.
+   */
+  images?: ChatImageAttachment[];
 }
 
 export interface MemoryEntry {

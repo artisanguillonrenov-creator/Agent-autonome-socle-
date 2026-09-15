@@ -11,6 +11,8 @@ import { creativeStudioSkill } from "./creativeStudio.js";
 import { commercialOfficeSkill } from "./commercialOffice.js";
 import { marketingOfficeSkill } from "./marketingOffice.js";
 import { runAgentTeamSkill } from "./agentTeam.js";
+import { captureScreenshotSkill, analyzeScreenshotSkill } from "./visionTools.js";
+import { sendAndroidCommandSkill } from "./androidCommand.js";
 
 export const builtinSkills: SkillDefinition[] = [
   getCurrentTimeSkill,
@@ -27,4 +29,7 @@ export const builtinSkills: SkillDefinition[] = [
   commercialOfficeSkill,
   marketingOfficeSkill,
   runAgentTeamSkill,
+  captureScreenshotSkill,
+  analyzeScreenshotSkill,
+  sendAndroidCommandSkill,
 ];

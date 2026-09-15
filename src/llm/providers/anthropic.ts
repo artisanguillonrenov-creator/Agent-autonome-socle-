@@ -15,6 +15,11 @@ export class AnthropicProvider implements LLMProvider {
     this.model = opts.model;
   }
 
+  /** Vague 8B : les modèles Claude 3+ acceptent tous des blocs image en entrée. */
+  supportsVision(): boolean {
+    return !/claude-[12](\D|$)/i.test(this.model);
+  }
+
   async complete(messages: ChatMessage[], options: CompletionOptions = {}): Promise<LLMCompletionResult> {
     if (!this.opts.apiKey) {
       throw new Error("ANTHROPIC_API_KEY manquant : impossible d'appeler le fournisseur anthropic.");
@@ -28,7 +33,16 @@ export class AnthropicProvider implements LLMProvider {
       .filter((m) => m.role !== "system")
       .map((m) => ({
         role: m.role === "assistant" ? "assistant" : "user",
-        content: m.content ?? "",
+        content:
+          m.images && m.images.length > 0
+            ? [
+                ...(m.content ? [{ type: "text", text: m.content }] : []),
+                ...m.images.map((image) => ({
+                  type: "image",
+                  source: { type: "base64", media_type: image.mimeType, data: image.base64 },
+                })),
+              ]
+            : m.content ?? "",
       }));
 
     const res = await fetch("https://api.anthropic.com/v1/messages", {
