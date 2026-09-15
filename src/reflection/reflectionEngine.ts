@@ -4,6 +4,7 @@ import { withGenerationDefaults } from "../llm/generationDefaults.js";
 import { providerForRole } from "../llm/modelRouter.js";
 import { config } from "../config.js";
 import { tracer } from "../observability/tracer.js";
+import { maybeEvolvePrompt } from "./promptEvolver.js";
 
 const LEGACY_CONVERSATION_ID = "__legacy__";
 /** Sépare le résumé en prose (retourné/stocké tel quel) du bloc JSON de triplets, dans la même réponse LLM. */
@@ -113,6 +114,10 @@ export class ReflectionEngine {
     if (insight.trim().length > 0) {
       await this.memory.vector.add(insight.trim(), "reflection", { workspaceId });
     }
+    // Vague 8C : best-effort strict — n'affecte jamais le résultat de la réflexion ci-dessus.
+    await maybeEvolvePrompt(recent, providerForRole("reasoning", this.llm)).catch((error) => {
+      console.warn("[Reflection] Prompt evolution échouée (best-effort):", (error as Error).message);
+    });
     return insight;
   }
 

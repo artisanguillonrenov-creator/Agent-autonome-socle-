@@ -8,6 +8,7 @@ const IMPORTANT_FOR_SMS_OR_VOICE = new Set<NotificationType>([
   "BACKGROUND_FAILED",
   "APPROVAL_REQUIRED",
   "COMMERCIAL_ATTENTION_REQUIRED",
+  "COST_CIRCUIT_BREAKER_TRIPPED",
 ]);
 
 export interface NativeAlertEnvelope {

@@ -1,10 +1,18 @@
 import Docker from "dockerode";
 import { PassThrough } from "node:stream";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { config } from "../config.js";
 import type { ExecutionResult } from "./sandbox.js";
+
+/**
+ * Vague 10C (Docker-in-Docker / sandboxing Software Factory) : volume de travail cloisonné
+ * dédié EXCLUSIVEMENT à l'écriture/exécution de scripts générés par l'IA — jamais un chemin du
+ * dépôt applicatif Jarvis, jamais son fichier .env. Distinct de os.tmpdir() par défaut pour
+ * pouvoir être monté comme volume Docker nommé isolé (voir docker-compose.yml) plutôt que de
+ * partager le tmpfs générique du conteneur hôte.
+ */
+const SANDBOX_BASE_DIR = process.env.SANDBOX_WORKDIR || "/tmp/jarvis-sandbox";
 
 let dockerInstance: Docker | null = null;
 function getDocker(): Docker {
@@ -39,6 +47,10 @@ async function runContainer(opts: RunContainerOptions): Promise<ExecutionResult>
       Cmd: opts.cmd,
       WorkingDir: "/workspace",
       Env: ["PATH=/usr/local/bin:/usr/bin:/bin"],
+      // Vague 11A : étiquette dédiée, jamais posée sur un conteneur hôte arbitraire — permet au
+      // watcher de cycle de vie (autonomy/watchers.ts) de filtrer strictement les événements
+      // Docker aux seuls conteneurs sandbox de la Software Factory.
+      Labels: { "jarvis.sandbox": "true" },
       AttachStdout: true,
       AttachStderr: true,
       Tty: false,
@@ -102,8 +114,13 @@ async function runContainer(opts: RunContainerOptions): Promise<ExecutionResult>
  * - le conteneur est systématiquement supprimé (`remove({force:true})`) en sortie,
  *   qu'il ait réussi, échoué ou été tué pour dépassement de timeout.
  */
+async function mkSandboxTempDir(): Promise<string> {
+  await mkdir(SANDBOX_BASE_DIR, { recursive: true });
+  return mkdtemp(join(SANDBOX_BASE_DIR, "agent-sandbox-"));
+}
+
 export async function runInDockerSandbox(code: string, timeoutMs: number): Promise<ExecutionResult> {
-  const dir = await mkdtemp(join(tmpdir(), "agent-sandbox-"));
+  const dir = await mkSandboxTempDir();
   try {
     await writeFile(join(dir, "script.mjs"), code, "utf-8");
     return await runContainer({ cmd: ["node", "/workspace/script.mjs"], hostDir: dir, readOnlyWorkspace: true, timeoutMs });
@@ -123,7 +140,7 @@ export async function runCommandInDockerSandbox(
   command: string[],
   timeoutMs: number,
 ): Promise<ExecutionResult> {
-  const dir = await mkdtemp(join(tmpdir(), "agent-sandbox-"));
+  const dir = await mkSandboxTempDir();
   try {
     for (const [relativePath, content] of Object.entries(files)) {
       if (relativePath.includes("..")) throw new Error(`UNSAFE_FILE_PATH: ${relativePath}`);

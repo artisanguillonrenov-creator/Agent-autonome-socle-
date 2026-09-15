@@ -253,4 +253,51 @@ export const config = {
     validationCommand: process.env.SOFTWARE_FACTORY_SANDBOX_VALIDATION_COMMAND || "",
     timeoutMs: int(process.env.SOFTWARE_FACTORY_SANDBOX_TIMEOUT_MS, 60_000),
   },
+  /**
+   * Vague 8A : disjoncteur financier évolué — gèle l'agent (aucun nouvel appel LLM) dès que
+   * le coût estimé glissant dépasse le seuil horaire configuré. Actif par défaut (seuil de
+   * sécurité), désactivable explicitement pour le développement local.
+   */
+  financialCircuitBreaker: {
+    enabled: process.env.FINANCIAL_CIRCUIT_BREAKER_ENABLED !== "false",
+    hourlyLimitUsd: (() => {
+      const n = Number(process.env.FINANCIAL_CIRCUIT_BREAKER_HOURLY_LIMIT_USD);
+      return Number.isFinite(n) && n > 0 ? n : 2.0;
+    })(),
+    windowMs: int(process.env.FINANCIAL_CIRCUIT_BREAKER_WINDOW_MS, 60 * 60 * 1000),
+  },
+  /** Vague 8B : vision multi-modale — modèle de repli explicitement dédié à l'analyse d'image, distinct du modèle de chat actif. */
+  vision: {
+    enabled: process.env.VISION_ENABLED !== "false",
+    model: process.env.VISION_MODEL || "",
+    screenshotTimeoutMs: int(process.env.VISION_SCREENSHOT_TIMEOUT_MS, 20_000),
+  },
+  /** Vague 8C : apprentissage par renforcement local — extraction de "règles d'or" après une correction de self-healing, injectées au démarrage de chaque session suivante. */
+  promptEvolution: {
+    enabled: process.env.PROMPT_EVOLUTION_ENABLED === "true",
+    rulesPath: process.env.DYNAMIC_RULES_PATH || "./config/dynamic_rules.json",
+    maxRules: int(process.env.PROMPT_EVOLUTION_MAX_RULES, 200),
+  },
+  /** Vague 9 : streaming audio bidirectionnel (WebSocket) + VAD + STT/TTS faible latence. */
+  audio: {
+    enabled: process.env.AUDIO_STREAMING_ENABLED === "true",
+    wsPath: process.env.AUDIO_STREAMING_WS_PATH || "/api/voice/stream",
+    /** Fenêtre de tolérance de reconnexion (coupure 4G/5G) avant expiration définitive de la session audio. */
+    sessionGraceMs: int(process.env.AUDIO_SESSION_GRACE_MS, 30_000),
+    /** VAD énergie : silence prolongé (ms) au-delà duquel on considère la parole terminée. */
+    vadSilenceMs: int(process.env.AUDIO_VAD_SILENCE_MS, 500),
+    vadEnergyThreshold: (() => {
+      const n = Number(process.env.AUDIO_VAD_ENERGY_THRESHOLD);
+      return Number.isFinite(n) && n > 0 ? n : 500;
+    })(),
+    sttWebhookUrl: process.env.STT_WEBHOOK_URL || "",
+    sttWebhookToken: process.env.STT_WEBHOOK_TOKEN || "",
+    ttsWebhookUrl: process.env.TTS_WEBHOOK_URL || "",
+    ttsWebhookToken: process.env.TTS_WEBHOOK_TOKEN || "",
+  },
+  /** Vague 9D : intents Android poussés en arrière-plan (FCM ou WebSocket persistant). */
+  android: {
+    fcmWebhookUrl: process.env.ANDROID_FCM_WEBHOOK_URL || "",
+    fcmWebhookToken: process.env.ANDROID_FCM_WEBHOOK_TOKEN || "",
+  },
 };

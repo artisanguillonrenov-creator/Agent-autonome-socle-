@@ -30,6 +30,8 @@ import { AgentTeamStore } from "../agents/agentTeamStore.js";
 import { BUREAU_SERVICE_IDS, getBureauLlmConfig, setBureauLlmConfig, type BureauServiceId } from "../orchestration/serviceRegistry.js";
 import { MissionStore } from "../coordination/missionStore.js";
 import { processCallback, CALLBACK_MAX_BODY_BYTES, CallbackPayloadTooLargeError } from "../coordination/callbackTransport.js";
+import { financialCircuitBreaker } from "../context/financialCircuitBreaker.js";
+import { androidCommandBus } from "../autonomy/androidCommandBus.js";
 
 const taskStore = new TaskStore();
 const jarvisMissionStore = new MissionStore();
@@ -1431,6 +1433,26 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
             ? "Annulation demandée, sans garantie pour l’effet externe."
             : "Opération déjà terminée.",
         });
+        return;
+      }
+
+      if (req.method === "GET" && pathname === "/api/android/commands") {
+        sendJson(res, 200, { items: androidCommandBus.pending() });
+        return;
+      }
+      const androidAckMatch = pathname.match(/^\/api\/android\/commands\/([^/]+)\/ack$/);
+      if (req.method === "POST" && androidAckMatch) {
+        const ok = androidCommandBus.acknowledge(decodeURIComponent(androidAckMatch[1]));
+        sendJson(res, ok ? 200 : 404, ok ? { ok: true } : { error: "ANDROID_COMMAND_NOT_FOUND" });
+        return;
+      }
+
+      if (req.method === "GET" && pathname === "/api/circuit-breaker/status") {
+        sendJson(res, 200, financialCircuitBreaker.status());
+        return;
+      }
+      if (req.method === "POST" && pathname === "/api/circuit-breaker/rearm") {
+        sendJson(res, 200, financialCircuitBreaker.rearm());
         return;
       }
 

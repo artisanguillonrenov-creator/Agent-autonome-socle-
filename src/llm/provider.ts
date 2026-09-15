@@ -33,5 +33,7 @@ export interface LLMProvider {
   /** Identifiant du modèle actif, quand connu — utilisé pour résoudre la fenêtre de contexte réelle. */
   readonly model?: string;
   supportsNativeTools?(): boolean;
+  /** Vague 8B : true si le modèle actif accepte des pièces jointes image (ChatMessage.images). */
+  supportsVision?(): boolean;
   complete(messages: ChatMessage[], options?: CompletionOptions): Promise<LLMCompletionResult>;
 }
