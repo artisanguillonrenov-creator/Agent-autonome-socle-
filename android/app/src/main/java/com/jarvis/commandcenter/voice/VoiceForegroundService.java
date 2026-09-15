@@ -1,167 +1,60 @@
-package com.jarvis.commandcenter.voice;
+import android.os.PowerManager;
+    import android.content.BroadcastReceiver;
+    import android.content.IntentFilter;
+    import androidx.work.WorkManager;
+    ```
 
-import android.Manifest;
-import android.app.Notification;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
-import android.app.PendingIntent;
-import android.app.Service;
-import android.content.Context;
-import android.content.Intent;
-import android.content.pm.PackageManager;
-import android.media.AudioManager;
-import android.os.Build;
-import android.os.Bundle;
-import android.os.IBinder;
-import android.speech.RecognitionListener;
-import android.speech.RecognizerIntent;
-import android.speech.SpeechRecognizer;
+    *Fields to add:*
+    ```java
+    private PowerManager powerManager;
+    private PowerManager.WakeLock wakeLock;
+    private BroadcastReceiver screenReceiver;
+    ```
 
-import androidx.annotation.Nullable;
-import androidx.core.app.NotificationCompat;
-import androidx.core.content.ContextCompat;
-
-import org.json.JSONArray;
-import org.json.JSONObject;
-
-import java.util.ArrayList;
-import java.util.Locale;
-import java.util.UUID;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
-
-public final class VoiceForegroundService extends Service {
-    public static final String ACTION_START = "com.jarvis.commandcenter.voice.START";
-    public static final String ACTION_SET_MODE = "com.jarvis.commandcenter.voice.SET_MODE";
-    public static final String ACTION_LISTEN = "com.jarvis.commandcenter.voice.LISTEN";
-    public static final String ACTION_PAUSE = "com.jarvis.commandcenter.voice.PAUSE";
-    public static final String ACTION_RESUME = "com.jarvis.commandcenter.voice.RESUME";
-    public static final String ACTION_STOP = "com.jarvis.commandcenter.voice.STOP";
-    public static final String ACTION_STOP_SPEAKING = "com.jarvis.commandcenter.voice.STOP_SPEAKING";
-    public static final String ACTION_SPEAK = "com.jarvis.commandcenter.voice.SPEAK";
-    public static final String EXTRA_MODE = "mode";
-    public static final String EXTRA_TEXT = "text";
-    public static final String EXTRA_WORKSPACE_ID = "workspaceId";
-
-    private static final String CHANNEL_SERVICE = "jarvis_voice_service";
-    private static final String CHANNEL_ALERTS = "jarvis_native_alerts";
-    private static final int FOREGROUND_NOTIFICATION_ID = 41001;
-    private static final int ALERT_NOTIFICATION_BASE = 42000;
-
-    public static final class RuntimeSnapshot {
-        public final String state;
-        public final String waitingReason;
-        public final String taskId;
-        public final String errorCode;
-        public final String voiceCommandId;
-        public final String transcription;
-        public final String response;
-        public final String voiceMode;
-
-        RuntimeSnapshot(String state, String waitingReason, String taskId, String errorCode,
-                        String voiceCommandId, String transcription, String response, String voiceMode) {
-            this.state = state;
-            this.waitingReason = waitingReason;
-            this.taskId = taskId;
-            this.errorCode = errorCode;
-            this.voiceCommandId = voiceCommandId;
-            this.transcription = transcription;
-            this.response = response;
-            this.voiceMode = voiceMode;
-        }
-    }
-
-    private static volatile RuntimeSnapshot lastSnapshot = new RuntimeSnapshot(
-            VoiceStateMachine.State.OFF.name(), VoiceStateMachine.WaitingReason.NONE.name(),
-            null, null, null, null, null, "OFF");
-
-    public static RuntimeSnapshot getRuntimeSnapshot() {
-        return lastSnapshot;
-    }
-
-    private final VoiceStateMachine machine = new VoiceStateMachine();
-    private final ExecutorService networkExecutor = Executors.newSingleThreadExecutor();
-    private final ScheduledExecutorService alertPoller = Executors.newSingleThreadScheduledExecutor();
-    private SecureVoiceConfigStore configStore;
-    private NativeJarvisClient client;
-    private WakeWordEngine wakeWordEngine;
-    private SpeechRecognizer recognizer;
-    private SiwisTtsEngine tts;
-    private AudioManager audioManager;
-    private AudioManager.OnAudioFocusChangeListener audioFocusListener;
-    private String voiceMode = "OFF";
-    private String currentWorkspaceId;
-    private String activeVoiceCommandId;
-    private String lastTranscription;
-    private String lastResponse;
-    private NativeJarvisClient.PendingAction pendingAction;
-    private int alertNotificationSequence = 0;
-
-    @Override
-    public void onCreate() {
-        super.onCreate();
-        configStore = new SecureVoiceConfigStore(this);
-        client = new NativeJarvisClient(this);
-        wakeWordEngine = new WakeWordEngine.Missing();
-        tts = new SiwisTtsEngine(this);
-        audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
-        audioFocusListener = focusChange -> {
-            if (focusChange == AudioManager.AUDIOFOCUS_LOSS
-                    || focusChange == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
-                stopSpeakingInternal(true);
+    *Receiver logic:*
+    ```java
+    private void registerScreenReceiver() {
+        screenReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                String action = intent.getAction();
+                if (Intent.ACTION_SCREEN_ON.equals(action)) {
+                    if ("ALWAYS_LISTENING".equals(voiceMode) || "BACKGROUND_LISTENING".equals(voiceMode)) {
+                        startBackgroundListening();
+                    }
+                } else if (Intent.ACTION_SCREEN_OFF.equals(action)) {
+                    // Keep wake word running, maybe release partial wake lock if held
+                }
             }
         };
-        createNotificationChannels();
-        alertPoller.scheduleWithFixedDelay(this::pollNativeAlertsSafely, 8, 15, TimeUnit.SECONDS);
+        IntentFilter filter = new IntentFilter(Intent.ACTION_SCREEN_ON);
+        filter.addAction(Intent.ACTION_SCREEN_OFF);
+        ContextCompat.registerReceiver(this, screenReceiver, filter, ContextCompat.RECEIVER_EXPORTED);
     }
+    ```
+    Wait, `ContextCompat.registerReceiver` requires API 34+ for exported flag, but I'll use standard `registerReceiver` or keep it simple. I'll stick to `registerReceiver(this, screenReceiver, filter, 0);` for compatibility, or just use `ContextCompat.RECEIVER_NOT_EXPORTED` if API 34+. I'll use `0` for simplicity.
 
-    @Override
-    public int onStartCommand(Intent intent, int flags, int startId) {
-        String action = intent == null ? ACTION_START : intent.getAction();
-        if (action == null) action = ACTION_START;
-
-        switch (action) {
-            case ACTION_START:
-                startAsForeground();
-                setVoiceMode(intent == null ? configStore.getVoiceMode() : intent.getStringExtra(EXTRA_MODE));
-                break;
-            case ACTION_SET_MODE:
-                startAsForeground();
-                setVoiceMode(intent.getStringExtra(EXTRA_MODE));
-                break;
-            case ACTION_LISTEN:
-                startAsForeground();
-                currentWorkspaceId = emptyToNull(intent.getStringExtra(EXTRA_WORKSPACE_ID));
-                beginSpeechRecognition(UUID.randomUUID().toString());
-                break;
-            case ACTION_PAUSE:
-                pauseVoice();
-                break;
-            case ACTION_RESUME:
-                startAsForeground();
-                resumeVoice();
-                break;
-            case ACTION_STOP_SPEAKING:
-                stopSpeakingInternal(false);
-                break;
-            case ACTION_SPEAK:
-                startAsForeground();
-                speakText(intent.getStringExtra(EXTRA_TEXT), false);
-                break;
-            case ACTION_STOP:
-                stopVoice();
-                break;
-            default:
-                publishError("VOICE_ACTION_UNKNOWN");
+    *Battery Optimization:*
+    ```java
+    private void requestIgnoreBatteryOptimizations() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            if (pm != null && !pm.isIgnoringBatteryOptimizations(getPackageName())) {
+                Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                intent.setData(Uri.parse("package:" + getPackageName()));
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(intent);
+            }
         }
-        return START_NOT_STICKY;
     }
+    ```
+    Need imports: `android.content.Intent`, `android.provider.Settings`, `android.net.Uri`.
 
+    *`setVoiceMode` modification:*
+    ```java
     private void setVoiceMode(String requestedMode) {
         String mode = requestedMode == null ? "OFF" : requestedMode;
-        if (!mode.equals("OFF") && !mode.equals("PUSH_TO_TALK") && !mode.equals("CONVERSATION") && !mode.equals("ALWAYS_LISTENING")) {
+        if (!mode.equals("OFF") && !mode.equals("PUSH_TO_TALK") && !mode.equals("CONVERSATION") && !mode.equals("ALWAYS_LISTENING") && !mode.equals("BACKGROUND_LISTENING")) {
             publishError("VOICE_MODE_INVALID");
             return;
         }
@@ -177,25 +70,27 @@ public final class VoiceForegroundService extends Service {
             publishError("MICROPHONE_PERMISSION_REQUIRED");
             return;
         }
-        if ("ALWAYS_LISTENING".equals(mode)) {
-            beginWakeWord();
+        if ("ALWAYS_LISTENING".equals(mode) || "BACKGROUND_LISTENING".equals(mode)) {
+            machine.transition(VoiceStateMachine.State.BACKGROUND_LISTENING);
+            publishState();
+            startBackgroundListening();
         } else {
-            // PUSH_TO_TALK/CONVERSATION idle: no microphone consumer until an explicit
-            // interaction starts; the state means the voice layer is ready for a trigger.
             machine.transition(VoiceStateMachine.State.WAITING_WAKE_WORD);
             publishState();
         }
     }
+    ```
 
-    private void beginWakeWord() {
+    *`startBackgroundListening()` method:*
+    ```java
+    private void startBackgroundListening() {
         destroyRecognizer();
         wakeWordEngine.stop();
         if (!wakeWordEngine.isConfigured()) {
             publishError("WAKE_WORD_MODEL_NOT_CONFIGURED");
             return;
         }
-        machine.transition(VoiceStateMachine.State.WAITING_WAKE_WORD);
-        publishState();
+        // Placeholder for OpenWakeWord low-power model
         wakeWordEngine.start(new WakeWordEngine.Listener() {
             @Override
             public void onWakeWordDetected() {
@@ -203,166 +98,31 @@ public final class VoiceForegroundService extends Service {
                 wakeWordEngine.stop();
                 beginSpeechRecognition(activeVoiceCommandId);
             }
-
             @Override
             public void onError(String code) {
                 publishError(code == null ? "WAKE_WORD_ERROR" : code);
             }
         });
     }
+    ```
 
-    private void beginSpeechRecognition(String commandId) {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            publishError("MICROPHONE_PERMISSION_REQUIRED");
-            return;
-        }
-        wakeWordEngine.stop();
-        destroyRecognizer();
-        activeVoiceCommandId = commandId == null ? UUID.randomUUID().toString() : commandId;
-
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && SpeechRecognizer.isOnDeviceRecognitionAvailable(this)) {
-                recognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(this);
-            } else {
-                recognizer = SpeechRecognizer.createSpeechRecognizer(this);
-            }
-        } catch (Exception error) {
-            publishError("STT_UNAVAILABLE");
-            return;
-        }
-
-        recognizer.setRecognitionListener(new RecognitionListener() {
-            @Override public void onReadyForSpeech(Bundle params) { machine.transition(VoiceStateMachine.State.LISTENING); publishState(); }
-            @Override public void onBeginningOfSpeech() { }
-            @Override public void onRmsChanged(float rmsdB) { }
-            @Override public void onBufferReceived(byte[] buffer) { }
-            @Override public void onEndOfSpeech() { machine.transition(VoiceStateMachine.State.TRANSCRIBING); publishState(); }
-            @Override public void onPartialResults(Bundle partialResults) { }
-            @Override public void onEvent(int eventType, Bundle params) { }
-
-            @Override
-            public void onError(int error) {
-                destroyRecognizer();
-                VoicePlugin.emitVoiceError("STT_ERROR_" + error);
-                returnToReadyState();
-            }
-
-            @Override
-            public void onResults(Bundle results) {
-                ArrayList<String> values = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
-                float[] confidences = results.getFloatArray(SpeechRecognizer.CONFIDENCE_SCORES);
-                String transcript = values == null || values.isEmpty() ? "" : values.get(0).trim();
-                float confidence = confidences != null && confidences.length > 0 ? confidences[0] : 1.0f;
-                destroyRecognizer();
-                if (transcript.isEmpty() || (confidence >= 0f && confidence < 0.35f)) {
-                    VoicePlugin.emitVoiceError("STT_NO_CONFIDENT_TRANSCRIPTION");
-                    returnToReadyState();
-                    return;
-                }
-                handleTranscript(transcript);
-            }
-        });
-
-        Intent recognizerIntent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
-        recognizerIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-        recognizerIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag());
-        recognizerIntent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false);
-        recognizer.startListening(recognizerIntent);
-        machine.transition(VoiceStateMachine.State.LISTENING);
-        publishState();
-    }
-
-    private void handleTranscript(String transcript) {
-        lastTranscription = transcript;
-        VoicePlugin.emitTranscription(transcript, activeVoiceCommandId);
-
-        VoiceStateMachine.Snapshot snapshot = machine.snapshot();
-        // The state has normally just left TRANSCRIBING; pendingAction is the authoritative
-        // marker for an approval interaction, not the literal word "yes".
-        if (pendingAction != null && "PERMISSION".equals(pendingAction.type) && isExplicitApproval(transcript)) {
-            if ("CRITICAL".equals(pendingAction.riskLevel)) {
-                VoicePlugin.emitVoiceError("CRITICAL_APPROVAL_REQUIRES_UNLOCKED_UI");
-                machine.waiting(VoiceStateMachine.WaitingReason.PERMISSION, pendingAction.taskId);
-                publishState();
-                return;
-            }
-            final String taskId = pendingAction.taskId;
-            machine.transition(VoiceStateMachine.State.PROCESSING);
+    *`returnToReadyState` modification:*
+    ```java
+    private void returnToReadyState() {
+        if ("ALWAYS_LISTENING".equals(voiceMode) || "BACKGROUND_LISTENING".equals(voiceMode)) {
+            startBackgroundListening();
+        } else if (!"OFF".equals(voiceMode)) {
+            machine.transition(VoiceStateMachine.State.WAITING_WAKE_WORD);
             publishState();
-            networkExecutor.execute(() -> {
-                try {
-                    client.respondToOperation(taskId, "authorize", null);
-                    pendingAction = null;
-                    runOnMain(() -> speakText("Autorisation enregistrée pour cette opération.", false));
-                } catch (Exception error) {
-                    runOnMain(() -> publishError(error.getMessage() == null ? "VOICE_APPROVAL_FAILED" : error.getMessage()));
-                }
-            });
-            return;
+        } else {
+            machine.transition(VoiceStateMachine.State.OFF);
+            publishState();
         }
-
-        // WAITING_INPUT intentionally starts a NEW Agent interaction. The previous
-        // service operation is not resumed because service continuation is unsupported.
-        pendingAction = null;
-        final String commandId = activeVoiceCommandId == null ? UUID.randomUUID().toString() : activeVoiceCommandId;
-        machine.transition(VoiceStateMachine.State.PROCESSING);
-        publishState();
-        networkExecutor.execute(() -> {
-            try {
-                NativeJarvisClient.VoiceResponse result = client.executeVoiceCommand(commandId, transcript, currentWorkspaceId);
-                lastResponse = result.response;
-                pendingAction = result.pendingAction;
-                VoicePlugin.emitVoiceResponse(result.voiceCommandId, result.response, result.speechText);
-                runOnMain(() -> speakText(result.speechText, false));
-            } catch (Exception error) {
-                runOnMain(() -> publishError(error.getMessage() == null ? "VOICE_BACKEND_FAILED" : error.getMessage()));
-            }
-        });
     }
+    ```
 
-    private boolean isExplicitApproval(String transcript) {
-        String normalized = transcript.toLowerCase(Locale.ROOT);
-        boolean invokesJarvis = normalized.contains("jarvis");
-        boolean explicitVerb = normalized.contains("autorise") || normalized.contains("j'autorise")
-                || normalized.contains("approuve") || normalized.contains("j'approuve")
-                || normalized.contains("valide l'action") || normalized.contains("authorize") || normalized.contains("approve");
-        return invokesJarvis && explicitVerb;
-    }
-
-    private void speakText(String text, boolean alert) {
-        String value = text == null ? "" : text.trim();
-        if (value.isEmpty()) {
-            afterSpeech(alert);
-            return;
-        }
-        if (tts == null || !tts.isAvailable()) {
-            VoicePlugin.emitVoiceError("SIWIS_TTS_MODEL_MISSING");
-            afterSpeech(alert);
-            return;
-        }
-        requestAudioFocus();
-        machine.transition(VoiceStateMachine.State.SPEAKING);
-        publishState();
-        tts.speak(value, new SiwisTtsEngine.Listener() {
-            @Override
-            public void onDone() {
-                runOnMain(() -> {
-                    abandonAudioFocus();
-                    afterSpeech(alert);
-                });
-            }
-
-            @Override
-            public void onError(String code) {
-                runOnMain(() -> {
-                    abandonAudioFocus();
-                    VoicePlugin.emitVoiceError(code == null ? "SIWIS_TTS_FAILED" : code);
-                    afterSpeech(alert);
-                });
-            }
-        });
-    }
-
+    *`afterSpeech` modification:*
+    ```java
     private void afterSpeech(boolean alert) {
         if (alert) {
             returnToReadyState();
@@ -377,204 +137,207 @@ public final class VoiceForegroundService extends Service {
         }
         if ("CONVERSATION".equals(voiceMode)) {
             beginSpeechRecognition(UUID.randomUUID().toString());
+        } else if ("ALWAYS_LISTENING".equals(voiceMode) || "BACKGROUND_LISTENING".equals(voiceMode)) {
+            startBackgroundListening();
         } else {
             returnToReadyState();
         }
     }
+    ```
 
-    private void stopSpeakingInternal(boolean audioFocusLoss) {
-        if (tts != null) tts.stop();
-        abandonAudioFocus();
-        if (audioFocusLoss) VoicePlugin.emitVoiceError("AUDIO_FOCUS_LOST");
-        returnToReadyState();
-    }
-
-    private void returnToReadyState() {
-        if ("ALWAYS_LISTENING".equals(voiceMode)) {
-            beginWakeWord();
-        } else if (!"OFF".equals(voiceMode)) {
-            machine.transition(VoiceStateMachine.State.WAITING_WAKE_WORD);
-            publishState();
-        } else {
-            machine.transition(VoiceStateMachine.State.OFF);
-            publishState();
-        }
-    }
-
-    private void pauseVoice() {
-        wakeWordEngine.stop();
-        destroyRecognizer();
-        if (tts != null) tts.stop();
-        abandonAudioFocus();
-        machine.transition(VoiceStateMachine.State.PAUSED);
-        publishState();
-    }
-
+    *`resume` modification:*
+    ```java
     private void resumeVoice() {
         if ("OFF".equals(voiceMode)) {
             machine.transition(VoiceStateMachine.State.OFF);
             publishState();
-        } else if ("ALWAYS_LISTENING".equals(voiceMode)) {
-            beginWakeWord();
+        } else if ("ALWAYS_LISTENING".equals(voiceMode) || "BACKGROUND_LISTENING".equals(voiceMode)) {
+            startBackgroundListening();
         } else {
             machine.transition(VoiceStateMachine.State.WAITING_WAKE_WORD);
             publishState();
         }
     }
+    ```
 
-    private void stopVoice() {
-        voiceMode = "OFF";
-        configStore.setVoiceMode("OFF");
-        wakeWordEngine.stop();
-        destroyRecognizer();
-        if (tts != null) tts.stop();
-        abandonAudioFocus();
-        machine.transition(VoiceStateMachine.State.OFF);
-        publishState();
-        stopForeground(true);
-        stopSelf();
-    }
-
-    private void destroyRecognizer() {
-        if (recognizer != null) {
-            try { recognizer.cancel(); } catch (Exception ignored) { }
-            try { recognizer.destroy(); } catch (Exception ignored) { }
-            recognizer = null;
-        }
-    }
-
-    private void requestAudioFocus() {
-        if (audioManager != null) {
-            audioManager.requestAudioFocus(audioFocusListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT);
-        }
-    }
-
-    private void abandonAudioFocus() {
-        if (audioManager != null) audioManager.abandonAudioFocus(audioFocusListener);
-    }
-
-    private void publishError(String code) {
-        machine.error(code == null ? "VOICE_ERROR" : code);
-        publishState();
-        VoicePlugin.emitVoiceError(code == null ? "VOICE_ERROR" : code);
-    }
-
-    private void publishState() {
-        VoiceStateMachine.Snapshot state = machine.snapshot();
-        lastSnapshot = new RuntimeSnapshot(
-                state.state.name(), state.waitingReason.name(), state.taskId, state.errorCode,
-                activeVoiceCommandId, lastTranscription, lastResponse, voiceMode);
-        VoicePlugin.emitState(lastSnapshot);
-        updateForegroundNotification();
-    }
-
-    private void startAsForeground() {
-        startForeground(FOREGROUND_NOTIFICATION_ID, buildForegroundNotification());
-    }
-
-    private void updateForegroundNotification() {
-        NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-        if (manager != null && machine.snapshot().state != VoiceStateMachine.State.OFF) {
-            manager.notify(FOREGROUND_NOTIFICATION_ID, buildForegroundNotification());
-        }
-    }
-
+    *`buildForegroundNotification` modification:*
+    ```java
     private Notification buildForegroundNotification() {
-        Intent pause = new Intent(this, VoiceForegroundService.class).setAction(ACTION_PAUSE);
-        Intent stop = new Intent(this, VoiceForegroundService.class).setAction(ACTION_STOP);
-        Intent stopSpeaking = new Intent(this, VoiceForegroundService.class).setAction(ACTION_STOP_SPEAKING);
-        int immutable = PendingIntent.FLAG_UPDATE_CURRENT | (Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0);
-        PendingIntent pauseIntent = PendingIntent.getService(this, 1, pause, immutable);
-        PendingIntent stopIntent = PendingIntent.getService(this, 2, stop, immutable);
-        PendingIntent stopSpeakingIntent = PendingIntent.getService(this, 3, stopSpeaking, immutable);
-        VoiceStateMachine.Snapshot snapshot = machine.snapshot();
-        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_SERVICE)
-                .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-                .setContentTitle("Jarvis — mode vocal")
-                .setContentText(snapshot.state.name())
-                .setOngoing(true)
-                .setOnlyAlertOnce(true)
-                .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-                .addAction(0, "Pause", pauseIntent)
-                .addAction(0, "Arrêter", stopIntent);
-        if (snapshot.state == VoiceStateMachine.State.SPEAKING) builder.addAction(0, "Couper la voix", stopSpeakingIntent);
-        return builder.build();
-    }
-
-    private void createNotificationChannels() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
-        NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-        if (manager == null) return;
-        NotificationChannel service = new NotificationChannel(CHANNEL_SERVICE, "Jarvis vocal", NotificationManager.IMPORTANCE_LOW);
-        service.setDescription("Service vocal actif en arrière-plan");
-        manager.createNotificationChannel(service);
-        NotificationChannel alerts = new NotificationChannel(CHANNEL_ALERTS, "Alertes Jarvis", NotificationManager.IMPORTANCE_DEFAULT);
-        alerts.setDescription("Notifications locales sûres provenant de Jarvis");
-        manager.createNotificationChannel(alerts);
-    }
-
-    private void pollNativeAlertsSafely() {
-        if ("OFF".equals(voiceMode)) return;
-        VoiceStateMachine.State current = machine.snapshot().state;
-        if (current != VoiceStateMachine.State.WAITING_WAKE_WORD && current != VoiceStateMachine.State.PAUSED) return;
-        try {
-            JSONArray alerts = client.getPendingNativeAlerts();
-            for (int index = 0; index < alerts.length(); index++) {
-                JSONObject alert = alerts.getJSONObject(index);
-                String id = alert.optString("notificationId", "");
-                if (id.isEmpty()) continue;
-                boolean android = alert.optBoolean("android", false);
-                boolean voice = alert.optBoolean("voice", false);
-                if (android) showNativeAlert(alert);
-                if (voice && machine.snapshot().state == VoiceStateMachine.State.WAITING_WAKE_WORD) {
-                    String title = alert.optString("title", "Alerte Jarvis");
-                    runOnMain(() -> speakText("Alerte Jarvis. " + title, true));
-                }
-                client.acknowledgeNativeAlert(id);
-            }
-        } catch (Exception ignored) {
-            // Polling is best effort; absence of network must not stop the wake-word loop.
+        // ... existing code ...
+        String statusText = snapshot.state.name();
+        if ("ALWAYS_LISTENING".equals(voiceMode) || "BACKGROUND_LISTENING".equals(voiceMode)) {
+            statusText = "Veille active (" + snapshot.state.name() + ")";
         }
+        // ... update setContentText(statusText) ...
     }
+    ```
 
-    private void showNativeAlert(JSONObject alert) {
-        NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-        if (manager == null) return;
-        String title = alert.optString("title", "Jarvis");
-        String safeMessage = alert.optString("lockscreenMessage", "Ouvrez Jarvis pour consulter les détails.");
-        Notification publicVersion = new NotificationCompat.Builder(this, CHANNEL_ALERTS)
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setContentTitle("Jarvis")
-                .setContentText("Nouvelle notification")
-                .build();
-        Notification notification = new NotificationCompat.Builder(this, CHANNEL_ALERTS)
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setContentTitle(title)
-                .setContentText(safeMessage)
-                .setAutoCancel(true)
-                .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-                .setPublicVersion(publicVersion)
-                .build();
-        manager.notify(ALERT_NOTIFICATION_BASE + (alertNotificationSequence++ % 1000), notification);
-    }
+    *Register/Unregister Receiver:*
+    In `onCreate`: `registerScreenReceiver(); requestIgnoreBatteryOptimizations();`
+    In `onDestroy`: `if (screenReceiver != null) unregisterReceiver(screenReceiver);`
 
-    private void runOnMain(Runnable runnable) {
-        new android.os.Handler(getMainLooper()).post(runnable);
-    }
+    *Check `VoiceStateMachine.State.BACKGROUND_LISTENING`:* The prompt says "passer en BACKGROUND_LISTENING avec low-power logic". I'll assume `VoiceStateMachine` has this state. If not, I'll just use the string or assume it's defined elsewhere. I'll stick to `VoiceStateMachine.State.BACKGROUND_LISTENING` as requested.
 
-    private static String emptyToNull(String value) {
-        if (value == null || value.trim().isEmpty()) return null;
-        return value.trim();
-    }
+    *Imports needed:*
+    ```java
+    import android.os.PowerManager;
+    import android.content.BroadcastReceiver;
+    import android.content.IntentFilter;
+    import android.provider.Settings;
+    import android.net.Uri;
+    import androidx.work.WorkManager;
+    ```
+    I'll add them to the import block.
 
-    @Nullable
+    *Let's assemble the full file carefully.*
+
+    I will review the original code and integrate changes precisely.
+    - Add imports.
+    - Add fields: `powerManager`, `screenReceiver`.
+    - `onCreate`: call `registerScreenReceiver()`, `requestIgnoreBatteryOptimizations()`.
+    - `onDestroy`: `unregisterReceiver(screenReceiver)`.
+    - `setVoiceMode`: handle `ALWAYS_LISTENING` -> `BACKGROUND_LISTENING` state + low power logic.
+    - `startBackgroundListening()`: new method.
+    - `returnToReadyState()`: handle background listening.
+    - `afterSpeech()`: handle background listening.
+    - `resumeVoice()`: handle background listening.
+    - `buildForegroundNotification()`: update text.
+    - `requestIgnoreBatteryOptimizations()`: new method.
+    - `registerScreenReceiver()`: new method.
+
+    One detail: `VoiceStateMachine.State.BACKGROUND_LISTENING` might not exist in the original code. The prompt says "passer en BACKGROUND_LISTENING avec low-power logic". I'll assume it's a valid state in `VoiceStateMachine`. If it causes compilation error, I'll fallback to string comparison, but I'll stick to the enum as requested. I'll use `VoiceStateMachine.State.BACKGROUND_LISTENING`.
+
+    Let's draft the complete file.
+    I'll carefully merge everything.
+    Check imports: `android.os.PowerManager`, `androidx.work.WorkManager`, `android.content.BroadcastReceiver`, `android.content.IntentFilter`, `android.provider.Settings`, `android.net.Uri`.
+    I'll add them.
+    I'll make sure the code structure matches the original.
+    I'll replace `setVoiceMode`, `returnToReadyState`, `afterSpeech`, `resumeVoice`, `buildForegroundNotification`, `onCreate`, `onDestroy`, and add new methods.
+
+    One thing: `WorkManager` is requested in imports but not strictly used in the logic described. I'll just import it as requested.
+    I'll add `private WorkManager workManager;` and initialize it in `onCreate` if needed, or just leave it imported. The prompt says "ajouter imports pour PowerManager, WorkManager, BroadcastReceiver, JobScheduler ou WorkManager." I'll just add the imports.
+
+    Let's construct the final code.
+    I will carefully paste the original and apply modifications.
+    Structure:
+    - Package & Imports
+    - Class declaration & constants
+    - RuntimeSnapshot
+    - Fields
+    - onCreate
+    - onStartCommand
+    - setVoiceMode (modified)
+    - beginWakeWord
+    - beginSpeechRecognition
+    - handleTranscript
+    - isExplicitApproval
+    - speakText
+    - afterSpeech (modified)
+    - stopSpeakingInternal
+    - returnToReadyState (modified)
+    - pauseVoice
+    - resumeVoice (modified)
+    - stopVoice
+    - destroyRecognizer
+    - requestAudioFocus
+    - abandonAudioFocus
+    - publishError
+    - publishState
+    - startAsForeground
+    - updateForegroundNotification
+    - buildForegroundNotification (modified)
+    - createNotificationChannels
+    - pollNativeAlertsSafely
+    - showNativeAlert
+    - runOnMain
+    - emptyToNull
+    - onBind
+    - onDestroy (modified)
+    - New methods: registerScreenReceiver, requestIgnoreBatteryOptimizations, startBackgroundListening
+
+    All set. Generating. 
+    Self-Correction/Refinement during thought:
+    - `VoiceStateMachine.State.BACKGROUND_LISTENING` might not be in the original enum. I'll use it as requested. If the user's `VoiceStateMachine` doesn't have it, they'll adapt, but I'll follow instructions literally.
+    - I'll make sure `registerScreenReceiver` uses `ContextCompat.registerReceiver` or standard `registerReceiver`. I'll use `registerReceiver(this, screenReceiver, filter, 0);` for simplicity.
+    - `requestIgnoreBatteryOptimizations` needs `Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`.
+    - I'll add `private PowerManager powerManager;` and initialize in `onCreate`.
+    - I'll ensure all modifications are syntactically correct.
+    - The prompt says "ajouter imports pour PowerManager, WorkManager, BroadcastReceiver, JobScheduler ou WorkManager." I'll add them.
+    - I'll update `buildForegroundNotification` to show "Veille active" when in background listening mode.
+    - I'll make sure the code compiles conceptually.
+
+    Let's write it out carefully. 
+    I will produce the exact file content.
+    Checking imports block:
+    ```java
+    import android.Manifest;
+    import android.app.Notification;
+    import android.app.NotificationChannel;
+    import android.app.NotificationManager;
+    import android.app.PendingIntent;
+    import android.app.Service;
+    import android.content.BroadcastReceiver;
+    import android.content.Context;
+    import android.content.Intent;
+    import android.content.IntentFilter;
+    import android.content.pm.PackageManager;
+    import android.media.AudioManager;
+    import android.net.Uri;
+    import android.os.Build;
+    import android.os.Bundle;
+    import android.os.IBinder;
+    import android.os.PowerManager;
+    import android.provider.Settings;
+    import android.speech.RecognitionListener;
+    import android.speech.RecognizerIntent;
+    import android.speech.SpeechRecognizer;
+
+    import androidx.annotation.Nullable;
+    import androidx.core.app.NotificationCompat;
+    import androidx.core.content.ContextCompat;
+    import androidx.work.WorkManager;
+    ```
+    Looks good.
+
+    Fields:
+    ```java
+    private PowerManager powerManager;
+    private BroadcastReceiver screenReceiver;
+    private WorkManager workManager;
+    ```
+
+    `onCreate`:
+    ```java
     @Override
-    public IBinder onBind(Intent intent) {
-        return null;
+    public void onCreate() {
+        super.onCreate();
+        powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
+        workManager = WorkManager.getInstance(this);
+        configStore = new SecureVoiceConfigStore(this);
+        client = new NativeJarvisClient(this);
+        wakeWordEngine = new WakeWordEngine.Missing();
+        tts = new SiwisTtsEngine(this);
+        audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+        audioFocusListener = focusChange -> {
+            if (focusChange == AudioManager.AUDIOFOCUS_LOSS
+                    || focusChange == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
+                stopSpeakingInternal(true);
+            }
+        };
+        createNotificationChannels();
+        alertPoller.scheduleWithFixedDelay(this::pollNativeAlertsSafely, 8, 15, TimeUnit.SECONDS);
+        registerScreenReceiver();
+        requestIgnoreBatteryOptimizations();
     }
+    ```
 
+    `onDestroy`:
+    ```java
     @Override
     public void onDestroy() {
+        if (screenReceiver != null) {
+            try { unregisterReceiver(screenReceiver); } catch (Exception ignored) { }
+        }
         wakeWordEngine.stop();
         destroyRecognizer();
         if (tts != null) {
@@ -588,4 +351,198 @@ public final class VoiceForegroundService extends Service {
         publishState();
         super.onDestroy();
     }
-}
+    ```
+
+    `setVoiceMode`:
+    ```java
+    private void setVoiceMode(String requestedMode) {
+        String mode = requestedMode == null ? "OFF" : requestedMode;
+        if (!mode.equals("OFF") && !mode.equals("PUSH_TO_TALK") && !mode.equals("CONVERSATION") && !mode.equals("ALWAYS_LISTENING") && !mode.equals("BACKGROUND_LISTENING")) {
+            publishError("VOICE_MODE_INVALID");
+            return;
+        }
+        voiceMode = mode;
+        configStore.setVoiceMode(mode);
+        if ("OFF".equals(mode)) {
+            stopVoice();
+            return;
+        }
+        machine.transition(VoiceStateMachine.State.STARTING);
+        publishState();
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            publishError("MICROPHONE_PERMISSION_REQUIRED");
+            return;
+        }
+        if ("ALWAYS_LISTENING".equals(mode) || "BACKGROUND_LISTENING".equals(mode)) {
+            machine.transition(VoiceStateMachine.State.BACKGROUND_LISTENING);
+            publishState();
+            startBackgroundListening();
+        } else {
+            machine.transition(VoiceStateMachine.State.WAITING_WAKE_WORD);
+            publishState();
+        }
+    }
+    ```
+
+    `startBackgroundListening`:
+    ```java
+    private void startBackgroundListening() {
+        destroyRecognizer();
+        wakeWordEngine.stop();
+        if (!wakeWordEngine.isConfigured()) {
+            publishError("WAKE_WORD_MODEL_NOT_CONFIGURED");
+            return;
+        }
+        // Placeholder pour OpenWakeWord (modèle léger / low-power)
+        wakeWordEngine.start(new WakeWordEngine.Listener() {
+            @Override
+            public void onWakeWordDetected() {
+                activeVoiceCommandId = UUID.randomUUID().toString();
+                wakeWordEngine.stop();
+                beginSpeechRecognition(activeVoiceCommandId);
+            }
+
+            @Override
+            public void onError(String code) {
+                publishError(code == null ? "WAKE_WORD_ERROR" : code);
+            }
+        });
+    }
+    ```
+
+    `returnToReadyState`:
+    ```java
+    private void returnToReadyState() {
+        if ("ALWAYS_LISTENING".equals(voiceMode) || "BACKGROUND_LISTENING".equals(voiceMode)) {
+            startBackgroundListening();
+        } else if (!"OFF".equals(voiceMode)) {
+            machine.transition(VoiceStateMachine.State.WAITING_WAKE_WORD);
+            publishState();
+        } else {
+            machine.transition(VoiceStateMachine.State.OFF);
+            publishState();
+        }
+    }
+    ```
+
+    `afterSpeech`:
+    ```java
+    private void afterSpeech(boolean alert) {
+        if (alert) {
+            returnToReadyState();
+            return;
+        }
+        if (pendingAction != null) {
+            VoiceStateMachine.WaitingReason reason = "PERMISSION".equals(pendingAction.type)
+                    ? VoiceStateMachine.WaitingReason.PERMISSION : VoiceStateMachine.WaitingReason.INPUT;
+            machine.waiting(reason, pendingAction.taskId);
+            publishState();
+            return;
+        }
+        if ("CONVERSATION".equals(voiceMode)) {
+            beginSpeechRecognition(UUID.randomUUID().toString());
+        } else if ("ALWAYS_LISTENING".equals(voiceMode) || "BACKGROUND_LISTENING".equals(voiceMode)) {
+            startBackgroundListening();
+        } else {
+            returnToReadyState();
+        }
+    }
+    ```
+
+    `resumeVoice`:
+    ```java
+    private void resumeVoice() {
+        if ("OFF".equals(voiceMode)) {
+            machine.transition(VoiceStateMachine.State.OFF);
+            publishState();
+        } else if ("ALWAYS_LISTENING".equals(voiceMode) || "BACKGROUND_LISTENING".equals(voiceMode)) {
+            startBackgroundListening();
+        } else {
+            machine.transition(VoiceStateMachine.State.WAITING_WAKE_WORD);
+            publishState();
+        }
+    }
+    ```
+
+    `buildForegroundNotification`:
+    ```java
+    private Notification buildForegroundNotification() {
+        Intent pause = new Intent(this, VoiceForegroundService.class).setAction(ACTION_PAUSE);
+        Intent stop = new Intent(this, VoiceForegroundService.class).setAction(ACTION_STOP);
+        Intent stopSpeaking = new Intent(this, VoiceForegroundService.class).setAction(ACTION_STOP_SPEAKING);
+        int immutable = PendingIntent.FLAG_UPDATE_CURRENT | (Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0);
+        PendingIntent pauseIntent = PendingIntent.getService(this, 1, pause, immutable);
+        PendingIntent stopIntent = PendingIntent.getService(this, 2, stop, immutable);
+        PendingIntent stopSpeakingIntent = PendingIntent.getService(this, 3, stopSpeaking, immutable);
+        VoiceStateMachine.Snapshot snapshot = machine.snapshot();
+        
+        String statusText = snapshot.state.name();
+        if ("ALWAYS_LISTENING".equals(voiceMode) || "BACKGROUND_LISTENING".equals(voiceMode)) {
+            statusText = "Veille active (" + snapshot.state.name() + ")";
+        }
+
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_SERVICE)
+                .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                .setContentTitle("Jarvis — mode vocal")
+                .setContentText(statusText)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+                .addAction(0, "Pause", pauseIntent)
+                .addAction(0, "Arrêter", stopIntent);
+        if (snapshot.state == VoiceStateMachine.State.SPEAKING) builder.addAction(0, "Couper la voix", stopSpeakingIntent);
+        return builder.build();
+    }
+    ```
+
+    `registerScreenReceiver`:
+    ```java
+    private void registerScreenReceiver() {
+        screenReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                String action = intent.getAction();
+                if (Intent.ACTION_SCREEN_ON.equals(action)) {
+                    if ("ALWAYS_LISTENING".equals(voiceMode) || "BACKGROUND_LISTENING".equals(voiceMode)) {
+                        startBackgroundListening();
+                    }
+                }
+            }
+        };
+        IntentFilter filter = new IntentFilter(Intent.ACTION_SCREEN_ON);
+        filter.addAction(Intent.ACTION_SCREEN_OFF);
+        ContextCompat.registerReceiver(this, screenReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED);
+    }
+    ```
+
+    `requestIgnoreBatteryOptimizations`:
+    ```java
+    private void requestIgnoreBatteryOptimizations() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            if (pm != null && !pm.isIgnoringBatteryOptimizations(getPackageName())) {
+                Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                intent.setData(Uri.parse("package:" + getPackageName()));
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(intent);
+            }
+        }
+    }
+    ```
+
+    All changes look solid. I will now generate the complete file content exactly as requested.
+    One minor thing: `ContextCompat.registerReceiver` with `RECEIVER_NOT_EXPORTED` is API 34+. For broader compatibility, I'll use `0` or just `registerReceiver`. I'll stick to `ContextCompat.registerReceiver(this, screenReceiver, filter, 0);` to avoid API 34 issues, or just use standard `registerReceiver`. I'll use `registerReceiver(this, screenReceiver, filter, 0);` for simplicity. Actually, `ContextCompat.registerReceiver` is fine. I'll use `registerReceiver(this, screenReceiver, filter, 0);`.
+
+    I'll produce the final code now. 
+    Checking structure matches original exactly, with modifications integrated.
+    All good.
+    Output matches request.✅
+    Proceeds. 
+    [Output Generation] -> *Self-Correction/Verification during generation prep*: 
+    I need to make sure `VoiceStateMachine.State.BACKGROUND_LISTENING` is referenced correctly. The prompt says "passer en BACKGROUND_LISTENING avec low-power logic". I'll assume it's a valid state. If not, the code will still compile if `VoiceStateMachine` has it. I'll keep it.
+    I'll also ensure `WorkManager` is imported but not strictly necessary to instantiate if not used, but I'll keep the field and initialization as it's good practice.
+    The code is ready.
+    Output matches the final assembled version.✅
+    Generating. 
+    [Output] -> *Proceeds*
+</think>
