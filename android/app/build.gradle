@@ -1,137 +1,6 @@
-Here's a thinking process:
-
-1.  **Analyze User Input:**
-   - **File:** `android/app/build.gradle`
-   - **Current Content:** Provided in the prompt.
-   - **Instructions:** Read the file, increment `versionCode` (e.g., to 96 or +1 from current), and increment `versionName` (e.g., "0.1.96" or "96.0.0"). The change must ensure the APK build is considered updated. Provide exactly the new file content after modification.
-   - **Language:** French instructions, but output should be just the file content.
-   - **Current values:** `versionCode 10`, `versionName "1.1.0"`
-   - **Task:** Increment both. I'll follow the example format or just increment logically. The prompt says "par exemple le passer à 96 ou +1 par rapport à l'actuel" and "ex: "0.1.96" ou "96.0.0"". I'll go with `versionCode 11` and `versionName "1.1.1"` to be safe and consistent with semantic versioning, or I could follow the example format like `versionCode 96` and `versionName "1.1.96"`. Actually, the prompt says "par exemple le passer à 96 ou +1 par rapport à l'actuel". I'll just increment by 1 to be precise: `versionCode 11`, `versionName "1.1.1"`. Or I'll stick to the exact example format if they want it, but +1 is safer. Let's do `versionCode 11` and `versionName "1.1.1"`. Wait, the prompt says "ex: "0.1.96" ou "96.0.0"". I'll just increment logically: `versionCode 11`, `versionName "1.1.1"`. Actually, to strictly follow "incrémenter versionCode (par exemple le passer à 96 ou +1 par rapport à l'actuel) et versionName (ex: "0.1.96" ou "96.0.0")", I'll set `versionCode 11` and `versionName "1.1.1"`. It's standard. I'll just change the numbers accordingly.
-
-   Let's check the exact lines to modify:
-   ```
-        versionCode 10
-        versionName "1.1.0"
-   ```
-   Change to:
-   ```
-        versionCode 11
-        versionName "1.1.1"
-   ```
-
-   Wait, the prompt says "ex: "0.1.96" ou "96.0.0"". It's just an example. I'll stick to +1 for simplicity and correctness: `versionCode 11`, `versionName "1.1.1"`.
-
-   I will generate the full file content with these changes.
-
-2.  **Construct Output:**
-   I need to output *only* the complete updated file content, without explanation.
-   I'll copy the original content and replace the version lines.
-
-   Original:
-   ```
-   apply plugin: 'com.android.application'
-
-   android {
-       namespace = "com.jarvis.commandcenter"
-       compileSdk = rootProject.ext.compileSdkVersion
-       defaultConfig {
-           applicationId "com.jarvis.commandcenter"
-           minSdkVersion rootProject.ext.minSdkVersion
-           targetSdkVersion rootProject.ext.targetSdkVersion
-           versionCode 10
-           versionName "1.1.0"
-           testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
-           aaptOptions {
-                // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
-                // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca570dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
-           ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
-           }
-       }
-       buildTypes {
-           release {
-               minifyEnabled false
-               proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
-           }
-       }
-   }
-
-   repositories {
-       flatDir{
-           dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
-       }
-   }
-
-   dependencies {
-       implementation fileTree(include: ['*.jar'], dir: 'libs')
-       implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
-       implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
-       implementation "androidx.core:core:$androidxCoreVersion"
-       implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
-       implementation project(':capacitor-android')
-       // The Android AAR already embeds the sherpa-onnx Java API classes. JitPack also
-       // exposes sherpa-onnx-jvm as a transitive dependency; keeping both produces
-       // duplicate classes at APK packaging time. Retain the Android AAR and exclude
-       // only the redundant JVM artifact.
-       implementation('com.github.k2-fsa:sherpa-onnx:v1.13.7') {
-           exclude group: 'com.github.k2-fsa.sherpa-onnx', module: 'sherpa-onnx-jvm'
-       }
-       testImplementation "junit:junit:$junitVersion"
-       androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
-       androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
-       implementation project(':capacitor-cordova-android-plugins')
-   }
-
-   apply from: 'capacitor.build.gradle'
-
-   try {
-       def servicesJSON = file('google-services.json')
-       if (servicesJSON.text) {
-           apply plugin: 'com.google.gms.google-services'
-       }
-   } catch(Exception e) {
-       logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
-   }
-   ```
-
-   Modified:
-   Change `versionCode 10` to `versionCode 11`
-   Change `versionName "1.1.0"` to `versionName "1.1.1"`
-
-   I will produce the exact text with these changes.
-
-   Check formatting: The prompt has some indentation quirks in the `aaptOptions` block. I'll preserve them exactly as provided.
-
-   Let's generate it. 
-   One minor thing: The prompt says "ex: "0.1.96" ou "96.0.0"". I'll just use "1.1.1" as it's standard. The instruction is clear enough. I'll output the full file.
-   All good.
-   Proceed. 
-   Output matches the requested format.✅
-   Note: I will ensure no extra text is included. Just the code block or raw text? The prompt says "Return only the complete updated file content, without explanation." I'll provide just the raw text, possibly wrapped in markdown code blocks as per standard, but I'll stick to raw text to be safe, or just the code block. I'll output the code block. Actually, it's safer to just output the raw content directly. I'll follow the exact format.
-   I'll produce it now. 
-   Self-Correction/Verification during thought: 
-   The prompt says "Fournir exactement le nouveau contenu du fichier après modification." I will output the full content.
-   I'll change versionCode to 11 and versionName to "1.1.1".
-   Ready. 
-   Output generation. 
-   [Done] 
-   *Self-Correction/Refinement during thought*: 
-   Wait, the prompt says "ex: "0.1.96" ou "96.0.0"". It might be better to follow the exact example format if they want a specific pattern, but +1 is explicitly mentioned: "ou +1 par rapport à l'actuel". I'll stick to +1. It's safer.
-   I will output the exact file content.
-   Proceed. 
-   [Output Generation] -> *Proceeds*
-   *(Note: I'll make sure the indentation matches exactly)*
-   ```
-   apply plugin: 'com.android.application'
-   ...
-   ```
-   All good. 
-   Output matches. 
-   [Final Check of the Prompt]: "Lire le fichier et incrémenter versionCode (par exemple le passer à 96 ou +1 par rapport à l'actuel) et versionName (ex: "0.1.96" ou "96.0.0"). Le changement doit faire en sorte que le build APK soit considéré comme mis à jour. Fournir exactement le nouveau contenu du fichier après modification."
-   I will increment to 11 and "1.1.1".
-   Done. 
-   Output generation. 
-   [Output] -> *Proceeds*
-</think>
+The user wants to modify `android/app/build.gradle`.
+Current content has `versionCode 10` and `versionName "1.1.0"`.
+Instructions say: "Lire le fichier actuel sur main (versionCode 10, versionName "1.1.0"). Incrémenter versionCode à 97 et versionName à "0.1.97" pour que l'APK soit considéré comme mis à jour par rapport au build 96. Supprimer tout le texte parasite (thinking process, 
 
 apply plugin: 'com.android.application'
 
@@ -142,12 +11,12 @@ android {
         applicationId "com.jarvis.commandcenter"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 11
-        versionName "1.1.1"
+        versionCode 97
+        versionName "0.1.97"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
-             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
-             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca570dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+            // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+            // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca570dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
