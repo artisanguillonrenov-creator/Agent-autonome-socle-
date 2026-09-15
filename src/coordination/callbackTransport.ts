@@ -1,10 +1,16 @@
 /**
- * Transport sécurisé des callbacks asynchrones entre n8n/JARVIS-00 et Jarvis.
+ * Transport sécurisé des callbacks asynchrones (plan V5, PR-F) entre n8n /
+ * JARVIS-00, Jarvis, et les workers/services externes.
  *
  * Le même transport HMAC sert aussi au bootstrap contrôlé d'une mission via
- * l'événement de contrôle MISSION_SYNC. Cela évite de créer un second protocole
- * d'authentification : canonicalisation, anti-rejeu, secret et comparaison en
- * temps constant restent strictement ceux de PR-F.
+ * l'événement de contrôle `MISSION_SYNC`. Cette extension ne crée aucun second
+ * protocole : canonicalisation déterministe, HMAC-SHA256, fenêtre anti-rejeu,
+ * comparaison en temps constant et secret restent exactement ceux de PR-F.
+ *
+ * Les événements métier continuent d'exiger une mission existante et sont
+ * journalisés via MissionStore. `MISSION_SYNC` ne journalise rien : il crée la
+ * mission (ou confirme idempotemment son existence) avant les callbacks métier.
+ * Aucune logique de fusion GitHub n'existe dans ce module.
  */
 
 import { createHmac, timingSafeEqual } from "node:crypto";
@@ -13,10 +19,10 @@ import { MISSION_STATUSES, MissionNotFoundError, type MissionStatus } from "./ty
 import { MissionStore } from "./missionStore.js";
 import { assertSupportedContractVersion } from "./contracts.js";
 
-/** Fenêtre anti-rejeu : ±5 minutes autour de l'heure serveur. */
+/** Fenêtre anti-rejeu (plan V5 PR-F) : ±5 minutes autour de l'heure serveur. */
 export const CALLBACK_TIMESTAMP_WINDOW_MS = 5 * 60 * 1000;
 
-/** Limite stricte du corps HTTP accepté par l'endpoint de callback. */
+/** Limite stricte du corps HTTP accepté par l'endpoint de callback : 256 KiB. */
 export const CALLBACK_MAX_BODY_BYTES = 256 * 1024;
 
 /** Événements métier journalisés sur une mission existante. */
@@ -100,6 +106,7 @@ export class CallbackCorrelationFailedError extends Error {
   }
 }
 
+/** Sérialisation JSON déterministe : clés triées récursivement. */
 function stableForSigning(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stableForSigning);
   if (value && typeof value === "object") {
@@ -112,7 +119,7 @@ function stableForSigning(value: unknown): unknown {
   return value;
 }
 
-/** Corps canonique signé ; la signature elle-même n'en fait jamais partie. */
+/** Corps canonique signé ; le champ `signature` n'en fait jamais partie. */
 export function canonicalizeCallbackBody(envelope: CallbackEnvelope): string {
   return JSON.stringify(
     stableForSigning({
@@ -127,11 +134,12 @@ export function canonicalizeCallbackBody(envelope: CallbackEnvelope): string {
   );
 }
 
-/** HMAC_SHA256(secret, timestamp + "." + canonical_body). */
+/** HMAC_SHA256(secret, timestamp + "." + canonical_body), en hex minuscule. */
 export function computeCallbackSignature(secret: string, timestamp: number, canonicalBody: string): string {
   return createHmac("sha256", secret).update(`${timestamp}.${canonicalBody}`).digest("hex");
 }
 
+/** Comparaison en temps constant ; une signature non-hex/longueur invalide est refusée. */
 function signaturesMatch(expectedHex: string, providedHex: string): boolean {
   const expected = Buffer.from(expectedHex, "hex");
   const provided = Buffer.from(providedHex, "hex");
@@ -157,6 +165,7 @@ export function assertTimestampWithinWindow(timestamp: number, now: number = Dat
   }
 }
 
+/** Vérifie timestamp + signature avant toute lecture/écriture MissionStore. */
 export function verifyCallbackAuthentication(envelope: CallbackEnvelope, signature: string, now: number = Date.now()): void {
   const secret = getCallbackSecret();
   assertTimestampWithinWindow(envelope.timestamp, now);
@@ -169,9 +178,10 @@ function requireNonEmptyString(value: unknown, field: string): string {
   if (typeof value !== "string" || value.trim() === "") {
     throw new CallbackPayloadInvalidError(`${field} est obligatoire et doit être une chaîne non vide.`);
   }
-  return value.trim();
+  return value;
 }
 
+/** Body JSON reçu -> enveloppe typée + signature transportée séparément. */
 export function parseCallbackRequestBody(body: unknown): { envelope: CallbackEnvelope; signature: string } {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     throw new CallbackPayloadInvalidError("le corps de la requête doit être un objet JSON.");
@@ -220,6 +230,7 @@ interface MissionSyncPayload {
   status: MissionStatus;
 }
 
+/** Valide les seules données nécessaires au bootstrap de la mission. */
 function parseMissionSyncPayload(payload: Record<string, unknown>): MissionSyncPayload {
   const projectId = requireNonEmptyString(payload.project_id, "payload.project_id");
   const statusRaw = payload.status ?? "RECEIVED";
@@ -230,6 +241,7 @@ function parseMissionSyncPayload(payload: Record<string, unknown>): MissionSyncP
 }
 
 export interface CallbackProcessingResult {
+  /** APPLIED/DUPLICATE pour les callbacks métier ; résultats dédiés pour le bootstrap mission. */
   outcome: "APPLIED" | "DUPLICATE" | "MISSION_CREATED" | "MISSION_EXISTS";
   missionId: string;
   traceId: string;
@@ -237,11 +249,15 @@ export interface CallbackProcessingResult {
 }
 
 /**
- * Authentifie d'abord l'enveloppe puis :
- * - MISSION_SYNC : crée la mission ou confirme idempotemment son existence ;
- * - autres événements : exige une mission existante puis journalise via MissionStore.
+ * Point d'entrée unique du transport sécurisé.
  *
- * MISSION_SYNC ne journalise pas d'événement métier et ne déclenche aucune action GitHub.
+ * `MISSION_SYNC` :
+ * - mission absente -> création persistante ;
+ * - même mission_id + même trace_id + même project_id -> idempotent ;
+ * - identité incohérente -> CALLBACK_CORRELATION_FAILED (HTTP 409 via httpApi).
+ *
+ * Les autres événements conservent le comportement PR-F : corrélation stricte,
+ * journal append-only, APPLIED/DUPLICATE, aucune exécution de décision humaine.
  */
 export function processCallback(rawBody: unknown, missionStore: MissionStore, now: number = Date.now()): CallbackProcessingResult {
   const { envelope, signature } = parseCallbackRequestBody(rawBody);
