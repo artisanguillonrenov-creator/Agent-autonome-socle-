@@ -6,6 +6,8 @@ import { config } from "../config.js";
 import { tracer } from "../observability/tracer.js";
 
 const LEGACY_CONVERSATION_ID = "__legacy__";
+/** Sépare le résumé en prose (retourné/stocké tel quel) du bloc JSON de triplets, dans la même réponse LLM. */
+const GRAPH_TRIPLES_MARKER = "###TRIPLES###";
 
 /** Brique 3 : réflexion périodique, désormais isolée par conversation chaude. */
 export class ReflectionEngine {
@@ -89,7 +91,11 @@ export class ReflectionEngine {
               "Tu es le module de réflexion d'un agent autonome. Relis cet extrait d'échanges récents " +
               "et résume en 1 à 3 phrases les enseignements de haut niveau à retenir durablement " +
               "(préférences révélées, décisions prises, erreurs à ne pas répéter). " +
-              "Sois concis, factuel, à la troisième personne.",
+              "Sois concis, factuel, à la troisième personne. " +
+              `Ensuite, sur une ligne séparée, écris exactement ${GRAPH_TRIPLES_MARKER} suivi d'un tableau JSON strict ` +
+              'de triplets factuels (Sujet, Prédicat, Objet) extraits de cet échange : [{"subject":"...","predicate":"...","object":"..."}] ' +
+              "(maximum 8, [] si aucun fait exploitable, uniquement des faits explicites et fiables). " +
+              "N'écris rien après ce tableau JSON.",
           },
           { role: "user", content: transcript },
         ],
@@ -98,10 +104,43 @@ export class ReflectionEngine {
       span.setOutputs(typeof res === "string" ? res : res.content);
       return res;
     });
-    const insight = typeof rawInsight === "string" ? rawInsight : rawInsight.content ?? "";
+    const rawContent = typeof rawInsight === "string" ? rawInsight : rawInsight.content ?? "";
+    const markerIndex = rawContent.indexOf(GRAPH_TRIPLES_MARKER);
+    const insight = markerIndex === -1 ? rawContent : rawContent.slice(0, markerIndex).trim();
+    if (markerIndex !== -1) {
+      this.extractGraphTriples(rawContent.slice(markerIndex + GRAPH_TRIPLES_MARKER.length), workspaceId);
+    }
     if (insight.trim().length > 0) {
       await this.memory.vector.add(insight.trim(), "reflection", { workspaceId });
     }
     return insight;
+  }
+
+  /**
+   * Brique mémoire relationnelle (5ème couche) : parse le bloc JSON de triplets
+   * (Sujet, Prédicat, Objet) que le LLM de réflexion joint à son insight (même appel,
+   * voir GRAPH_TRIPLES_MARKER ci-dessus) et les persiste dans GraphMemory (voir
+   * src/memory/graphMemory.ts). Best-effort strict, purement synchrone (aucun appel
+   * LLM supplémentaire) : tout JSON malformé est ignoré silencieusement, jamais propagé.
+   */
+  private extractGraphTriples(rawBlock: string, workspaceId?: string): void {
+    try {
+      const jsonMatch = rawBlock.trim().match(/\[[\s\S]*\]/);
+      if (!jsonMatch) return;
+      const parsed: unknown = JSON.parse(jsonMatch[0]);
+      if (!Array.isArray(parsed)) return;
+
+      for (const item of parsed.slice(0, 8)) {
+        if (!item || typeof item !== "object") continue;
+        const entry = item as Record<string, unknown>;
+        const subject = typeof entry.subject === "string" ? entry.subject.trim() : "";
+        const predicate = typeof entry.predicate === "string" ? entry.predicate.trim() : "";
+        const object = typeof entry.object === "string" ? entry.object.trim() : "";
+        if (!subject || !predicate || !object) continue;
+        this.memory.graph.addTriple(subject, predicate, object, { source: "reflection", workspaceId });
+      }
+    } catch (error) {
+      console.warn("[Reflection] Extraction du graphe de connaissances échouée (best-effort):", (error as Error).message);
+    }
   }
 }

@@ -203,4 +203,40 @@ export const config = {
     enabled: process.env.GUARDRAIL_ENABLED === "true",
     maxRetries: int(process.env.GUARDRAIL_MAX_RETRIES, 1),
   },
+  /**
+   * Tracing/observabilité Langfuse (optionnel, best-effort) : chaque span du Tracer local
+   * (src/observability/tracer.ts) est aussi exporté vers Langfuse quand ces clés sont
+   * renseignées. Absent -> aucun appel réseau n'est jamais effectué (comportement historique
+   * inchangé, le Tracer local reste la seule source de vérité).
+   */
+  langfuse: {
+    enabled: process.env.LANGFUSE_ENABLED === "true" && !!process.env.LANGFUSE_PUBLIC_KEY && !!process.env.LANGFUSE_SECRET_KEY,
+    publicKey: process.env.LANGFUSE_PUBLIC_KEY || "",
+    secretKey: process.env.LANGFUSE_SECRET_KEY || "",
+    baseUrl: stripTrailingSlash(process.env.LANGFUSE_BASE_URL || "https://cloud.langfuse.com"),
+    flushIntervalMs: int(process.env.LANGFUSE_FLUSH_INTERVAL_MS, 3000),
+    maxBatchSize: int(process.env.LANGFUSE_MAX_BATCH_SIZE, 20),
+  },
+  /**
+   * Sandboxing sécurisé (Software Factory / execute_code) : par défaut, toute exécution de
+   * code/commande générée passe par un conteneur Docker éphémère et isolé (aucun accès réseau,
+   * aucun montage du système hôte, jamais le .env principal). Si E2B_API_KEY est fourni, la
+   * sandbox managée E2B est utilisée à la place (aucune installation Docker requise). Si ni
+   * Docker ni E2B ne sont disponibles, on retombe sur l'isolation légère historique
+   * (src/execution/sandbox.ts::runJavaScript), jamais bloquant pour l'agent.
+   */
+  execution: {
+    e2bApiKey: process.env.E2B_API_KEY || "",
+    e2bTimeoutMs: int(process.env.E2B_TIMEOUT_MS, 30_000),
+    dockerEnabled: process.env.SANDBOX_DOCKER_ENABLED !== "false",
+    dockerImage: process.env.SANDBOX_DOCKER_IMAGE || "node:22-slim",
+    dockerMemoryMb: int(process.env.SANDBOX_DOCKER_MEMORY_MB, 256),
+    dockerNanoCpus: int(process.env.SANDBOX_DOCKER_NANO_CPUS, 1_000_000_000),
+    dockerNetworkEnabled: process.env.SANDBOX_DOCKER_NETWORK_ENABLED === "true",
+  },
+  /** Software Factory : validation optionnelle en sandbox isolée avant commit (désactivée par défaut, aucun changement de comportement). */
+  softwareFactorySandbox: {
+    validationCommand: process.env.SOFTWARE_FACTORY_SANDBOX_VALIDATION_COMMAND || "",
+    timeoutMs: int(process.env.SOFTWARE_FACTORY_SANDBOX_TIMEOUT_MS, 60_000),
+  },
 };

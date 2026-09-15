@@ -4,6 +4,7 @@ import { WorkingMemory } from "./workingMemory.js";
 import { VectorMemory } from "./vectorMemory.js";
 import { FactStore } from "./factStore.js";
 import { UserModel } from "./userModel.js";
+import { GraphMemory, formatTriple } from "./graphMemory.js";
 import type { ChatMessage, MemoryEntry } from "../types.js";
 import { selectRecentMessages } from "./selectRecentMessages.js";
 import { config } from "../config.js";
@@ -14,6 +15,8 @@ export interface RetrievedContext {
   recentMessages: ChatMessage[];
   relevantMemories: Array<MemoryEntry & { score: number }>;
   facts: string[];
+  /** Brique mémoire relationnelle : relations du graphe de connaissances croisées avec la requête (best-effort). */
+  graphFacts: string[];
 }
 
 export interface ConversationActivityProbe {
@@ -30,6 +33,7 @@ export class MemoryManager {
   readonly vector: VectorMemory;
   readonly facts: FactStore;
   readonly userModel: UserModel;
+  readonly graph: GraphMemory;
   private readonly workingSessions = new Map<string, WorkingMemory>();
   private readonly sessionWorkspace = new Map<string, string | undefined>();
   private readonly lruOrder: string[] = [];
@@ -44,6 +48,7 @@ export class MemoryManager {
     this.vector = new VectorMemory(embeddings);
     this.facts = new FactStore();
     this.userModel = new UserModel();
+    this.graph = new GraphMemory();
   }
 
   /** Compatibilité des anciens diagnostics/tests hors ConversationExecutionService. */
@@ -187,10 +192,34 @@ export class MemoryManager {
     const relevantMemories = await this.vector.search(query, topK, { workspaceId });
     const facts = isolate ? [] : this.facts.all().map((fact) => `${fact.entity}.${fact.attribute} = ${fact.value}`);
     const working = this.getOrCreateSession(conversationId, workspaceId);
+    const graphFacts = this.searchGraphBestEffort(query, relevantMemories, workspaceId);
     return {
       recentMessages: selectRecentMessages(working.allFor(workspaceId, isolate), 10),
       relevantMemories,
       facts,
+      graphFacts,
     };
+  }
+
+  /**
+   * Croise la recherche vectorielle (feature hashing) avec le graphe de connaissances :
+   * les entités mentionnées dans la requête ET dans le texte des souvenirs vectoriels les
+   * mieux classés servent de points d'entrée dans le graphe, pour retrouver des relations
+   * explicites que la seule similarité vectorielle ne fait pas ressortir. Best-effort :
+   * toute erreur (ex. base non initialisée dans certains tests) ne bloque jamais retrieve().
+   */
+  private searchGraphBestEffort(
+    query: string,
+    relevantMemories: Array<MemoryEntry & { score: number }>,
+    workspaceId?: string,
+  ): string[] {
+    try {
+      const memoriesText = relevantMemories.slice(0, 3).map((memory) => memory.text).join("\n");
+      const combined = `${query}\n${memoriesText}`;
+      return this.graph.searchByKeywords(combined, { workspaceId, limit: 5 }).map(formatTriple);
+    } catch (error) {
+      console.warn("[Memory] Graph search failed (best-effort):", (error as Error).message);
+      return [];
+    }
   }
 }
