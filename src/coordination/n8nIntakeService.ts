@@ -23,6 +23,11 @@ export class N8nIntakeService {
     }
 
     try {
+      const existingMission = this.missionStore.getMission(payload.mission_id);
+      if (existingMission && existingMission.traceId !== payload.trace_id) {
+        return { ok: false, error: "TRACE_ID_CONFLICT" };
+      }
+
       const mission = this.missionStore.createMission({
         missionId: payload.mission_id,
         traceId: payload.trace_id,
