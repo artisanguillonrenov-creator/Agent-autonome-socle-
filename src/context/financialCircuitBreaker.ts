@@ -50,28 +50,41 @@ interface StateRow {
  * humain explicite à rearm() peut lever le gel — jamais un redémarrage silencieux, jamais un
  * retour à la normale automatique au bout d'un délai.
  */
-export class FinancialCircuitBreaker {
-  constructor(private readonly notifications = new NotificationStore()) {
-    getDb().exec(`
-      CREATE TABLE IF NOT EXISTS financial_cost_events (
-        id TEXT PRIMARY KEY,
-        ts INTEGER NOT NULL,
-        usd REAL NOT NULL,
-        model TEXT,
-        provider TEXT
-      );
-      CREATE INDEX IF NOT EXISTS idx_financial_cost_events_ts ON financial_cost_events(ts);
+const SCHEMA_SQL = `
+  CREATE TABLE IF NOT EXISTS financial_cost_events (
+    id TEXT PRIMARY KEY,
+    ts INTEGER NOT NULL,
+    usd REAL NOT NULL,
+    model TEXT,
+    provider TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_financial_cost_events_ts ON financial_cost_events(ts);
 
-      CREATE TABLE IF NOT EXISTS financial_circuit_breaker_state (
-        id TEXT PRIMARY KEY CHECK(id = 'singleton'),
-        tripped INTEGER NOT NULL DEFAULT 0,
-        tripped_at INTEGER,
-        trip_reason TEXT,
-        window_cost_usd REAL,
-        checkpoint_id TEXT,
-        updated_at INTEGER NOT NULL
-      );
-    `);
+  CREATE TABLE IF NOT EXISTS financial_circuit_breaker_state (
+    id TEXT PRIMARY KEY CHECK(id = 'singleton'),
+    tripped INTEGER NOT NULL DEFAULT 0,
+    tripped_at INTEGER,
+    trip_reason TEXT,
+    window_cost_usd REAL,
+    checkpoint_id TEXT,
+    updated_at INTEGER NOT NULL
+  );
+`;
+
+export class FinancialCircuitBreaker {
+  constructor(private readonly notifications = new NotificationStore()) {}
+
+  /**
+   * `financialCircuitBreaker` est un singleton importé une seule fois au chargement du
+   * module, mais getDb() peut renvoyer une connexion différente au fil du process (ex. tests
+   * qui appellent closeDb()+getDb() avec un nouveau chemin/`:memory:`). S'assurer du schéma à
+   * CHAQUE accès (idempotent, CREATE TABLE IF NOT EXISTS) plutôt qu'une seule fois au
+   * constructeur évite un "no such table" après un tel changement de connexion.
+   */
+  private db() {
+    const db = getDb();
+    db.exec(SCHEMA_SQL);
+    return db;
   }
 
   private get windowMs(): number {
@@ -83,7 +96,7 @@ export class FinancialCircuitBreaker {
   }
 
   private stateRow(): StateRow | undefined {
-    return getDb().prepare(`SELECT tripped, tripped_at, trip_reason, window_cost_usd, checkpoint_id FROM financial_circuit_breaker_state WHERE id='singleton'`).get() as
+    return this.db().prepare(`SELECT tripped, tripped_at, trip_reason, window_cost_usd, checkpoint_id FROM financial_circuit_breaker_state WHERE id='singleton'`).get() as
       | StateRow
       | undefined;
   }
@@ -92,7 +105,7 @@ export class FinancialCircuitBreaker {
   record(usd: number, model?: string, provider?: string): void {
     if (!config.financialCircuitBreaker.enabled || !Number.isFinite(usd) || usd <= 0) return;
     try {
-      const db = getDb();
+      const db = this.db();
       db.prepare(`INSERT INTO financial_cost_events(id, ts, usd, model, provider) VALUES (?,?,?,?,?)`)
         .run(randomUUID(), Date.now(), usd, model ?? null, provider ?? null);
       // Purge conservatrice (2x la fenêtre) : la table ne doit jamais croître sans borne.
@@ -104,7 +117,7 @@ export class FinancialCircuitBreaker {
 
   windowCostUsd(now = Date.now()): number {
     try {
-      const row = getDb()
+      const row = this.db()
         .prepare(`SELECT COALESCE(SUM(usd),0) AS total FROM financial_cost_events WHERE ts > ?`)
         .get(now - this.windowMs) as { total: number };
       return row.total;
@@ -146,7 +159,7 @@ export class FinancialCircuitBreaker {
     const reason =
       `Coût glissant estimé sur la dernière fenêtre ($${windowCostUsd.toFixed(4)}) au-delà du seuil configuré ` +
       `($${this.limitUsd.toFixed(2)}). Boucle incontrôlée ou routine hors contrôle suspectée.`;
-    getDb()
+    this.db()
       .prepare(`
         INSERT INTO financial_circuit_breaker_state(id, tripped, tripped_at, trip_reason, window_cost_usd, checkpoint_id, updated_at)
         VALUES('singleton', 1, ?, ?, ?, ?, ?)
@@ -169,7 +182,7 @@ export class FinancialCircuitBreaker {
 
   /** Seule voie de sortie du gel : appel humain explicite (CLI/API), jamais automatique. */
   rearm(): FinancialCircuitBreakerStatus {
-    getDb().prepare(`UPDATE financial_circuit_breaker_state SET tripped=0, updated_at=? WHERE id='singleton'`).run(Date.now());
+    this.db().prepare(`UPDATE financial_circuit_breaker_state SET tripped=0, updated_at=? WHERE id='singleton'`).run(Date.now());
     return this.status();
   }
 
