@@ -38,6 +38,11 @@ import { GuardrailEngine } from "../reflection/guardrailEngine.js";
 import { McpServerRegistry } from "../skills/mcp/mcpServerRegistry.js";
 import { connectMcpServers as bridgeMcpServers, closeMcpClients, type McpConnectionStatus } from "../skills/mcp/mcpSkillBridge.js";
 import type { McpClient } from "../skills/mcp/mcpClient.js";
+import { validateToolArguments } from "../llm/schemas.js";
+import { EventEmitter } from "node:events";
+import { CONTRACT_SCHEMA_VERSION, type AgentInterruptReason, type AgentInterruptSignal } from "../orchestration/contract.js";
+import { autonomyEventBus, type AutonomyEvent } from "../autonomy/eventBus.js";
+import { SemanticCache } from "../context/semanticCache.js";
 
 const LEGACY_CONVERSATION_ID = "__legacy__";
 /** Auto-correction des erreurs d'outils (VAGUE 5) : plafond strict d'essais consécutifs avant de forcer une réponse finale sans outil. */
@@ -69,6 +74,8 @@ export class Agent {
   readonly guardrail: GuardrailEngine;
   private llm: LLMProvider;
   private readonly contextBudget: ContextBudgetManager;
+  /** Vague 6D : cache sémantique local — évite un aller-retour LLM pour une requête initiale quasi identique à une déjà traitée récemment. */
+  private readonly semanticCache: SemanticCache;
   private readonly personalityPromptComposer = new PersonalityPromptComposer();
   private readonly personalityOutputValidator = new PersonalityOutputValidator();
   private readonly humanEdits = new HumanEditStore();
@@ -76,6 +83,10 @@ export class Agent {
   private stepCount = 0;
   private readonly mcpClients = new Map<string, McpClient>();
   private mcpStatuses: McpConnectionStatus[] = [];
+  /** Vague 6C : écouteur d'événements + drapeau d'interruption prioritaire de la boucle. */
+  readonly interrupts = new EventEmitter();
+  private pendingInterrupt: AgentInterruptSignal | null = null;
+  private unsubscribeAutonomyBus?: () => void;
 
   get maxIterations(): number {
     return this.customMaxIterations ?? config.agent.maxIterations;
@@ -88,6 +99,7 @@ export class Agent {
     this.planner = new Planner();
     this.reflection = new ReflectionEngine(opts.llm, this.memory, opts.reflectionEveryNSteps);
     this.contextBudget = new ContextBudgetManager(opts.contextTokenBudget);
+    this.semanticCache = new SemanticCache(opts.embeddings);
     this.customMaxIterations = opts.maxIterations;
     this.serviceOrchestrator = opts.orchestrator ?? new ServiceOrchestrator();
     this.planRunner = new PlanRunner(this.serviceOrchestrator, this.planner,
@@ -109,6 +121,62 @@ export class Agent {
     this.skillSelector = new SkillSelector(this.skills);
     this.multiAgent = new MultiAgentCoordinator(opts.llm, this.skills);
     this.guardrail = new GuardrailEngine(opts.llm);
+  }
+
+  /**
+   * Vague 6C : abonne cette instance au bus d'autonomie process-wide — un TASK_EVENT ou une
+   * PRIORITY_COMMAND publié (alerte de production détectée en tâche de fond, commande
+   * d'arrêt utilisateur) interrompt alors l'agent sans passer par son API synchrone
+   * habituelle. Opt-in explicite (jamais automatique dans le constructeur) : le processus
+   * de production n'instancie qu'un seul Agent et appelle ceci une fois au démarrage ; les
+   * tests qui construisent de nombreux Agent éphémères n'accumulent ainsi aucun abonnement
+   * résiduel sur le bus partagé.
+   */
+  listenForAutonomyEvents(): () => void {
+    this.unsubscribeAutonomyBus?.();
+    this.unsubscribeAutonomyBus = autonomyEventBus.on("*", (event) => this.handleAutonomyEvent(event));
+    return this.unsubscribeAutonomyBus;
+  }
+
+  private handleAutonomyEvent(event: AutonomyEvent): void {
+    if (event.type !== "TASK_EVENT" && event.type !== "PRIORITY_COMMAND") return;
+    const reason: AgentInterruptReason = event.type === "PRIORITY_COMMAND" ? "PRIORITY_OVERRIDE" : "TASK_EVENT";
+    const message = typeof event.payload.message === "string" ? event.payload.message : undefined;
+    this.requestInterrupt(reason, message, event.planRunId);
+  }
+
+  /**
+   * Vague 6C : signale une interruption prioritaire. Avorte immédiatement et proprement la
+   * mission de plan ciblée (via PlanRunner.cancel, qui annule chaque opération externe en
+   * cours plutôt que de couper le process) et pose un drapeau consommé au prochain point de
+   * contrôle de la boucle conversationnelle — jamais un throw brutal qui perdrait l'état.
+   */
+  requestInterrupt(reason: AgentInterruptReason, message?: string, planRunId?: string): AgentInterruptSignal {
+    const signal: AgentInterruptSignal = { schema_version: CONTRACT_SCHEMA_VERSION, signal_id: randomUUID(), reason, message, planRunId, issuedAt: Date.now() };
+    this.pendingInterrupt = signal;
+    if (planRunId) {
+      try { this.planRunner.cancel(planRunId); } catch (error) { console.warn("[Agent] Interrupt cancellation failed:", (error as Error).message); }
+    }
+    new ActivityStore().append({
+      eventType: "AGENT_INTERRUPTED",
+      level: "warning",
+      message: `Interrupt signal received (${reason})`,
+      planRunId,
+      metadata: { reason, hasMessage: Boolean(message) },
+    });
+    this.interrupts.emit("interrupt", signal);
+    return signal;
+  }
+
+  private consumePendingInterrupt(): AgentInterruptSignal | null {
+    const signal = this.pendingInterrupt;
+    this.pendingInterrupt = null;
+    return signal;
+  }
+
+  /** Libère l'abonnement au bus d'autonomie — à appeler à l'arrêt propre du process/tests. */
+  disposeInterrupts(): void {
+    this.unsubscribeAutonomyBus?.();
   }
 
   /**
@@ -198,6 +266,16 @@ export class Agent {
 
     while (iterations < this.maxIterations) {
       iterations += 1;
+
+      // Vague 6C : point de contrôle d'interruption entre deux tours — une pause demandée
+      // pendant l'exécution d'un tour précédent (alerte de production, arrêt utilisateur)
+      // met fin au cycle immédiatement, sans consommer d'itération supplémentaire.
+      const interruptAtTurnStart = this.consumePendingInterrupt();
+      if (interruptAtTurnStart) {
+        finalResponse = interruptAtTurnStart.message ?? "Exécution interrompue par un événement prioritaire.";
+        break;
+      }
+
       const retrieved = await this.memory.retrieve(userInput, 5, workspaceId, conversationId);
       const mandatorySkills = this.skills.alwaysExposed();
       const relevantSkills = await this.skillSelector.select(userInput);
@@ -247,10 +325,26 @@ export class Agent {
         ? "reasoning"
         : "fast";
       const roleProvider = providerForRole(role, this.llm);
+      // Vague 6D : le cache sémantique ne couvre que la décision d'ouverture de cycle
+      // (iterations === 1), la seule dont le prompt d'entrée (userInput) est un bon proxy de
+      // "requête identique/très similaire déjà traitée" — les tours suivants dépendent de
+      // résultats d'outils propres à ce cycle et ne doivent jamais être mutualisés.
+      const cachedDecision = iterations === 1
+        ? await this.semanticCache.lookup(role, roleProvider.model ?? roleProvider.name, userInput)
+        : null;
       const completionResult = await tracer.withSpan(
         iterations === 1 ? "planning.decide" : "llm.completion",
-        { kind: "llm", inputs: { iterations, role, model: roleProvider.model } },
+        { kind: "llm", inputs: { iterations, role, model: roleProvider.model, cacheHit: Boolean(cachedDecision) } },
         async (span) => {
+          if (cachedDecision) {
+            span.setCost(0);
+            span.setOutputs({
+              contentPreview: (cachedDecision.response.content ?? "").slice(0, 300),
+              toolCalls: cachedDecision.response.toolCalls?.map((call) => call.function?.name),
+              cacheSimilarity: cachedDecision.similarity,
+            });
+            return cachedDecision.response;
+          }
           const res = await completeWithLocalPriority(
             roleProvider,
             messages,
@@ -264,6 +358,7 @@ export class Agent {
             contentPreview: (res.content ?? "").slice(0, 300),
             toolCalls: res.toolCalls?.map((call) => call.function?.name),
           });
+          if (iterations === 1) void this.semanticCache.store(role, roleProvider.model ?? roleProvider.name, userInput, res);
           return res;
         },
       );
@@ -281,6 +376,11 @@ export class Agent {
         await recordIntermediate({ role: "assistant", content: rawText || null, toolCalls: nativeToolCalls });
 
         for (const toolCall of nativeToolCalls) {
+          // Vague 6C : une interruption levée pendant l'exécution d'un outil précédent de ce
+          // même tour arrête immédiatement les appels d'outils restants — chaque outil déjà
+          // en cours d'exécution ailleurs (mission de plan) a été avorté par requestInterrupt
+          // via PlanRunner.cancel, indépendamment de cette boucle.
+          if (this.pendingInterrupt) break;
           const skillName = toolCall.function?.name;
           if (!skillName || !availableSkillNames.has(skillName)) {
             consecutiveToolFailures += 1;
@@ -304,6 +404,19 @@ export class Agent {
             await recordIntermediate({ role: "tool", name: skillName, toolCallId: toolCall.id || "call_unknown", content: errorResult });
             continue;
           }
+
+          // Vague 6B (guardrails Zod) : rejet structurel immédiat des arguments d'outil,
+          // avant tout appel au handler — remplace la correction textuelle après-coup par
+          // un échec typé que la boucle traite exactement comme un JSON invalide (le modèle
+          // reçoit l'erreur au tour suivant et peut se corriger, sans jamais exécuter un
+          // handler avec des arguments hors-schéma).
+          const argsValidation = validateToolArguments(skillMap.get(skillName)?.parameters, parsedInput);
+          if (!argsValidation.success) {
+            console.warn(`[Agent] ${argsValidation.error} (tool=${skillName})`);
+            await recordIntermediate({ role: "tool", name: skillName, toolCallId: toolCall.id || "call_unknown", content: `Erreur : ${argsValidation.error}` });
+            continue;
+          }
+          parsedInput = argsValidation.data ?? parsedInput;
 
           lastActionOrStep = `Appel outil natif: ${skillName}`;
           // Auto-correction des erreurs d'outils (VAGUE 5) : ce bloc englobe toute

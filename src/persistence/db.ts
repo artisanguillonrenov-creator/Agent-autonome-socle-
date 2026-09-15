@@ -315,6 +315,31 @@ export function getDb(): Database.Database {
       created_at INTEGER NOT NULL,
       PRIMARY KEY (mission_id, context_version)
     );
+
+    -- Vague 6D : cache sémantique local des complétions LLM (prompt -> réponse), interrogé
+    -- par similarité cosinus sur l'embedding du prompt avant tout appel réseau.
+    CREATE TABLE IF NOT EXISTS semantic_cache_entries (
+      id TEXT PRIMARY KEY,
+      role TEXT NOT NULL,
+      model TEXT NOT NULL,
+      prompt_text TEXT NOT NULL,
+      prompt_embedding TEXT NOT NULL,
+      response_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      last_hit_at INTEGER NOT NULL,
+      hit_count INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_semantic_cache_role_model ON semantic_cache_entries(role, model);
+
+    -- Vague 7D : dernier battement de coeur + snapshot des opérations async en vol, pour
+    -- survivre à la mise en veille d'un hébergement éphémère et permettre une hydratation
+    -- automatique au redémarrage.
+    CREATE TABLE IF NOT EXISTS heartbeat_state (
+      id TEXT PRIMARY KEY CHECK(id = 'singleton'),
+      beat_at INTEGER NOT NULL,
+      in_flight_json TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
   `);
 
   // Additive replacement of the short-lived V1 workflow execution schema. The
@@ -431,7 +456,7 @@ export function getDb(): Database.Database {
 
   const planRunColumns = new Set((db.pragma("table_info(plan_runs)") as Array<{name:string}>).map(c=>c.name));
   if (!planRunColumns.has("workspace_id")) db.exec("ALTER TABLE plan_runs ADD COLUMN workspace_id TEXT");
-  const planRunAdditions:Record<string,string>={max_parallelism:"INTEGER NOT NULL DEFAULT 1",peak_parallelism:"INTEGER NOT NULL DEFAULT 0",pending_replan_node_id:"TEXT",consolidated_at:"INTEGER"};
+  const planRunAdditions:Record<string,string>={max_parallelism:"INTEGER NOT NULL DEFAULT 1",peak_parallelism:"INTEGER NOT NULL DEFAULT 0",pending_replan_node_id:"TEXT",consolidated_at:"INTEGER",rollback_count:"INTEGER NOT NULL DEFAULT 0",max_rollbacks:"INTEGER NOT NULL DEFAULT 1"};
   for(const [column,definition] of Object.entries(planRunAdditions))if(!planRunColumns.has(column))db.exec(`ALTER TABLE plan_runs ADD COLUMN ${column} ${definition}`);
   const artifactColumns=new Set((db.pragma("table_info(artifacts)") as Array<{name:string}>).map(c=>c.name));
   if(!artifactColumns.has("dedupe_key"))db.exec("ALTER TABLE artifacts ADD COLUMN dedupe_key TEXT");

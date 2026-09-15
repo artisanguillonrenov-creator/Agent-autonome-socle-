@@ -22,6 +22,21 @@ export function isCheckpointState(value:unknown):value is CheckpointState{
   const ids=(value.planNodes as PlanNode[]).map(node=>node.id);return new Set(ids).size===ids.length;
 }
 export function saveCheckpoint(label:string,state:CheckpointState){const id=randomUUID();getDb().prepare(`INSERT INTO checkpoints(id,label,created_at,state,kind,schema_version)VALUES(?,?,?,?,?,?)`).run(id,label,Date.now(),JSON.stringify(state),"AGENT_STATE",1);return id;}
-export function savePlanCheckpoint(planRunId:string,planner:Planner){const run=planner.getRun(planRunId);if(!run)throw new Error("PLAN_NOT_FOUND");const id=randomUUID();getDb().prepare(`INSERT INTO checkpoints(id,label,created_at,state,kind,scope_id,schema_version)VALUES(?,?,?,?,?,?,?)`).run(id,`Plan ${planRunId} generation ${run.generation}`,Date.now(),JSON.stringify({planRun:run,nodes:planner.nodes(planRunId),generation:run.generation}),"PLAN_EXECUTION",planRunId,1);return id;}
+export function savePlanCheckpoint(planRunId:string,planner:Planner,label?:string){const run=planner.getRun(planRunId);if(!run)throw new Error("PLAN_NOT_FOUND");const id=randomUUID();getDb().prepare(`INSERT INTO checkpoints(id,label,created_at,state,kind,scope_id,schema_version)VALUES(?,?,?,?,?,?,?)`).run(id,label??`Plan ${planRunId} generation ${run.generation}`,Date.now(),JSON.stringify({planRun:run,nodes:planner.nodes(planRunId),generation:run.generation}),"PLAN_EXECUTION",planRunId,1);return id;}
 export function loadCheckpoint(id:string):CheckpointState|null{const row=getDb().prepare(`SELECT state,kind FROM checkpoints WHERE id=?`).get(id) as {state:string;kind:string}|undefined;if(!row||row.kind!=="AGENT_STATE")return null;let parsed:unknown;try{parsed=JSON.parse(row.state)}catch{return null}return isCheckpointState(parsed)?parsed:null;}
 export function listCheckpoints():CheckpointSummary[]{return getDb().prepare(`SELECT id,label,created_at createdAt,kind,scope_id scopeId,schema_version schemaVersion FROM checkpoints ORDER BY created_at DESC`).all() as CheckpointSummary[];}
+
+/** Vague 6A : instantané cohérent d'un plan (état N) — voir Planner.rollback(). */
+export interface PlanSnapshotState { planRun:{id:string;generation:number;[key:string]:unknown}; nodes:unknown[]; generation:number }
+export function loadPlanCheckpoint(id:string):PlanSnapshotState|null{
+  const row=getDb().prepare(`SELECT state,kind FROM checkpoints WHERE id=?`).get(id) as {state:string;kind:string}|undefined;
+  if(!row||row.kind!=="PLAN_EXECUTION")return null;
+  let parsed:unknown;try{parsed=JSON.parse(row.state);}catch{return null;}
+  if(!parsed||typeof parsed!=="object"||Array.isArray(parsed))return null;
+  const value=parsed as Record<string,unknown>;
+  if(!value.planRun||typeof value.planRun!=="object"||!Array.isArray(value.nodes)||!Number.isInteger(value.generation))return null;
+  return value as unknown as PlanSnapshotState;
+}
+export function listPlanCheckpoints(planRunId:string):CheckpointSummary[]{
+  return getDb().prepare(`SELECT id,label,created_at createdAt,kind,scope_id scopeId,schema_version schemaVersion FROM checkpoints WHERE kind='PLAN_EXECUTION' AND scope_id=? ORDER BY created_at DESC`).all(planRunId) as CheckpointSummary[];
+}

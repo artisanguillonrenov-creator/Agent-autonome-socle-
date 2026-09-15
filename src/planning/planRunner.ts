@@ -7,6 +7,7 @@ import { Planner, type ExecutionPlanNode, type PlanRun } from "./planner.js";
 import type { ReplanningEngine } from "./replanningEngine.js";
 import type { LLMProvider } from "../llm/provider.js";
 import { SpecialistCoordinator,SpecialistRegistry } from "../orchestration/specialistRegistry.js";
+import { riskForCapability } from "../orchestration/serviceRegistry.js";
 import { MissionConsolidator } from "./missionConsolidator.js";
 import { ActivityStore } from "../observability/activityStore.js";
 import { HumanEditStore } from "../collaboration/humanEditStore.js";
@@ -49,7 +50,23 @@ export class PlanRunner {
   if(stillActive.length){const activeOperations=stillActive.map(n=>n.operationTaskId?this.orchestrator.store.getOperation(n.operationTaskId):null);if(activeOperations.some(op=>!op||!op.parallelAllowed))return;}const slots=Math.max(0,run.maxParallelism-stillActive.length);if(!slots)return;const first=ready[0],firstService=this.orchestrator.registry.findServiceForCapability(first.capability!);if(!firstService){this.planner.updateRun(run.id,"BLOCKED","INVALID_PERSISTED_PLAN_NODE");return;}const parallel=firstService.parallelSafeCapabilities?.includes(first.capability!)===true;if(!parallel&&stillActive.length)return;const counts=new Map<string,number>();for(const n of stillActive)if(n.specialistId)counts.set(n.specialistId,(counts.get(n.specialistId)??0)+1);const batch:ExecutionPlanNode[]=[];for(const n of ready){this.activity.append({dedupeKey:`step-ready:${n.id}:${n.attempt}`,planRunId:run.id,planNodeId:n.id,eventType:"STEP_READY",message:`Step ${n.id} is ready`});if(batch.length>=slots)break;const service=this.orchestrator.registry.findServiceForCapability(n.capability!);if(!service)continue;if(!parallel||service.parallelSafeCapabilities?.includes(n.capability!)!==true){if(!batch.length&&!stillActive.length)batch.push(n);break;}const specialist=n.specialistId?this.coordinator.registry.get(n.specialistId):this.coordinator.select(n.capability!);if(specialist&&(counts.get(specialist.id)??0)>=specialist.maxConcurrency)continue;batch.push(n);if(specialist)counts.set(specialist.id,(counts.get(specialist.id)??0)+1);}
   for(const node of batch)await this.dispatch(run,node,batch.length>1||stillActive.length>0);
  }
- private async dispatch(run:PlanRun,node:ExecutionPlanNode,parallelAllowed=false){const db=getDb(),specialist=node.specialistId?this.coordinator.registry.get(node.specialistId):this.coordinator.select(node.capability!),key=node.operationIdempotencyKey??`plan:${run.id}:node:${node.id}:attempt:${node.attempt}`;const now=Date.now();const claimed=db.prepare(`UPDATE plan_nodes SET status='in_progress',claimed_at=?,operation_idempotency_key=?,specialist_id=?,updated_at=? WHERE id=? AND status='pending' AND operation_task_id IS NULL`).run(now,key,specialist?.id??null,now,node.id).changes;if(!claimed)return;if(specialist)this.activity.append({dedupeKey:`specialist-assigned:${node.id}:${node.attempt}`,planRunId:run.id,planNodeId:node.id,specialistId:specialist.id,eventType:"SPECIALIST_ASSIGNED",message:`Specialist ${specialist.id} assigned to step ${node.id}`});
+ /**
+  * Vague 6A : instantané pré-action risquée. Une capacité de risque HIGH/CRITICAL peut
+  * engager un effet de bord difficile à annuler ; on fige l'état N du plan juste avant de
+  * l'engager pour permettre un rollback automatique si la branche échoue de façon critique
+  * (voir failReplan). Best-effort : un échec de snapshot ne bloque jamais le dispatch.
+  */
+ private snapshotBeforeRiskyDispatch(run:PlanRun,node:ExecutionPlanNode):void{
+  const service=this.orchestrator.registry.findServiceForCapability(node.capability!);
+  if(!service)return;
+  const risk=riskForCapability(service,node.capability!);
+  if(risk!=="HIGH"&&risk!=="CRITICAL")return;
+  try{
+   const checkpointId=this.planner.snapshot(run.id,`Pre-risk snapshot before step ${node.id} (${node.capability})`);
+   this.activity.append({dedupeKey:`plan-snapshot:${node.id}:${node.attempt}`,planRunId:run.id,planNodeId:node.id,eventType:"PLAN_SNAPSHOT_TAKEN",message:`Snapshot taken before risky step ${node.id} (${risk})`,metadata:{checkpointId,riskLevel:risk}});
+  }catch(error){console.warn("[PlanRunner] Pre-risk snapshot failed:",(error as Error).message);}
+ }
+ private async dispatch(run:PlanRun,node:ExecutionPlanNode,parallelAllowed=false){this.snapshotBeforeRiskyDispatch(run,node);const db=getDb(),specialist=node.specialistId?this.coordinator.registry.get(node.specialistId):this.coordinator.select(node.capability!),key=node.operationIdempotencyKey??`plan:${run.id}:node:${node.id}:attempt:${node.attempt}`;const now=Date.now();const claimed=db.prepare(`UPDATE plan_nodes SET status='in_progress',claimed_at=?,operation_idempotency_key=?,specialist_id=?,updated_at=? WHERE id=? AND status='pending' AND operation_task_id IS NULL`).run(now,key,specialist?.id??null,now,node.id).changes;if(!claimed)return;if(specialist)this.activity.append({dedupeKey:`specialist-assigned:${node.id}:${node.attempt}`,planRunId:run.id,planNodeId:node.id,specialistId:specialist.id,eventType:"SPECIALIST_ASSIGNED",message:`Specialist ${specialist.id} assigned to step ${node.id}`});
   let op=this.orchestrator.store.getByIdempotencyKey(key);if(!op){const result=await tracer.withSpan(`specialist.${node.capability}`,{kind:"specialist",inputs:{capability:node.capability,objective:node.objective,specialistId:specialist?.id}},async(span)=>{const r=await this.orchestrator.dispatchCapability({action:"DISPATCH_CAPABILITY",capability:node.capability!,objective:node.objective!,context:node.context,constraints:node.constraints,priority:node.priority},{executionMode:"background",idempotencyKey:key,traceId:`plan-${run.id}`,workspaceId:run.workspaceId,specialistId:specialist?.id,planRunId:run.id,planNodeId:node.id,parallelAllowed});span.setOutputs({status:r.status,selectedService:r.selectedService});return r;});op=this.orchestrator.store.getOperation(result.taskId);}
   if(!op){this.failNode(run,node,"OPERATION_NOT_PERSISTED",false);return;}db.prepare(`UPDATE plan_nodes SET operation_task_id=?,updated_at=? WHERE id=?`).run(op.taskId,Date.now(),node.id);this.activity.append({dedupeKey:`step-dispatched:${node.id}:${node.attempt}`,traceId:op.traceId,planRunId:run.id,planNodeId:node.id,operationTaskId:op.taskId,specialistId:specialist?.id,eventType:"STEP_DISPATCHED",message:`Step ${node.id} dispatched to ${op.selectedService}`,metadata:{selectedService:op.selectedService,capability:node.capability}});if(op.status==="WAITING_PERMISSION")this.activity.append({dedupeKey:`approval-required:${node.id}:${op.taskId}`,traceId:op.traceId,planRunId:run.id,planNodeId:node.id,operationTaskId:op.taskId,specialistId:specialist?.id,eventType:"APPROVAL_REQUIRED",message:`Approval required for step ${node.id}`});this.planner.updateRun(run.id,op.status==="WAITING_PERMISSION"?"WAITING_PERMISSION":"RUNNING");await this.observe(run,{...node,status:"in_progress",operationTaskId:op.taskId,operationIdempotencyKey:key});
  }
@@ -58,7 +75,25 @@ export class PlanRunner {
   if(op.status==="FAILED"){const unknown=(op.error??"").includes("TRANSPORT_UNKNOWN")||(op.error??"").includes("INTERRUPTED_EXECUTION_STATE_UNKNOWN");const event=this.orchestrator.store.listEvents(op.taskId).filter(e=>e.type==="TASK_FAILED").at(-1);const safe=!unknown&&event?.payload.replannable===true&&event.payload.side_effect_state==="none";if(!safe){this.failNode(run,node,op.error??"UNSAFE_FAILURE",false,unknown?"BLOCKED":"FAILED");return;}const db=getDb(),now=Date.now(),error=op.error??"REPLANNABLE_FAILURE";const outcome=db.transaction(()=>{db.prepare("UPDATE plan_nodes SET status='failed',error=?,claimed_at=NULL,updated_at=? WHERE id=?").run(error,now,node.id);const row=db.prepare("SELECT pending_replan_node_id pending FROM plan_runs WHERE id=?").get(run.id) as {pending:string|null};if(row.pending===null){db.prepare("UPDATE plan_runs SET pending_replan_node_id=?,updated_at=? WHERE id=?").run(node.id,now,run.id);return "claimed";}return row.pending===node.id?"same":"multiple";})();this.activity.append({dedupeKey:`step-failed:${node.id}:${op.taskId}`,traceId:op.traceId,planRunId:run.id,planNodeId:node.id,operationTaskId:op.taskId,specialistId:node.specialistId,eventType:"STEP_FAILED",level:"error",message:`Step ${node.id} failed`});if(outcome==="multiple"){this.planner.updateRun(run.id,"BLOCKED","MULTIPLE_PARALLEL_FAILURES");this.activity.append({dedupeKey:`plan-blocked:${run.id}:multiple-parallel-failures`,planRunId:run.id,eventType:"PLAN_BLOCKED",level:"error",message:"Mission blocked by multiple parallel failures"});return;}this.activity.append({dedupeKey:`replan-pending:${node.id}`,traceId:op.traceId,planRunId:run.id,planNodeId:node.id,operationTaskId:op.taskId,specialistId:node.specialistId,eventType:"REPLAN_PENDING",message:`Replan pending for step ${node.id}`});}
  }
  private failNode(run:PlanRun,node:ExecutionPlanNode,error:string,_replan:boolean,status:"FAILED"|"BLOCKED"="FAILED"){this.activity.append({dedupeKey:`step-failed:${node.id}:${node.operationTaskId??node.attempt}`,planRunId:run.id,planNodeId:node.id,operationTaskId:node.operationTaskId,specialistId:node.specialistId,eventType:"STEP_FAILED",level:"error",message:`Step ${node.id} failed`});if(status==="BLOCKED")this.activity.append({dedupeKey:`plan-blocked:${run.id}:${node.id}`,planRunId:run.id,planNodeId:node.id,eventType:"PLAN_BLOCKED",level:"error",message:`Mission blocked at step ${node.id}`});getDb().prepare(`UPDATE plan_nodes SET status='failed',error=?,claimed_at=NULL,updated_at=? WHERE id=?`).run(error,Date.now(),node.id);this.planner.updateRun(run.id,status,error);}
- private failReplan(run:PlanRun,node:ExecutionPlanNode,error:string){const now=Date.now();getDb().transaction(()=>{getDb().prepare("UPDATE plan_nodes SET status=\'failed\',error=?,claimed_at=NULL,updated_at=? WHERE id=?").run(error,now,node.id);getDb().prepare("UPDATE plan_runs SET status=\'FAILED\',last_error=?,pending_replan_node_id=NULL,updated_at=? WHERE id=?").run(error,now,run.id);})();}
+ /**
+  * Vague 6A : dernier recours avant un FAILED définitif. Si un instantané antérieur existe
+  * pour cette mission et que le quota de rollbacks (max_rollbacks) n'est pas épuisé, on
+  * restaure le plan à cet état N-1 au lieu d'abandonner — les étapes déjà validées avant le
+  * snapshot restent acquises, et PlanRunner reprendra la réconciliation sur cette base saine
+  * dès le prochain tick, ce qui laisse au ReplanningEngine une chance de proposer une
+  * trajectoire alternative sans repartir de zéro.
+  */
+ private failReplan(run:PlanRun,node:ExecutionPlanNode,error:string){
+  const snapshots=this.planner.listSnapshots(run.id);
+  if(run.rollbackCount<run.maxRollbacks&&snapshots.length){
+   const restored=this.planner.rollback(run.id,snapshots[0].id);
+   if(restored){
+    this.activity.append({dedupeKey:`replan-failed-rollback:${run.id}:${node.id}:${run.rollbackCount}`,planRunId:run.id,planNodeId:node.id,eventType:"PLAN_BLOCKED",level:"warning",message:`Replan exhausted for step ${node.id}; rolled back to snapshot instead of failing`,metadata:{checkpointId:snapshots[0].id,error}});
+    return;
+   }
+  }
+  const now=Date.now();getDb().transaction(()=>{getDb().prepare("UPDATE plan_nodes SET status=\'failed\',error=?,claimed_at=NULL,updated_at=? WHERE id=?").run(error,now,node.id);getDb().prepare("UPDATE plan_runs SET status=\'FAILED\',last_error=?,pending_replan_node_id=NULL,updated_at=? WHERE id=?").run(error,now,run.id);})();
+ }
  private async replan(run:PlanRun,node:ExecutionPlanNode,error:string){
   if(!this.replanning||run.replanCount>=run.maxReplans){this.failReplan(run,node,error);return;}
   const all=this.planner.nodes(run.id),affectedIds=new Set([node.id]);let changed=true;

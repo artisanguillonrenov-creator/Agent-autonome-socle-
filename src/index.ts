@@ -22,6 +22,8 @@ import { ConversationExecutionService } from "./persistence/conversations/conver
 import { createPersonalityRepository } from "./personality/personalityRepositoryFactory.js";
 import { PersonalityPolicyEngine } from "./personality/personalityPolicyEngine.js";
 import { AgentTeamStore } from "./agents/agentTeamStore.js";
+import { AutonomyPlanner } from "./autonomy/planner.js";
+import { Heartbeat } from "./autonomy/heartbeat.js";
 
 async function main(): Promise<void> {
   registerChantier10Settings();
@@ -39,12 +41,29 @@ async function main(): Promise<void> {
   const recoveredTurns = await conversationRepository.recoverInterruptedTurns();
   if (recoveredTurns > 0) console.warn(`[Conversation] ${recoveredTurns} interrupted turn(s) marked FAILED after restart.`);
 
+  // Vague 7D : hydratation automatique depuis le dernier battement de coeur persisté — un
+  // écart important entre `staleForMs` et l'intervalle de battement attendu signale une
+  // coupure prolongée (ex: mise en veille d'un hébergement éphémère). La reprise effective
+  // des opérations en vol reste assurée par BackgroundRunner.recover() plus bas ; ceci ne
+  // fait que le journaliser explicitement.
+  const heartbeatHydration = await Heartbeat.hydrate().catch((error) => {
+    console.warn("[Heartbeat] Hydration check failed:", (error as Error).message);
+    return { recovered: false } as const;
+  });
+  if (heartbeatHydration.recovered) {
+    console.warn(`[Heartbeat] Resuming after ${Math.round((heartbeatHydration.staleForMs ?? 0) / 1000)}s since last beat (in-flight: ${heartbeatHydration.snapshot?.inFlightOperationTaskIds.length ?? 0} operation(s), ${heartbeatHydration.snapshot?.activePlanRunIds.length ?? 0} plan run(s)).`);
+  }
+
   // Personality V1 state is separate from the transcript and must exist before traffic.
   const personalityRepository = createPersonalityRepository();
   await personalityRepository.initialize();
   const personalityPolicyEngine = new PersonalityPolicyEngine(personalityRepository);
 
   const agent = new QueuedAgent({ llm, embeddings, conversationRepository });
+  // Vague 6C : un seul Agent vit pour toute la durée du process — l'abonnement au bus
+  // d'autonomie est donc pris une fois ici, jamais dans le constructeur (voir
+  // Agent.listenForAutonomyEvents pour la justification).
+  agent.listenForAutonomyEvents();
   const conversationCoordinator = new ConversationCoordinator();
   const conversationService = new ConversationExecutionService(
     conversationRepository,
@@ -96,9 +115,13 @@ async function main(): Promise<void> {
     assertApiTokenConfiguredForHttp(modes);
     const backgroundRunner = new BackgroundRunner(agent.serviceOrchestrator);
     const scheduler = new Scheduler(agent.serviceOrchestrator);
+    const autonomyPlanner = new AutonomyPlanner(agent);
+    const heartbeat = new Heartbeat(agent.planner);
     backgroundRunner.start();
     scheduler.start();
     agent.planRunner.start();
+    autonomyPlanner.start();
+    heartbeat.start();
 
     const server = startHttpApi(agent, config.api.port);
     // Preserve Chantier-10 alerts/legacy polling, then wrap command/chat routes with 11A.
@@ -110,11 +133,14 @@ async function main(): Promise<void> {
       backgroundRunner.stop();
       scheduler.stop();
       agent.planRunner.stop();
+      autonomyPlanner.stop();
+      heartbeat.stop();
       retentionScheduler.stop();
       webConversationRuntime.dispose();
       conversationRuntime.dispose();
       voiceRuntime.dispose();
       unsubscribeAlerts();
+      agent.disposeInterrupts();
       agent.closeMcpServers().catch(() => undefined);
       server.close();
     };

@@ -29,7 +29,8 @@
     "exceljs": "^4.4.0",
     "pdf-parse": "^2.4.5",
     "pg": "^8.23.0",
-    "unzipper": "^0.10.14"
+    "unzipper": "^0.10.14",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@capacitor/cli": "^8.5.1",

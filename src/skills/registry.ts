@@ -3,6 +3,7 @@ import { cosineSimilarity } from "../llm/embeddings.js";
 import type { SkillContext, SkillDefinition } from "../types.js";
 import { SkillPreferenceStore } from "./preferences.js";
 import { tracer } from "../observability/tracer.js";
+import { validateToolArguments } from "../llm/schemas.js";
 
 const kinds=new Set(["SKILL","WORKFLOW","INTERNAL","FUTURE","SYSTEM","LEGACY"]), availability=new Set(["AVAILABLE","UNAVAILABLE","DISABLED"]), exposures=new Set(["ALWAYS","DYNAMIC","NEVER"]), risks=new Set(["LOW","MEDIUM","HIGH","CRITICAL"]), targets=new Set(["LOCAL_HANDLER","SERVICE_CAPABILITY","WORKFLOW","INTERNAL","MCP_TOOL"]);
 function normalized(skill:SkillDefinition):SkillDefinition {
@@ -12,7 +13,15 @@ function normalized(skill:SkillDefinition):SkillDefinition {
   if(!legacy&&value.kind==="FUTURE"&&value.availability!=="UNAVAILABLE")throw new Error(`INVALID_FUTURE_SKILL: ${value.id}`);
   return value;
 }
-function validateInput(schema:SkillDefinition["parameters"],input:Record<string,unknown>):void{if(!schema)return;for(const key of schema.required??[])if(input[key]===undefined||input[key]===null||input[key]==="")throw new Error(`INVALID_SKILL_INPUT: missing ${key}`);if(schema.additionalProperties===false)for(const key of Object.keys(input))if(!(key in schema.properties))throw new Error(`INVALID_SKILL_INPUT: unknown ${key}`);for(const [key,value] of Object.entries(input)){const rule=schema.properties[key] as {type?:string;enum?:unknown[]}|undefined;if(value===undefined||!rule)continue;const valid=rule.type==="array"?Array.isArray(value):rule.type==="integer"?Number.isInteger(value):rule.type==="object"?!!value&&typeof value==="object"&&!Array.isArray(value):!rule.type||typeof value===rule.type;if(!valid||rule.enum&&!rule.enum.includes(value))throw new Error(`INVALID_SKILL_INPUT: ${key}`);}}
+/** Vague 6B : garde-fou Zod au cœur de l'exécution — un handler n'est jamais invoqué avec
+ * des arguments hors-schéma, y compris pour un appel qui ne serait pas passé par le
+ * rejet immédiat au niveau de la boucle agent (ex: skill invoquée directement en interne). */
+function validateInput(schema:SkillDefinition["parameters"],input:Record<string,unknown>):void{
+  if(!schema)return;
+  for(const key of schema.required??[])if(input[key]===undefined||input[key]===null||input[key]==="")throw new Error(`INVALID_SKILL_INPUT: missing ${key}`);
+  const result=validateToolArguments(schema,input);
+  if(!result.success)throw new Error(`INVALID_SKILL_INPUT: ${result.error}`);
+}
 
 /**
  * Brique 5 : bibliothèque de compétences. Les skills sont indexées par leur

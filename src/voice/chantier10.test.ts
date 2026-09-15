@@ -14,6 +14,7 @@ import { AlertRouter } from "./alertRouter.js";
 import type { SmsProvider, SmsSendResult } from "./smsProvider.js";
 import { NotificationStore } from "../autonomy/notificationStore.js";
 import { config } from "../config.js";
+import { closeDb } from "../persistence/db.js";
 import { completeWithLocalPriority, clearLocalModelProbeCacheForTests } from "../llm/localModelPriority.js";
 import { OllamaProvider } from "../llm/providers/ollama.js";
 import { registerChantier10Settings } from "../settings/chantier10Catalog.js";
@@ -48,6 +49,13 @@ function auth(token: string): Record<string, string> {
 test("QueuedAgent serializes concurrent interactive steps around the single Agent memory", async () => {
   const previousLocalPriority = config.llm.localModelPriority;
   config.llm.localModelPriority = false;
+  // Isolation DB : le cache sémantique local (Vague 6D) persiste ses entrées en base — sans
+  // ceci, ce test réutiliserait à travers les exécutions successives de la suite le fichier
+  // SQLite par défaut (partagé, non réinitialisé par ce fichier de test) et pourrait retomber
+  // sur une réponse déjà en cache pour les prompts "A"/"B", faussant peak.
+  const previousDbPath = config.db.path;
+  closeDb();
+  config.db.path = ":memory:";
   let active = 0;
   let peak = 0;
   const provider: LLMProvider = {
@@ -71,6 +79,8 @@ test("QueuedAgent serializes concurrent interactive steps around the single Agen
     assert.equal(agent.ingressQueue.activeCount, 0);
   } finally {
     config.llm.localModelPriority = previousLocalPriority;
+    closeDb();
+    config.db.path = previousDbPath;
   }
 });
 

@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";import { getDb } from "../persistence/d
 export const ACTIVITY_TYPES=["SKILLS_SELECTED","PLAN_CREATED","PLAN_STARTED","STEP_READY","STEP_DISPATCHED","SPECIALIST_ASSIGNED","APPROVAL_REQUIRED","STEP_COMPLETED","STEP_FAILED","REPLAN_PENDING","REPLAN_STARTED","REPLAN_APPLIED","ARTIFACT_CREATED","CONSOLIDATION_STARTED","CONSOLIDATION_COMPLETED","PLAN_COMPLETED","PLAN_BLOCKED","PLAN_CANCEL_REQUESTED","PLAN_CANCELLED","RECOVERY_REQUIRED","HEALTH_CHECK_COMPLETED","HUMAN_EDIT_RECEIVED","HUMAN_EDIT_APPLIED",
   "AGENT_TEAM_STARTED","AGENT_ACTIVATED","AGENT_MESSAGE","AGENT_HANDOFF","AGENT_TEAM_COMPLETED","AGENT_TEAM_FAILED",
   "MCP_SERVER_CONNECTED","MCP_SERVER_FAILED","MCP_TOOL_DISCOVERED","MCP_TOOL_EXECUTED",
-  "REFLECTION_STARTED","REFLECTION_PASSED","REFLECTION_FAILED","REFLECTION_RETRY"] as const;
+  "REFLECTION_STARTED","REFLECTION_PASSED","REFLECTION_FAILED","REFLECTION_RETRY",
+  "PLAN_SNAPSHOT_TAKEN","PLAN_ROLLED_BACK","AGENT_INTERRUPTED","IDLE_AUDIT_STARTED","IDLE_AUDIT_COMPLETED"] as const;
 export type ActivityType=typeof ACTIVITY_TYPES[number];const forbidden=/authorization|api[_-]?key|token|secret|password|\.env/i;
 export interface ActivityInput{dedupeKey?:string;timestamp?:number;traceId?:string;planRunId?:string;planNodeId?:string;operationTaskId?:string;specialistId?:string;eventType:ActivityType;level?:"info"|"warning"|"error";message:string;metadata?:Record<string,unknown>}
 const hasUndefined=(value:unknown):boolean=>value===undefined||(value!==null&&typeof value==="object"&&Object.values(value as Record<string,unknown>).some(hasUndefined));
@@ -22,6 +23,7 @@ const ACTIVITY_TIERS:Partial<Record<ActivityType,0|1|2>>={
   AGENT_MESSAGE:2,AGENT_ACTIVATED:1,AGENT_HANDOFF:1,AGENT_TEAM_STARTED:0,AGENT_TEAM_COMPLETED:0,AGENT_TEAM_FAILED:0,
   MCP_TOOL_DISCOVERED:1,MCP_TOOL_EXECUTED:1,MCP_SERVER_CONNECTED:0,MCP_SERVER_FAILED:0,
   REFLECTION_STARTED:2,REFLECTION_PASSED:0,REFLECTION_FAILED:0,REFLECTION_RETRY:0,
+  PLAN_SNAPSHOT_TAKEN:1,PLAN_ROLLED_BACK:0,AGENT_INTERRUPTED:0,IDLE_AUDIT_STARTED:2,IDLE_AUDIT_COMPLETED:1,
 };
 const LOG_LEVEL_TIER:Record<string,0|1|2>={NORMAL:0,DETAILED:1,DEBUG:2};
 export class ActivityStore{append(input:ActivityInput){if(!ACTIVITY_TYPES.includes(input.eventType)||!input.message.trim()||forbidden.test(input.message))throw new Error("INVALID_ACTIVITY");const metadata=input.metadata??{};const json=JSON.stringify(metadata);if(!metadata||Array.isArray(metadata)||hasUndefined(metadata)||json.length>8192||forbidden.test(json))throw new Error("INVALID_ACTIVITY_METADATA");const eventTier=ACTIVITY_TIERS[input.eventType]??0;const allowedTier=LOG_LEVEL_TIER[config.activity.logLevel]??0;if(eventTier>allowedTier)return null;const id=randomUUID();getDb().prepare(`INSERT OR IGNORE INTO activity_log(id,dedupe_key,timestamp,trace_id,plan_run_id,plan_node_id,operation_task_id,specialist_id,event_type,level,message,metadata_json)VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(id,input.dedupeKey??null,input.timestamp??Date.now(),input.traceId??null,input.planRunId??null,input.planNodeId??null,input.operationTaskId??null,input.specialistId??null,input.eventType,input.level??"info",input.message.trim(),json);return input.dedupeKey?this.byDedupe(input.dedupeKey):this.get(id);}
