@@ -1,7 +1,10 @@
 [
   {
     "id": "software_factory",
-    "name": "Software Factory Service V1",
+    "name": "Software Factory Service V2",
+    "description": "Génère et orchestre le développement logiciel automatisé.",
+    "version": "2.0",
+    "maturity": "production",
     "enabled": true,
     "transport": "local",
     "endpoint": "software_factory",
@@ -14,14 +17,20 @@
     ],
     "priority": 10,
     "riskByCapability": {
-      "software_development": "MEDIUM",
-      "code_generation": "LOW"
+      "software_development": "HIGH",
+      "code_generation": "MEDIUM"
     },
-    "parallelSafeCapabilities": []
+    "parallelSafeCapabilities": [
+      "code_generation"
+    ],
+    "dependsOn": []
   },
   {
     "id": "workspace_service",
-    "name": "Workspace Service V1",
+    "name": "Workspace Service V2",
+    "description": "Gère les fichiers et l'espace de travail partagé de l'agent.",
+    "version": "2.0",
+    "maturity": "production",
     "enabled": true,
     "transport": "local",
     "endpoint": "workspace_service",
@@ -31,15 +40,19 @@
     "capabilities": [
       "file_management"
     ],
-    "priority": 20,
+    "priority": 15,
     "riskByCapability": {
       "file_management": "MEDIUM"
     },
-    "parallelSafeCapabilities": []
+    "parallelSafeCapabilities": [],
+    "dependsOn": []
   },
   {
     "id": "research_service",
-    "name": "Research Service V1",
+    "name": "Research Service V2",
+    "description": "Effectue des recherches approfondies et synthétise des informations.",
+    "version": "2.0",
+    "maturity": "production",
     "enabled": true,
     "transport": "local",
     "endpoint": "research_service",
@@ -55,12 +68,16 @@
     },
     "parallelSafeCapabilities": [
       "deep_research"
-    ]
+    ],
+    "dependsOn": []
   },
   {
     "id": "product_studio",
     "name": "Product Studio V1",
-    "enabled": false,
+    "description": "Conçoit et itère sur des spécifications produit et des prototypes.",
+    "version": "1.1",
+    "maturity": "beta",
+    "enabled": true,
     "transport": "local",
     "endpoint": "product_studio",
     "auth": {
@@ -69,18 +86,25 @@
     "capabilities": [
       "product_studio"
     ],
-    "priority": 20,
+    "priority": 30,
     "riskByCapability": {
       "product_studio": "LOW"
     },
     "parallelSafeCapabilities": [
       "product_studio"
+    ],
+    "dependsOn": [
+      "software_factory",
+      "research_service"
     ]
   },
   {
     "id": "creative_studio",
     "name": "Creative Studio V1",
-    "enabled": false,
+    "description": "Produit des contenus créatifs : visuels, textes et concepts.",
+    "version": "1.0",
+    "maturity": "beta",
+    "enabled": true,
     "transport": "local",
     "endpoint": "creative_studio",
     "auth": {
@@ -89,17 +113,23 @@
     "capabilities": [
       "creative_studio"
     ],
-    "priority": 20,
+    "priority": 35,
     "riskByCapability": {
       "creative_studio": "LOW"
     },
     "parallelSafeCapabilities": [
       "creative_studio"
+    ],
+    "dependsOn": [
+      "workspace_service"
     ]
   },
   {
     "id": "commercial_office",
     "name": "Commercial Office V1",
+    "description": "Gère les opérations commerciales sensibles, y compris l'envoi de communications.",
+    "version": "1.0",
+    "maturity": "alpha",
     "enabled": false,
     "transport": "local",
     "endpoint": "commercial_office",
@@ -110,20 +140,26 @@
       "commercial_office",
       "commercial_office_send"
     ],
-    "priority": 20,
+    "priority": 50,
     "riskByCapability": {
       "commercial_office": "MEDIUM",
-      "commercial_office_send": "MEDIUM"
+      "commercial_office_send": "HIGH"
     },
     "permissionByCapability": {
       "commercial_office_send": "SEND"
     },
-    "parallelSafeCapabilities": []
+    "parallelSafeCapabilities": [],
+    "dependsOn": [
+      "workspace_service"
+    ]
   },
   {
     "id": "marketing_office",
     "name": "Marketing Office V1",
-    "enabled": false,
+    "description": "Élabore des stratégies et contenus marketing.",
+    "version": "1.0",
+    "maturity": "beta",
+    "enabled": true,
     "transport": "local",
     "endpoint": "marketing_office",
     "auth": {
@@ -132,12 +168,16 @@
     "capabilities": [
       "marketing_office"
     ],
-    "priority": 20,
+    "priority": 40,
     "riskByCapability": {
       "marketing_office": "LOW"
     },
     "parallelSafeCapabilities": [
       "marketing_office"
+    ],
+    "dependsOn": [
+      "creative_studio",
+      "research_service"
     ]
   }
 ]

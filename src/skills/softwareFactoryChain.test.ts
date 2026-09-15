@@ -15,7 +15,9 @@ import { SkillSelector, detectSoftwareModificationIntent } from "./selector.js";
 
 function setupDb(): void {
   config.db.path = ":memory:";
-  config.autonomy.globalRiskLevel = "MEDIUM";
+  // software_development est classé HIGH (impact réel sur le code source) : le plafond de
+  // risque global doit couvrir HIGH pour que dispatchCapability atteigne réellement le service.
+  config.autonomy.globalRiskLevel = "HIGH";
   config.autonomy.permissionMatrix = "EXECUTE";
   closeDb();
   getDb();
