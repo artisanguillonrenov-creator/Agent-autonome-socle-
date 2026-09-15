@@ -16,21 +16,22 @@ jobs:
     name: Run npm test
     runs-on: ubuntu-latest
     env:
-      # Conteneur Postgres éphémère, local au job : identifiants par défaut
-      # non sensibles, valables uniquement pour la durée du run CI.
-      TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/jarvis_test # gitleaks:allow
+      # Conteneur Postgres éphémère, local au job. Utilise le secret du
+      # dépôt s'il est configuré, sinon une valeur par défaut non sensible
+      # (base jetable, accessible uniquement en localhost dans le runner).
+      TEST_DATABASE_URL: postgresql://jarvis:${{ secrets.POSTGRES_PASSWORD || 'postgres' }}@127.0.0.1:5432/jarvis_test
 
     services:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres # gitleaks:allow
+          POSTGRES_USER: jarvis
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD || 'postgres' }}
           POSTGRES_DB: jarvis_test
         ports:
           - 5432:5432
         options: >-
-          --health-cmd="pg_isready -U postgres -d jarvis_test"
+          --health-cmd="pg_isready -U jarvis -d jarvis_test"
           --health-interval=10s
           --health-timeout=5s
           --health-retries=5
