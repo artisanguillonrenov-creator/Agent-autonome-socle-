@@ -919,7 +919,7 @@ test("FACTORY NAME ROUNDTRIP: Factory service name override is preserved on expo
       headers,
     });
     const resetSvc = agent.serviceOrchestrator.registry.getServiceById("software_factory");
-    assert.equal(resetSvc?.name, "Software Factory Service V1");
+    assert.equal(resetSvc?.name, "Software Factory Service V2");
 
     // 4. Import exported payload
     const importRes = await fetch(`http://localhost:${testPort}/api/settings/import`, {
@@ -1111,7 +1111,7 @@ test("NAME OVERRIDE DISTINCT FROM DIAGNOSTICS: Diagnostic health check does not 
   try {
     // 1. Initial factory service name & source
     const initialSvc = agent.serviceOrchestrator.registry.getServiceById("software_factory");
-    assert.equal(initialSvc?.name, "Software Factory Service V1");
+    assert.equal(initialSvc?.name, "Software Factory Service V2");
     assert.equal(initialSvc?.source, "FACTORY");
 
     // 2. Perform connection health check test
@@ -1141,9 +1141,9 @@ test("NAME OVERRIDE DISTINCT FROM DIAGNOSTICS: Diagnostic health check does not 
     });
     assert.equal(importRes.status, 200);
 
-    // 6. Verify name remains "Software Factory Service V1" and source remains FACTORY
+    // 6. Verify name remains "Software Factory Service V2" and source remains FACTORY
     const reimportedSvc = agent.serviceOrchestrator.registry.getServiceById("software_factory");
-    assert.equal(reimportedSvc?.name, "Software Factory Service V1");
+    assert.equal(reimportedSvc?.name, "Software Factory Service V2");
     assert.equal(reimportedSvc?.source, "FACTORY");
   } finally {
     server.close();
@@ -1194,7 +1194,7 @@ test("NAME OVERRIDE EXPLICIT RENAME: Renaming factory service sets nameOverride 
       headers,
     });
     const resetSvc = agent.serviceOrchestrator.registry.getServiceById("software_factory");
-    assert.equal(resetSvc?.name, "Software Factory Service V1");
+    assert.equal(resetSvc?.name, "Software Factory Service V2");
     assert.equal(resetSvc?.source, "FACTORY");
 
     // 4. Import exported payload

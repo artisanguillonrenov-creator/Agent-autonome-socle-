@@ -31,16 +31,19 @@ function enableAllBureaus(orchestrator: ServiceOrchestrator): void {
   }
 }
 
-test("SCÉNARIO J — les quatre bureaux sont enregistrés localement/in-process, désactivés par défaut", () => {
+test("SCÉNARIO J — les quatre bureaux sont enregistrés localement/in-process, commercial_office désactivé par défaut", () => {
   setupTestDb();
   const registry = new ServiceRegistry();
   for (const id of ["product_studio", "creative_studio", "commercial_office", "marketing_office"]) {
     const s = registry.getServiceById(id);
     assert.ok(s, `${id} doit être enregistré`);
     assert.equal(s!.transport, "local");
-    assert.equal(s!.enabled, false, `${id} doit être désactivé par défaut (settings.* = false)`);
+  }
+  for (const id of ["product_studio", "creative_studio", "marketing_office"]) {
+    assert.equal(registry.getServiceById(id)!.enabled, true, `${id} doit être activé par défaut (settings.* = true)`);
   }
   const commercial = registry.getServiceById("commercial_office")!;
+  assert.equal(commercial.enabled, false, "commercial_office doit rester désactivé par défaut (settings.* = false)");
   assert.deepEqual(commercial.capabilities.sort(), ["commercial_office", "commercial_office_send"]);
   assert.equal(commercial.permissionByCapability?.commercial_office_send, "SEND");
 });
@@ -134,11 +137,15 @@ test("SCÉNARIO H — commercial_office_send exige la permission SEND : bloqué 
   }
 });
 
-test("SCÉNARIO H — avec la permission SEND accordée, la capacité atteint réellement le service (et échoue proprement faute de provider e-mail configuré)", async () => {
+test("SCÉNARIO H — avec la permission SEND et le risque HIGH accordés, la capacité atteint réellement le service (et échoue proprement faute de provider e-mail configuré)", async () => {
   setupTestDb();
   const originalPermissionMatrix = config.autonomy.permissionMatrix;
+  const originalRiskLevel = config.autonomy.globalRiskLevel;
   try {
     config.autonomy.permissionMatrix = "SEND";
+    // commercial_office_send est classé HIGH (envoi externe réel) : il faut aussi lever le
+    // plafond de risque global pour dépasser l'étape d'approbation et atteindre le service.
+    config.autonomy.globalRiskLevel = "HIGH";
     const orchestrator = new ServiceOrchestrator();
     enableAllBureaus(orchestrator);
     const prospect = await orchestrator.dispatchCapability({ action: "DISPATCH_CAPABILITY", capability: "commercial_office", objective: "Prospect", context: { action: "CREATE_PROSPECT", name: "Bob", email: "bob@example.com" } });
@@ -157,14 +164,15 @@ test("SCÉNARIO H — avec la permission SEND accordée, la capacité atteint r�
     assert.match(sendAttempt.error ?? "", /EMAIL_PROVIDER_NOT_CONFIGURED/);
   } finally {
     config.autonomy.permissionMatrix = originalPermissionMatrix;
+    config.autonomy.globalRiskLevel = originalRiskLevel;
   }
 });
 
 test("un bureau désactivé (skills.*/office* = false côté registre) reste inatteignable via dispatchCapability", async () => {
   setupTestDb();
   const orchestrator = new ServiceOrchestrator();
-  // Ne pas activer product_studio : reste enabled=false par défaut (config/services.json).
-  const result = await orchestrator.dispatchCapability({ action: "DISPATCH_CAPABILITY", capability: "product_studio", objective: "Analyse", context: { action: "GET_STATE" } });
+  // Ne pas activer commercial_office : reste enabled=false par défaut (config/services.json).
+  const result = await orchestrator.dispatchCapability({ action: "DISPATCH_CAPABILITY", capability: "commercial_office", objective: "Analyse", context: { action: "GET_STATE" } });
   assert.equal(result.status, "REJECTED");
   assert.equal(result.selectedService, "none");
 });

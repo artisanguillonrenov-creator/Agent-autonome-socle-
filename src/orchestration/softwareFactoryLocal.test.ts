@@ -60,21 +60,29 @@ test("ServiceAdapter checkHealth reports software_factory as reachable locally w
 
 test("software_development is dispatched to the local Software Factory service, never to localhost:10000 or :4000", async () => {
   setupTestDb();
-  const orchestrator = new ServiceOrchestrator();
+  // software_development est classé HIGH (impact réel sur le code source) : il faut lever
+  // le plafond de risque global pour dépasser l'étape d'approbation et atteindre le service.
+  const originalRiskLevel = config.autonomy.globalRiskLevel;
+  config.autonomy.globalRiskLevel = "HIGH";
+  try {
+    const orchestrator = new ServiceOrchestrator();
 
-  const run = withStubbedFetch(() =>
-    orchestrator.dispatchCapability({
-      action: "DISPATCH_CAPABILITY",
-      capability: "software_development",
-      objective: "Objectif sans chemin de fichier pour rester 100% local et sans appel réseau",
-    }),
-  );
-  const result = await run;
+    const run = withStubbedFetch(() =>
+      orchestrator.dispatchCapability({
+        action: "DISPATCH_CAPABILITY",
+        capability: "software_development",
+        objective: "Objectif sans chemin de fichier pour rester 100% local et sans appel réseau",
+      }),
+    );
+    const result = await run;
 
-  assert.equal(result.selectedService, "software_factory");
-  assert.equal(result.status, "FAILED");
-  assert.ok(result.error?.includes("FILE_PATH_MISSING"), `unexpected error: ${result.error}`);
-  assert.deepEqual(run.calls(), []);
+    assert.equal(result.selectedService, "software_factory");
+    assert.equal(result.status, "FAILED");
+    assert.ok(result.error?.includes("FILE_PATH_MISSING"), `unexpected error: ${result.error}`);
+    assert.deepEqual(run.calls(), []);
+  } finally {
+    config.autonomy.globalRiskLevel = originalRiskLevel;
+  }
 });
 
 test("a legacy DB override pointing at a retired HTTP address is migrated away and cannot shadow the local transport", () => {
