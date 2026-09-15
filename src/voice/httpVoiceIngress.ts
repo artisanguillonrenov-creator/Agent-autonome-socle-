@@ -4,6 +4,7 @@ import { config } from "../config.js";
 import { VoiceIngressStore, hashVoiceRequest, normalizeVoiceRequest } from "./voiceIngressStore.js";
 import { VoiceOutputFormatter } from "./voiceOutputFormatter.js";
 import { AlertRouter } from "./alertRouter.js";
+import { autonomyEventBus } from "../autonomy/eventBus.js";
 
 const MAX_VOICE_BODY_BYTES = 64 * 1024;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -144,6 +145,11 @@ export function installVoiceHttpIngress(
           sendJson(res, 409, { error: "VOICE_COMMAND_RECOVERY_REQUIRED", voiceCommandId, status: "RECOVERY_REQUIRED" });
           return;
         }
+
+        // Vague 7B (déclencheurs commutés par l'état) : la réception d'une commande vocale
+        // est un changement d'état factuel notifié sur le bus d'autonomie, exploitable par
+        // AutonomyPlanner sans dépendre d'un scrutin.
+        autonomyEventBus.publish({ type: "VOICE_COMMAND_RECEIVED", source: "voice_ingress", payload: { voiceCommandId, workspaceId: normalized.workspaceId ?? null } });
 
         try {
           const result = await agent.step(normalized.message, normalized.workspaceId ?? undefined);

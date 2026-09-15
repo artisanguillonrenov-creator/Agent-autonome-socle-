@@ -14,6 +14,7 @@ import { CreativeStudioService } from "../services/creativeStudioService.js";
 import { CommercialOfficeService } from "../services/commercialOfficeService.js";
 import { MarketingOfficeService } from "../services/marketingOfficeService.js";
 import { NotificationStore } from "../autonomy/notificationStore.js";
+import { autonomyEventBus } from "../autonomy/eventBus.js";
 import { getDb } from "../persistence/db.js";
 import type { ArtifactInput, ArtifactKind } from "../workspaces/artifactStore.js";
 
@@ -363,7 +364,17 @@ export class ServiceOrchestrator {
   getOperationStatus(taskId: string): ServiceOperation | null {
     return this.store.getOperation(taskId);
   }
-  private processEvents(taskId:string,events:unknown):unknown {let usage:unknown;if(!Array.isArray(events)){this.store.updateStatus(taskId,"FAILED",undefined,"INVALID_SERVICE_EVENT_STATE_UNKNOWN",false);return undefined;}for(const raw of events){const validation=this.store.validateEvent(raw,taskId);if(!validation.valid){if(validation.duplicate)continue;this.store.updateStatus(taskId,"FAILED",undefined,"INVALID_SERVICE_EVENT_STATE_UNKNOWN",false);return undefined;}const event=validation.event;if(event.type==="TASK_COMPLETED"&&event.payload.artifacts!==undefined){try{this.persistArtifacts(event);}catch{this.store.updateStatus(taskId,"FAILED",undefined,"INVALID_ARTIFACT_DESCRIPTOR",false);return undefined;}}const applied=this.store.processEvent(event);if(applied.applied&&(event.type==="TASK_COMPLETED"||event.type==="TASK_FAILED"))usage=event.payload.usage;}return usage;}
+  private processEvents(taskId:string,events:unknown):unknown {let usage:unknown;if(!Array.isArray(events)){this.store.updateStatus(taskId,"FAILED",undefined,"INVALID_SERVICE_EVENT_STATE_UNKNOWN",false);return undefined;}for(const raw of events){const validation=this.store.validateEvent(raw,taskId);if(!validation.valid){if(validation.duplicate)continue;this.store.updateStatus(taskId,"FAILED",undefined,"INVALID_SERVICE_EVENT_STATE_UNKNOWN",false);return undefined;}const event=validation.event;if(event.type==="TASK_COMPLETED"&&event.payload.artifacts!==undefined){try{this.persistArtifacts(event);}catch{this.store.updateStatus(taskId,"FAILED",undefined,"INVALID_ARTIFACT_DESCRIPTOR",false);return undefined;}}if(event.type==="TASK_COMPLETED")this.publishSoftwareFactoryEvent(event);const applied=this.store.processEvent(event);if(applied.applied&&(event.type==="TASK_COMPLETED"||event.type==="TASK_FAILED"))usage=event.payload.usage;}return usage;}
+  /**
+   * Vague 7B : la détection d'une PR/commit produite par la Software Factory est un
+   * changement d'état factuel publié sur le bus d'autonomie — best-effort, jamais bloquant
+   * pour le traitement de l'événement métier lui-même.
+   */
+  private publishSoftwareFactoryEvent(event:ServiceEvent):void{
+    const meta=extractOperationMetadata(JSON.stringify(event.payload??{}));
+    if(!meta.branch&&!meta.commitSha&&!meta.prNumber&&!meta.prUrl)return;
+    try{autonomyEventBus.publish({type:"SOFTWARE_FACTORY_PR_EVENT",source:event.service,payload:{taskId:event.task_id,...meta}});}catch{/* jamais bloquant */}
+  }
   private persistArtifacts(event:ServiceEvent):void {const operation=this.store.getOperation(event.task_id);const workspaceId=operation?.workspaceId;if(!workspaceId||!Array.isArray(event.payload.artifacts))throw new Error();const plan=(getDb().prepare("SELECT id FROM plan_runs WHERE workspace_id=?").get(workspaceId) as any)?.id;const inputs:ArtifactInput[]=event.payload.artifacts.map(raw=>{if(!raw||typeof raw!=="object"||Array.isArray(raw))throw new Error();const descriptor=raw as Record<string,unknown>;if(typeof descriptor.name!=="string"||!descriptor.name.trim()||typeof descriptor.kind!=="string"||!["FILE","TEXT","REPORT","DATA","LINK"].includes(descriptor.kind)||(descriptor.mime_type!==undefined&&typeof descriptor.mime_type!=="string"))throw new Error();const common={workspaceId,planRunId:plan,operationTaskId:event.task_id,kind:descriptor.kind as ArtifactKind,name:descriptor.name,mimeType:descriptor.mime_type as string|undefined};if(descriptor.kind==="LINK"){if(typeof descriptor.url!=="string")throw new Error();const url=new URL(descriptor.url);if(!["http:","https:"].includes(url.protocol))throw new Error();return{...common,url:url.href};}if(typeof descriptor.content_base64!=="string"||!this.isStrictBase64(descriptor.content_base64))throw new Error();return{...common,content:Buffer.from(descriptor.content_base64,"base64"),workingPath:event.service==="research_service"?descriptor.name:undefined};});if(inputs.length)this.artifacts.createBatch(inputs);}
   private isStrictBase64(value:string):boolean {if(value.length%4!==0||!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value))return false;return Buffer.from(value,"base64").toString("base64")===value;}
 }

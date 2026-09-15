@@ -203,4 +203,18 @@ export const config = {
     enabled: process.env.GUARDRAIL_ENABLED === "true",
     maxRetries: int(process.env.GUARDRAIL_MAX_RETRIES, 1),
   },
+  /** Vague 6D : cache sémantique local des complétions LLM. */
+  semanticCache: {
+    similarityThreshold: (() => { const n = Number(process.env.SEMANTIC_CACHE_SIMILARITY_THRESHOLD); return Number.isFinite(n) && n > 0 && n <= 1 ? n : 0.95; })(),
+    ttlMs: int(process.env.SEMANTIC_CACHE_TTL_MS, 24 * 60 * 60 * 1000),
+  },
+  /** Vague 7D : battement de coeur anti-veille (hébergements éphémères) + hydratation au redémarrage. */
+  heartbeat: {
+    intervalMs: int(process.env.HEARTBEAT_INTERVAL_MS, 4 * 60 * 1000),
+    selfUrl: process.env.HEARTBEAT_SELF_URL || "",
+  },
+  /** Vague 7B : intervalle de scrutin résiduel pour détecter l'ABSENCE d'activité (7A) — les routines elles-mêmes restent déclenchées par événement. */
+  autonomyPlanner: {
+    idleCheckIntervalMs: int(process.env.AUTONOMY_IDLE_CHECK_INTERVAL_MS, 60_000),
+  },
 };

@@ -72,3 +72,24 @@ export interface ServiceEvent {
   timestamp: number;
   payload: Record<string, unknown>;
 }
+
+/**
+ * Vague 6C (interruptions événementielles asynchrones) : signal prioritaire pouvant
+ * mettre en pause ou avorter proprement l'exécution en cours de l'agent — externe à la
+ * boucle synchrone de dispatch de tâche (TaskRequest/ServiceEvent ci-dessus), qui reste le
+ * contrat Core<->Service. Un TASK_EVENT externe (alerte de production, commande d'arrêt
+ * utilisateur, priorité concurrente) est traduit en AgentInterruptSignal et publié sur le
+ * bus d'événements (src/autonomy/eventBus.ts) ; l'agent le consomme à son prochain point
+ * de contrôle et avorte, le cas échéant, la mission de plan ciblée.
+ */
+export type AgentInterruptReason = "USER_STOP" | "PRODUCTION_ALERT" | "TASK_EVENT" | "PRIORITY_OVERRIDE";
+
+export interface AgentInterruptSignal {
+  schema_version: string;
+  signal_id: string;
+  reason: AgentInterruptReason;
+  message?: string;
+  /** Plan run ciblé pour un avortement immédiat (PlanRunner.cancel) ; absent = pause globale de la boucle conversationnelle seulement. */
+  planRunId?: string;
+  issuedAt: number;
+}

@@ -3,6 +3,7 @@ import { mkdirSync, lstatSync, readdirSync, readFileSync, renameSync, rmSync, st
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { getDb } from "../persistence/db.js";
 import { config } from "../config.js";
+import { autonomyEventBus } from "../autonomy/eventBus.js";
 
 export type WorkspaceOwnerType = "PLAN_RUN" | "ADHOC";
 export interface Workspace { id:string; name:string; ownerType:WorkspaceOwnerType; ownerId:string; status:string; createdAt:number; updatedAt:number }
@@ -44,6 +45,11 @@ export class WorkspaceStore {
    */
   resolveExistingFile(id:string,path:string):{absolutePath:string;size:number} {const target=this.target(id,path,false),s=statSync(target);if(!s.isFile())throw new Error("INVALID_WORKSPACE_FILE");return{absolutePath:target,size:s.size};}
   exists(id:string,path:string):boolean {try{const t=this.target(id,path,false);return statSync(t).isFile();}catch{return false;}}
-  writeFile(id:string,path:string,content:Buffer|string):WorkspaceFile {const data=Buffer.isBuffer(content)?content:Buffer.from(content,"utf8");if(data.length>this.maxFileBytes)throw new Error("WORKSPACE_FILE_TOO_LARGE");const target=this.target(id,path);const old=this.exists(id,path)?statSync(target).size:0;const total=this.listFiles(id).reduce((n,f)=>n+f.size,0);if(total-old+data.length>this.maxTotalBytes)throw new Error("WORKSPACE_TOTAL_LIMIT");mkdirSync(dirname(target),{recursive:true});this.target(id,path);const temp=`${target}.tmp-${randomUUID()}`;try{writeFileSync(temp,data,{flag:"wx",mode:0o600});renameSync(temp,target);}catch(e){rmSync(temp,{force:true});throw e;}const s=statSync(target);return{path:relative(this.base(id),target).split(sep).join("/"),size:s.size,updatedAt:s.mtimeMs};}
+  writeFile(id:string,path:string,content:Buffer|string):WorkspaceFile {const data=Buffer.isBuffer(content)?content:Buffer.from(content,"utf8");if(data.length>this.maxFileBytes)throw new Error("WORKSPACE_FILE_TOO_LARGE");const target=this.target(id,path);const old=this.exists(id,path)?statSync(target).size:0;const total=this.listFiles(id).reduce((n,f)=>n+f.size,0);if(total-old+data.length>this.maxTotalBytes)throw new Error("WORKSPACE_TOTAL_LIMIT");mkdirSync(dirname(target),{recursive:true});this.target(id,path);const temp=`${target}.tmp-${randomUUID()}`;try{writeFileSync(temp,data,{flag:"wx",mode:0o600});renameSync(temp,target);}catch(e){rmSync(temp,{force:true});throw e;}const s=statSync(target);const result={path:relative(this.base(id),target).split(sep).join("/"),size:s.size,updatedAt:s.mtimeMs};
+    // Vague 7B : le Document Workbench est l'un des composants observés par AutonomyPlanner —
+    // une modification de fichier est un changement d'état factuel, publié sans jamais
+    // bloquer l'écriture elle-même (best-effort, aucune conséquence si personne n'écoute).
+    try{autonomyEventBus.publish({type:"WORKBENCH_DOCUMENT_CHANGED",source:"workspace_store",payload:{workspaceId:id,path:result.path,size:result.size}});}catch{/* jamais bloquant */}
+    return result;}
   deleteFile(id:string,path:string):boolean {const target=this.target(id,path,false);if(!statSync(target).isFile())throw new Error("INVALID_WORKSPACE_FILE");rmSync(target);return true;}
 }

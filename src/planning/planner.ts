@@ -4,6 +4,9 @@ import type { ServiceRegistry } from "../orchestration/serviceRegistry.js";
 import type { PlanNode, PlanNodeStatus } from "../types.js";
 import { ActivityStore } from "../observability/activityStore.js";
 import { WorkspaceStore } from "../workspaces/workspaceStore.js";
+import { savePlanCheckpoint, loadPlanCheckpoint, listPlanCheckpoints, type PlanSnapshotState } from "../persistence/checkpoint.js";
+import type { CheckpointSummary } from "../persistence/checkpoint.js";
+import { planStepsArraySchema } from "../llm/schemas.js";
 
 export const PLAN_STATUSES = ["PENDING","RUNNING","WAITING_PERMISSION","BLOCKED","CONSOLIDATING","COMPLETED","FAILED","CANCELLED"] as const;
 export type PlanRunStatus = typeof PLAN_STATUSES[number];
@@ -12,23 +15,23 @@ export type StepPriority = typeof STEP_PRIORITIES[number];
 export type ExecutionNodeStatus = PlanNodeStatus | "waiting" | "failed" | "cancelled";
 export interface PlanStepSpec { local_id:string; title:string; capability:string; objective:string; context:Record<string,unknown>; constraints:string[]; priority:StepPriority; depends_on:string[] }
 export interface ExecutionPlanNode extends Omit<PlanNode,"status"> { status:ExecutionNodeStatus; planRunId?:string; position?:number; generation:number; capability?:string; objective?:string; context:Record<string,unknown>; constraints:string[]; priority?:StepPriority; dependencies:string[]; operationTaskId?:string; operationIdempotencyKey?:string; result?:string; error?:string; updatedAt:number; claimedAt?:number; attempt:number; specialistId?:string }
-export interface PlanRun { id:string; rootNodeId:string; objective:string; status:PlanRunStatus; generation:number; replanCount:number; maxReplans:number; workspaceId?:string; lastError?:string; createdAt:number; updatedAt:number; maxParallelism:number; peakParallelism:number; pendingReplanNodeId?:string }
+export interface PlanRun { id:string; rootNodeId:string; objective:string; status:PlanRunStatus; generation:number; replanCount:number; maxReplans:number; workspaceId?:string; lastError?:string; createdAt:number; updatedAt:number; maxParallelism:number; peakParallelism:number; pendingReplanNodeId?:string; rollbackCount:number; maxRollbacks:number }
 
 const isObject=(v:unknown):v is Record<string,unknown>=>!!v&&typeof v==="object"&&!Array.isArray(v);
+/**
+ * Vague 6B (guardrails Zod) : la forme structurelle de chaque étape (types, présence des
+ * champs, priorité dans l'énumération autorisée) est validée par le schéma Zod
+ * planStepsArraySchema — rejet immédiat, avant toute autre logique. La sémantique propre
+ * au plan (capacité connue du registre, dépendances résolues, absence de cycle) reste
+ * vérifiée ici, car elle dépend de l'état runtime (ServiceRegistry) que Zod ignore.
+ */
 export function validatePlanSteps(input:unknown, registry:ServiceRegistry, maxSteps=50):PlanStepSpec[] {
-  if(!Array.isArray(input)||input.length<1||input.length>maxSteps) throw new Error("INVALID_PLAN: step count");
-  const ids=new Set<string>(); const steps:PlanStepSpec[]=[];
-  for(const raw of input){
-    if(!isObject(raw)) throw new Error("INVALID_PLAN: step must be an object");
-    const local_id=typeof raw.local_id==="string"?raw.local_id.trim():"";
-    const title=typeof raw.title==="string"?raw.title.trim():"";
-    const capability=typeof raw.capability==="string"?raw.capability.trim():"";
-    const objective=typeof raw.objective==="string"?raw.objective.trim():"";
-    if(!local_id||ids.has(local_id)) throw new Error("INVALID_PLAN: local_id must be unique"); ids.add(local_id);
-    if(!title||!objective||!capability||!isObject(raw.context)||!Array.isArray(raw.constraints)||!raw.constraints.every(x=>typeof x==="string")||!Array.isArray(raw.depends_on)||!raw.depends_on.every(x=>typeof x==="string")||!STEP_PRIORITIES.includes(raw.priority as StepPriority)) throw new Error(`INVALID_PLAN: malformed step ${local_id}`);
-    if(!registry.findServiceForCapability(capability)) throw new Error(`INVALID_PLAN: unknown capability ${capability}`);
-    steps.push({local_id,title,capability,objective,context:raw.context,constraints:raw.constraints as string[],priority:raw.priority as StepPriority,depends_on:raw.depends_on as string[]});
-  }
+  const parsed=planStepsArraySchema(maxSteps).safeParse(input);
+  if(!parsed.success){const issue=parsed.error.issues[0];throw new Error(`INVALID_PLAN: ${issue?.path?.length?`${issue.path.join(".")}: `:""}${issue?.message??"malformed steps"}`);}
+  const steps=parsed.data as PlanStepSpec[];
+  const ids=new Set<string>();
+  for(const s of steps){if(ids.has(s.local_id)) throw new Error("INVALID_PLAN: local_id must be unique"); ids.add(s.local_id);}
+  for(const s of steps) if(!registry.findServiceForCapability(s.capability)) throw new Error(`INVALID_PLAN: unknown capability ${s.capability}`);
   for(const s of steps) for(const d of s.depends_on) if(!ids.has(d)) throw new Error(`INVALID_PLAN: unknown dependency ${d}`);
   const map=new Map(steps.map(s=>[s.local_id,s])); const visiting=new Set<string>(),done=new Set<string>();
   const visit=(id:string)=>{if(visiting.has(id))throw new Error("INVALID_PLAN: dependency cycle");if(done.has(id))return;visiting.add(id);for(const d of map.get(id)!.depends_on)visit(d);visiting.delete(id);done.add(id);};
@@ -52,7 +55,7 @@ function rowToNode(r:any):ExecutionPlanNode{
     return{id:r.id,parentId:r.parent_id,title:r.title,status:r.status,createdAt:r.created_at,planRunId:r.plan_run_id,position:r.position,generation:r.generation,capability:r.capability,objective:r.objective,context:parseExecutionJson(r.context_json,"object") as Record<string,unknown>,constraints:parseExecutionJson(r.constraints_json,"strings") as string[],priority:r.priority,dependencies:parseExecutionJson(r.dependencies_json,"strings") as string[],operationTaskId:r.operation_task_id??undefined,operationIdempotencyKey:r.operation_idempotency_key??undefined,result:r.result??undefined,error:r.error??undefined,updatedAt:r.updated_at,claimedAt:r.claimed_at??undefined,attempt:r.attempt,specialistId:r.specialist_id??undefined};
   }catch{throw new InvalidPersistedPlanNodeError(typeof r.plan_run_id==="string"?r.plan_run_id:undefined);}
 }
-function rowToRun(r:any):PlanRun{return{id:r.id,rootNodeId:r.root_node_id,objective:r.objective,status:r.status,generation:r.generation,replanCount:r.replan_count,maxReplans:r.max_replans,workspaceId:r.workspace_id??undefined,lastError:r.last_error??undefined,createdAt:r.created_at,updatedAt:r.updated_at,maxParallelism:r.max_parallelism??1,peakParallelism:r.peak_parallelism??0,pendingReplanNodeId:r.pending_replan_node_id??undefined};}
+function rowToRun(r:any):PlanRun{return{id:r.id,rootNodeId:r.root_node_id,objective:r.objective,status:r.status,generation:r.generation,replanCount:r.replan_count,maxReplans:r.max_replans,workspaceId:r.workspace_id??undefined,lastError:r.last_error??undefined,createdAt:r.created_at,updatedAt:r.updated_at,maxParallelism:r.max_parallelism??1,peakParallelism:r.peak_parallelism??0,pendingReplanNodeId:r.pending_replan_node_id??undefined,rollbackCount:r.rollback_count??0,maxRollbacks:r.max_rollbacks??1};}
 
 export class Planner {
  createNode(title:string,parentId:string|null=null):PlanNode{const n={id:randomUUID(),parentId,title,status:"pending" as const,createdAt:Date.now()};getDb().prepare(`INSERT INTO plan_nodes(id,parent_id,title,status,created_at,updated_at)VALUES(?,?,?,?,?,?)`).run(n.id,parentId,title,n.status,n.createdAt,n.createdAt);return n;}
@@ -75,6 +78,46 @@ export class Planner {
   * (ex: contenu d'artefact modifié par l'utilisateur) dans une étape déjà planifiée, avant
   * son (re)dispatch, sans relancer le plan depuis zéro.
   */
+ /**
+  * Vague 6A (versioning / rollback) : sauvegarde un instantané cohérent (état N) du plan
+  * avant d'engager une branche ou une action jugée risquée. Réutilise le mécanisme de
+  * checkpoint PLAN_EXECUTION déjà existant (savePlanCheckpoint) — un simple alias nommé
+  * pour exprimer l'intention "snapshot avant risque" au niveau de l'appelant.
+  */
+ snapshot(runId:string,label?:string):string{return savePlanCheckpoint(runId,this,label);}
+ listSnapshots(runId:string):CheckpointSummary[]{return listPlanCheckpoints(runId);}
+ /**
+  * Restaure le plan `runId` à l'état persisté dans l'instantané `checkpointId` (état N-1) :
+  * les nœuds non racine de la génération courante sont remplacés par ceux du snapshot,
+  * remis en file ("pending") pour que PlanRunner les redispatche proprement — les acquis
+  * (nœuds "done" au moment du snapshot) sont conservés tels quels, rien n'est rejoué.
+  * Incrémente rollback_count ; l'appelant (PlanRunner) est responsable de respecter
+  * max_rollbacks pour ne jamais boucler indéfiniment.
+  */
+ rollback(runId:string,checkpointId:string):PlanSnapshotState|null{
+  const snapshot=loadPlanCheckpoint(checkpointId);
+  if(!snapshot||snapshot.planRun.id!==runId)return null;
+  const db=getDb();
+  db.transaction(()=>{
+   db.prepare(`DELETE FROM plan_nodes WHERE plan_run_id=? AND capability IS NOT NULL`).run(runId);
+   const q=db.prepare(`INSERT INTO plan_nodes(id,parent_id,title,status,created_at,plan_run_id,position,generation,capability,objective,context_json,constraints_json,priority,dependencies_json,operation_task_id,operation_idempotency_key,result,error,updated_at,claimed_at,attempt,specialist_id)VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+   const now=Date.now();
+   for(const raw of snapshot.nodes as ExecutionPlanNode[]){
+    // Un nœud N-1 qui n'était pas "done" est remis "pending" : son éventuelle opération
+    // externe associée au moment du snapshot est abandonnée (operation_task_id effacé),
+    // jamais réutilisée telle quelle — évite tout doublon d'effet de bord au redispatch.
+    const restoredStatus=raw.status==="done"||raw.status==="abandoned"||raw.status==="cancelled"?raw.status:"pending";
+    // Un nouvel essai doit porter une idempotency key inédite (attempt incrémenté) : sinon
+    // le redispatch retomberait sur l'OperationStore existant déjà marqué FAILED pour la
+    // même clé et renverrait immédiatement le même échec au lieu de retenter.
+    const attempt=restoredStatus==="pending"?(raw.attempt??1)+1:raw.attempt??1;
+    q.run(raw.id,raw.parentId,raw.title,restoredStatus,raw.createdAt,runId,raw.position??0,raw.generation,raw.capability??null,raw.objective??null,JSON.stringify(raw.context??{}),JSON.stringify(raw.constraints??[]),raw.priority??null,JSON.stringify(raw.dependencies??[]),restoredStatus==="pending"?null:raw.operationTaskId??null,restoredStatus==="pending"?null:raw.operationIdempotencyKey??null,raw.result??null,restoredStatus==="pending"?null:raw.error??null,now,null,attempt,restoredStatus==="pending"?null:raw.specialistId??null);
+   }
+   db.prepare(`UPDATE plan_runs SET status='RUNNING',generation=?,pending_replan_node_id=NULL,rollback_count=rollback_count+1,last_error=?,updated_at=? WHERE id=?`).run(snapshot.generation,"ROLLED_BACK_TO_SNAPSHOT",now,runId);
+  })();
+  new ActivityStore().append({dedupeKey:`plan-rolled-back:${runId}:${checkpointId}`,planRunId:runId,eventType:"PLAN_ROLLED_BACK",message:`Mission rolled back to snapshot ${checkpointId}`,metadata:{checkpointId,generation:snapshot.generation}});
+  return snapshot;
+ }
  mergeContext(id:string,patch:Record<string,unknown>):void{
   const row=getDb().prepare(`SELECT context_json FROM plan_nodes WHERE id=?`).get(id) as {context_json:string|null}|undefined;
   if(!row)return;
