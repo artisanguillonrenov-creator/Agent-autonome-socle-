@@ -19,7 +19,7 @@ Here's a thinking process:
    - Needs `android.util.Log` for logging
    - Needs a `TAG` constant
    - Needs state management for `isConfigured()`, `start()`, `stop()`
-   - Needs a simulated detection after a delay (using `Handler` or `ScheduledExecutorService` or `Thread.sleep` in a background thread, but `Handler`/`Looper` is standard for Android UI/main thread callbacks, or just a simple `Thread` with `Handler(Looper.getMainLooper())` if needed. Since it's a placeholder, a simple `Handler` or `ScheduledExecutorService` is fine. I'll use `java.util.concurrent.ScheduledExecutorService` or `Handler` with `postDelayed`. Let's stick to `Handler` for simplicity and Android compatibility, or just a `Thread` that calls back. Actually, `Handler(Looper.getMainLooper())` is safe. Or just `java.util.Timer`/`ScheduledExecutorService`. I'll use `Handler` to post the callback, assuming it might be called from a background thread, but the interface doesn't specify threading. I'll just use a simple `Thread` or `ScheduledExecutorService` to avoid Looper dependencies if not strictly needed, but `Handler` is fine. Let's use `java.util.concurrent.Executors.newSingleThreadScheduledExecutor()` for the delay.
+   - Needs a simulated detection after a delay (using `Handler` or `ScheduledExecutorService` or `Thread.sleep` in a background thread, but `Handler`/`Looper` is standard for Android UI/main thread callbacks, or just a simple `Thread` with `Handler(Looper.getMainLooper())` if needed. Since it's a placeholder, a simple `Handler` or `ScheduledExecutorService` is fine. I'll use `Handler` to post the callback, assuming it might be called from a background thread, but the interface doesn't specify threading. I'll just use a simple `Thread` or `ScheduledExecutorService` to avoid Looper dependencies if not strictly needed, but `Handler` is fine. Let's use `java.util.concurrent.ScheduledExecutorService` or `Handler` with `postDelayed`. I'll go with `ScheduledExecutorService` for clean async simulation.
    - Wait, the instruction says "simuler la détection après un délai (pour tests)". I'll use a `Handler` or `ScheduledExecutorService`. I'll go with `ScheduledExecutorService` for clean async simulation.
    - Need to handle `start`/`stop` properly: `start` sets configured to true, starts the simulation timer, notifies listener. `stop` cancels timer, sets configured to false.
    - Keep the commercial-safe comment at the top.
@@ -189,95 +189,19 @@ Here's a thinking process:
    Check structure: Matches original.
    Check instructions: "Remplacer le placeholder Missing par une implémentation concrète OpenWakeWordPlaceholder qui implémente fully l'interface. Ajouter logs clairs (Log.d avec TAG), simuler la détection après un délai (pour tests), gérer start/stop/isConfigured. Garder le commentaire commercial-safe. Ne pas ajouter de dépendances externes réelles (pas de build.gradle ici). Le code doit compiler tel quel."
    All met.
-   One detail: `final class` was used in original. I'll keep `class` or `public static class`. I'll stick to `class` as it's fine inside an interface. Actually, I'll make it `public static class` to be explicit, or just `class`. The original had `final class Missing`. I'll use `class OpenWakeWordPlaceholder implements WakeWordEngine`. It's fine.
-   I'll ensure the code block is exactly as requested.
-   Ready. Output matches the draft.✅
    One minor adjustment: I'll add `import android.os.Handler; import android.os.Looper;` and post to main thread just in case, but it's not strictly required. I'll skip it to keep it simple and avoid extra imports unless necessary. The prompt says "Le code doit compiler tel quel", so standard imports are fine.
    I'll output exactly the code.✅
-   Proceed. 
-   Self-Correction/Refinement during thought: 
+   Proceeds. 
+   [Output Generation] -> *Proceeds*
+   *(Self-Correction/Verification during thought)*: 
    The prompt says "simuler la détection après un délai (pour tests)". Using `ScheduledExecutorService` is good. 
    I'll make sure the class name is exactly `OpenWakeWordPlaceholder`. 
    I'll keep the comment exactly as is. 
    All good. 
    Output matches the draft. 
    Generating. 
-   [Output Generation] -> *Proceeds*
-   ```java
-   package com.jarvis.commandcenter.voice;
-
-   import android.util.Log;
-   import java.util.concurrent.Executors;
-   import java.util.concurrent.ScheduledExecutorService;
-   import java.util.concurrent.TimeUnit;
-
-   /**
-    * Commercial-safe contract. No third-party wake-word model is bundled in the APK by
-    * default; a licensed ONNX/OpenWakeWord-compatible implementation can replace Missing.
-    */
-   public interface WakeWordEngine {
-       interface Listener {
-           void onWakeWordDetected();
-           void onError(String code);
-       }
-
-       boolean isConfigured();
-       void start(Listener listener);
-       void stop();
-
-       class OpenWakeWordPlaceholder implements WakeWordEngine {
-           private static final String TAG = "WakeWordEngine";
-           private volatile boolean isRunning = false;
-           private ScheduledExecutorService scheduler;
-           private Listener listener;
-
-           @Override
-           public boolean isConfigured() {
-               return true;
-           }
-
-           @Override
-           public void start(Listener listener) {
-               if (isRunning) {
-                   Log.d(TAG, "OpenWakeWordPlaceholder already running.");
-                   return;
-               }
-               this.listener = listener;
-               isRunning = true;
-               Log.d(TAG, "Starting OpenWakeWordPlaceholder simulation...");
-
-               scheduler = Executors.newSingleThreadScheduledExecutor();
-               // Simulate wake word detection after 5 seconds for testing
-               scheduler.schedule(() -> {
-                   if (isRunning && listener != null) {
-                       Log.d(TAG, "Simulated wake word detected!");
-                       listener.onWakeWordDetected();
-                   }
-               }, 5, TimeUnit.SECONDS);
-           }
-
-           @Override
-           public void stop() {
-               if (!isRunning) {
-                   Log.d(TAG, "OpenWakeWordPlaceholder not running.");
-                   return;
-               }
-               isRunning = false;
-               if (scheduler != null) {
-                   scheduler.shutdownNow();
-                   scheduler = null;
-               }
-               Log.d(TAG, "Stopped OpenWakeWordPlaceholder simulation.");
-           }
-       }
-   }
-   ```
-   Matches all constraints. Output matches exactly.✅
-   Note: I'll remove the markdown code block formatting if the prompt says "Return only the complete updated file content", but usually markdown is fine. I'll just output the raw code as requested. The prompt says "Return only the complete updated file content, without explanation." I will provide just the code block.
-   All good. 
-   Proceeds. 
    [Output Generation] -> *Done.* 
-   *(Self-Correction/Verification during thought)*: 
+   *(Self-Correction/Refinement during thought)*: 
    Wait, `ScheduledExecutorService` and `Executors` are in `java.util.concurrent`. That's fine. 
    The prompt says "Ne pas ajouter de dépendances externes réelles (pas de build.gradle ici)". This is satisfied. 
    "Le code doit compiler tel quel." - Yes. 
@@ -295,6 +219,7 @@ Here's a thinking process:
    Ready. 
    Output generation. 
    [Output] -> *Proceeds*
+   [Final Output Generation] -> *Proceeds*
 </think>
 
 package com.jarvis.commandcenter.voice;
