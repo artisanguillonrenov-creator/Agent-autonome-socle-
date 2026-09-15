@@ -261,7 +261,11 @@ export function installConversationHttpIngress(
               res.write(`data: ${JSON.stringify({ type: "token", content: word, conversationId: session.conversationId })}\n\n`);
               await new Promise((resolve) => setTimeout(resolve, 12));
             }
-            res.write(`data: ${JSON.stringify({ type: "done", iterations: result.iterations, pendingAction: result.pendingAction, conversationId: session.conversationId })}\n\n`);
+            // Vague 13C (panneau "Thought Process" du dashboard) : clientRequestId est le
+            // traceId effectivement utilisé par Agent.step (voir le commentaire plus haut sur
+            // son rôle de corrélation) — le renvoyer permet au client de récupérer l'arbre
+            // complet des spans via GET /api/traces/{traceId} sans avoir à le deviner.
+            res.write(`data: ${JSON.stringify({ type: "done", iterations: result.iterations, traceId: clientRequestId, pendingAction: result.pendingAction, conversationId: session.conversationId })}\n\n`);
           }
           res.write("data: [DONE]\n\n");
           res.end();

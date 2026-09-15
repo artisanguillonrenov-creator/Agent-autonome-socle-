@@ -13,6 +13,7 @@ import { marketingOfficeSkill } from "./marketingOffice.js";
 import { runAgentTeamSkill } from "./agentTeam.js";
 import { captureScreenshotSkill, analyzeScreenshotSkill } from "./visionTools.js";
 import { sendAndroidCommandSkill } from "./androidCommand.js";
+import { generateImageSkill, validateGeneratedImageSkill } from "./imageGenerationSkill.js";
 
 export const builtinSkills: SkillDefinition[] = [
   getCurrentTimeSkill,
@@ -32,4 +33,6 @@ export const builtinSkills: SkillDefinition[] = [
   captureScreenshotSkill,
   analyzeScreenshotSkill,
   sendAndroidCommandSkill,
+  generateImageSkill,
+  validateGeneratedImageSkill,
 ];
