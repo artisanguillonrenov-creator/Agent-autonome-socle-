@@ -153,22 +153,3 @@ export class ContextVersionError extends Error {
     this.name = "ContextVersionError";
   }
 }
-export interface N8nIntakePayload {
-  schema_version: number;
-  mission_id: string;
-  trace_id: string;
-  project_id: string;
-  status: MissionStatus;
-  event_type?: string;
-  event_id?: string;
-  sequence?: number;
-  payload?: Record<string, unknown>;
-  payloadRef?: string;
-  timestamp: number;
-}
-
-export interface N8nIntakeResult {
-  ok: boolean;
-  missionId?: string;
-  error?: string;
-}
