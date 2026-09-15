@@ -14,8 +14,19 @@ export interface ContextPiece {
  */
 import { config } from "../config.js";
 
+export interface ContextBudgetStatus {
+  tokenBudget: number;
+  usedTokens: number;
+  remainingTokens: number;
+  piecesKept: number;
+  piecesDropped: number;
+  updatedAt: number;
+}
+
 export class ContextBudgetManager {
   private customTokenBudget?: number;
+  /** Vague 13B (panneau Contexte du dashboard) : instantané du dernier assemble(), lecture seule. */
+  private lastStatus: ContextBudgetStatus | null = null;
 
   constructor(tokenBudget?: number) {
     this.customTokenBudget = tokenBudget;
@@ -29,6 +40,20 @@ export class ContextBudgetManager {
     return Math.ceil(text.length / 4);
   }
 
+  /** Dernier instantané connu — jamais recalculé à la volée (coûterait un nouvel assemble()). */
+  getStatus(): ContextBudgetStatus {
+    return (
+      this.lastStatus ?? {
+        tokenBudget: this.tokenBudget,
+        usedTokens: 0,
+        remainingTokens: this.tokenBudget,
+        piecesKept: 0,
+        piecesDropped: 0,
+        updatedAt: 0,
+      }
+    );
+  }
+
   /**
    * `budgetOverride` permet à l'appelant (boucle agent) de plafonner ponctuellement le
    * budget en fonction de la fenêtre de contexte réelle du modèle actif (entrée + sortie
@@ -39,22 +64,41 @@ export class ContextBudgetManager {
       .filter((p) => p.content.trim().length > 0)
       .sort((a, b) => b.priority - a.priority);
 
-    let remaining = budgetOverride ?? this.tokenBudget;
+    const totalBudget = budgetOverride ?? this.tokenBudget;
+    let remaining = totalBudget;
     const kept: string[] = [];
+    let piecesKept = 0;
+    let piecesDropped = 0;
 
     for (const piece of sorted) {
-      if (remaining <= 0) break;
+      if (remaining <= 0) {
+        piecesDropped += 1;
+        continue;
+      }
       const cost = this.estimateTokens(piece.content);
 
       if (cost <= remaining) {
         kept.push(`## ${piece.label}\n${piece.content}`);
         remaining -= cost;
+        piecesKept += 1;
       } else if (remaining > 50) {
         const maxChars = remaining * 4;
         kept.push(`## ${piece.label} (tronqué)\n${piece.content.slice(0, maxChars)}`);
         remaining = 0;
+        piecesKept += 1;
+      } else {
+        piecesDropped += 1;
       }
     }
+
+    this.lastStatus = {
+      tokenBudget: totalBudget,
+      usedTokens: totalBudget - remaining,
+      remainingTokens: remaining,
+      piecesKept,
+      piecesDropped,
+      updatedAt: Date.now(),
+    };
 
     return kept.join("\n\n");
   }

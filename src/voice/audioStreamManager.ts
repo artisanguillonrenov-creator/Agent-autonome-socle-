@@ -1,5 +1,5 @@
-import { WebSocketServer, type WebSocket, type RawData } from "ws";
-import type { Server, IncomingMessage } from "node:http";
+import type { WebSocketServer, WebSocket, RawData } from "ws";
+import type { IncomingMessage } from "node:http";
 import { randomUUID } from "node:crypto";
 import type { Agent } from "../core/agent.js";
 import { config } from "../config.js";
@@ -8,6 +8,7 @@ import { createTtsProvider, type TtsProvider } from "./ttsProvider.js";
 import { AudioSessionStore } from "./audioSessionStore.js";
 import { VoiceOutputFormatter } from "./voiceOutputFormatter.js";
 import { autonomyEventBus } from "../autonomy/eventBus.js";
+import type { WsUpgradeRouter } from "../interfaces/wsRouter.js";
 
 interface PendingUtterance {
   chunks: Buffer[];
@@ -74,10 +75,13 @@ function frameRms(frame: Buffer): number {
  * réattache le nouveau socket — si la réponse LLM était déjà calculée, elle est immédiatement
  * rejouée (`response_text`) et la synthèse TTS reprend sans jamais régénérer de jetons LLM.
  */
+/** Vague 13A : canal WebSocket audio exposé au dashboard, en plus du chemin historique configurable (config.audio.wsPath). */
+export const DASHBOARD_AUDIO_WS_PATH = "/ws/audio";
+
 export class AudioStreamManager {
   private readonly sessions = new Map<string, AudioSession>();
   private readonly store = new AudioSessionStore();
-  private wss?: WebSocketServer;
+  private readonly wssInstances: WebSocketServer[] = [];
   private readonly formatter: VoiceOutputFormatter;
 
   constructor(
@@ -88,13 +92,23 @@ export class AudioStreamManager {
     this.formatter = new VoiceOutputFormatter(() => agent.getLLMProvider());
   }
 
-  attach(server: Server): void {
-    this.wss = new WebSocketServer({ server, path: config.audio.wsPath });
-    this.wss.on("connection", (ws, req) => this.onConnection(ws, req));
+  /**
+   * Deux chemins peuvent coexister (legacy config.audio.wsPath + /ws/audio du dashboard) —
+   * voir wsRouter.ts pour la raison pour laquelle chacun doit passer par le routeur d'upgrade
+   * partagé (`noServer: true`) plutôt que par un `{ server, path }` indépendant.
+   */
+  attach(router: WsUpgradeRouter): void {
+    const paths = new Set([config.audio.wsPath, DASHBOARD_AUDIO_WS_PATH]);
+    for (const path of paths) {
+      const wss = router.register(path);
+      wss.on("connection", (ws, req) => this.onConnection(ws, req));
+      this.wssInstances.push(wss);
+    }
   }
 
   dispose(): void {
-    this.wss?.close();
+    for (const wss of this.wssInstances) wss.close();
+    this.wssInstances.length = 0;
     for (const session of this.sessions.values()) {
       if (session.disconnectTimer) clearTimeout(session.disconnectTimer);
     }

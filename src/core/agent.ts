@@ -218,11 +218,16 @@ export class Agent {
    * d'une heuristique par timestamp qui peut mélanger les opérations de clients concurrents.
    */
   async step(userInput: string, workspaceOrContext?: string | AgentExecutionContext, chatRequestId?: string): Promise<AgentStepResult> {
+    // Vague 13C (panneau "Thought Process" du dashboard) : le traceId du Tracer est forcé à
+    // turnTraceId (au lieu d'être généré indépendamment) afin que le client — qui fournit ce
+    // même identifiant en entrée de /api/chat/stream — puisse ensuite récupérer l'arbre
+    // complet des spans (tool calls, retries de self-healing) via GET /api/traces/{traceId}.
+    const turnTraceId = typeof chatRequestId === "string" && chatRequestId.trim() ? chatRequestId.trim() : `chat-${randomUUID()}`;
     return tracer.withSpan(
       "agent.step",
-      { kind: "planning", inputs: { userInputPreview: userInput.slice(0, 200) } },
+      { kind: "planning", inputs: { userInputPreview: userInput.slice(0, 200) }, traceId: turnTraceId },
       async (rootSpan) => {
-        const result = await this.stepInner(userInput, workspaceOrContext, chatRequestId);
+        const result = await this.stepInner(userInput, workspaceOrContext, turnTraceId);
         rootSpan.setOutputs({ responsePreview: result.response.slice(0, 300), iterations: result.iterations });
         return result;
       },
@@ -505,7 +510,7 @@ export class Agent {
       finalResponse = `Erreur : Limite maximale d'itérations (${this.maxIterations}) atteinte. Dernière étape exécutée : ${lastActionOrStep}. Veuillez reformuler ou découper votre demande.`;
     }
 
-    return { response: finalResponse, iterations, ...(pendingAction ? { pendingAction } : {}) };
+    return { response: finalResponse, iterations, traceId: turnTraceId, ...(pendingAction ? { pendingAction } : {}) };
   }
 
   async reflectAfterDurableTurn(context: AgentExecutionContext): Promise<string | null> {
@@ -753,4 +758,7 @@ export class Agent {
   }
 
   getLLMProvider(): LLMProvider { return this.llm; }
+
+  /** Vague 13B (panneau Contexte du dashboard) : dernier instantané d'utilisation du budget de contexte. */
+  getContextBudgetStatus() { return this.contextBudget.getStatus(); }
 }

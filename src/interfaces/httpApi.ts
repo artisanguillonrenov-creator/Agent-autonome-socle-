@@ -32,6 +32,7 @@ import { MissionStore } from "../coordination/missionStore.js";
 import { processCallback, CALLBACK_MAX_BODY_BYTES, CallbackPayloadTooLargeError } from "../coordination/callbackTransport.js";
 import { financialCircuitBreaker } from "../context/financialCircuitBreaker.js";
 import { androidCommandBus } from "../autonomy/androidCommandBus.js";
+import { IMAGE_WORKBENCH_DIR, isWithinImageWorkbench } from "../workbench/imageWorkbench.js";
 
 const taskStore = new TaskStore();
 const jarvisMissionStore = new MissionStore();
@@ -119,7 +120,12 @@ export function assertApiTokenConfiguredForHttp(modes: ReadonlySet<string> | rea
 function isPublicRequest(method: string | undefined, pathname: string): boolean {
   if (method === "OPTIONS") return true;
   if (method !== "GET") return false;
-  return pathname === "/" || /^\/[^/]+\.(?:html|css|js|png|jpg|ico|svg)$/i.test(pathname);
+  return (
+    pathname === "/" ||
+    pathname === "/dashboard" ||
+    pathname.startsWith("/public/") ||
+    /^\/[^/]+\.(?:html|css|js|png|jpg|ico|svg)$/i.test(pathname)
+  );
 }
 
 /**
@@ -174,6 +180,17 @@ function serveStaticFile(res: ServerResponse, filePath: string): boolean {
     }
   }
   return false;
+}
+
+/**
+ * Vague 13A/13B : dossier du dashboard tri-panoramique. `dist/public` (build de production,
+ * copié depuis src/public par scripts/build-ota.mjs) prime sur `src/public` (exécution en
+ * développement via tsx, sans étape de build préalable).
+ */
+function resolvePublicDir(): string {
+  const distPublic = join(process.cwd(), "dist", "public");
+  if (existsSync(distPublic)) return distPublic;
+  return join(process.cwd(), "src", "public");
 }
 
 const OTA_BUNDLE_FILES = ["index.html", "style.css", "app.js"];
@@ -493,6 +510,12 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
         return;
       }
 
+      // Vague 13B (panneau Contexte du dashboard) : dernier instantané d'utilisation du budget de contexte.
+      if (req.method === "GET" && pathname === "/api/context/usage") {
+        sendJson(res, 200, agent.getContextBudgetStatus());
+        return;
+      }
+
       // Observabilité & Tracing (Phase 2) : arbre d'exécution en direct (Planification ->
       // Agent spécialiste -> Compétence) et coût financier estimé, lecture seule et
       // best-effort (le Tracer n'échoue jamais, donc ces endpoints ne peuvent pas 500 à
@@ -675,10 +698,40 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
           }
         }
 
+        // Vague 13A/13B : dashboard tri-panoramique, servi depuis src/public/ (dev) ou
+        // dist/public/ (build) — distinct de la page de chat historique servie à "/".
+        if (pathname === "/dashboard") {
+          const dashboardIndexPath = join(resolvePublicDir(), "index.html");
+          if (serveStaticFile(res, dashboardIndexPath)) return;
+          sendJson(res, 404, { error: "DASHBOARD_NOT_BUILT" });
+          return;
+        }
+        if (pathname.startsWith("/public/")) {
+          const assetPath = join(resolvePublicDir(), pathname.slice("/public/".length));
+          if (existsSync(assetPath) && serveStaticFile(res, assetPath)) return;
+        }
+
         const wwwPath = join(process.cwd(), "www", pathname.replace(/^\/+/, ""));
         if (existsSync(wwwPath)) {
           if (serveStaticFile(res, wwwPath)) return;
         }
+      }
+
+      // Vague 12B/13B : sert brut (inline) une image générée par generate_image quand elle a
+      // été écrite dans le dossier d'outils dédié du Document Workbench plutôt que comme
+      // artefact de workspace (voir src/workbench/imageWorkbench.ts). `path` doit strictement
+      // provenir de ce dossier — jamais un chemin arbitraire du système de fichiers.
+      if (req.method === "GET" && pathname === "/api/workbench/images") {
+        const rawPath = parsedUrl.searchParams.get("path") || "";
+        if (!rawPath || !isWithinImageWorkbench(rawPath) || !existsSync(rawPath)) {
+          sendJson(res, 404, { error: "IMAGE_NOT_FOUND" });
+          return;
+        }
+        const ext = extname(rawPath).toLowerCase();
+        const contentType = ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" : "image/png";
+        res.writeHead(200, { "content-type": contentType, "content-disposition": "inline" });
+        res.end(readFileSync(rawPath));
+        return;
       }
 
       // 2. Chat & Streaming Chat Endpoints
@@ -757,7 +810,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
             await new Promise((resolve) => setTimeout(resolve, 12));
           }
 
-          res.write(`data: ${JSON.stringify({ type: "done", iterations: result.iterations, pendingAction: result.pendingAction })}\n\n`);
+          res.write(`data: ${JSON.stringify({ type: "done", iterations: result.iterations, traceId: result.traceId, pendingAction: result.pendingAction })}\n\n`);
           res.write(`data: [DONE]\n\n`);
           res.end();
         } catch (err) {
@@ -1778,15 +1831,19 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
           sendJson(res, 404, { error: "ARTIFACT_NOT_FOUND" });
           return;
         }
-        if (parsedUrl.searchParams.get("download") === "1" && a.relativePath) {
+        const wantsInline = parsedUrl.searchParams.get("inline") === "1";
+        if ((parsedUrl.searchParams.get("download") === "1" || wantsInline) && a.relativePath) {
           if (a.contentStatus !== "AVAILABLE") {
             sendJson(res, 409, { error: a.contentStatus });
             return;
           }
           const data = workspaceStore.readFile(a.workspaceId, a.relativePath);
+          const safeName = a.name.replace(/[^a-zA-Z0-9._-]/g, "_");
           res.writeHead(200, {
             "content-type": a.mimeType || "application/octet-stream",
-            "content-disposition": `attachment; filename="${a.name.replace(/[^a-zA-Z0-9._-]/g, "_")}"`,
+            // Vague 13B : "inline" permet au dashboard d'afficher directement une image
+            // générée (<img src=...>) sans forcer un téléchargement côté navigateur.
+            "content-disposition": `${wantsInline ? "inline" : "attachment"}; filename="${safeName}"`,
           });
           res.end(data);
           return;

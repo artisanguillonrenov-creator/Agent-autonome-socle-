@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, cpSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -102,3 +102,13 @@ writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf-8");
 
 console.log(`[OTA Build] Succès ! Manifeste généré à : ${manifestPath}`);
 console.log(`[OTA Build] Version: ${manifest.version} | BuildId: ${buildId} | SHA256: ${sha256.slice(0, 12)}...`);
+
+// Vague 13B : le dashboard tri-panoramique (src/public/) n'est pas du TypeScript — tsc ne le
+// copie donc jamais vers dist/. On le recopie tel quel après la compilation, pour que
+// httpApi.ts::resolvePublicDir() trouve dist/public en production.
+const publicSrcDir = join(rootDir, "src", "public");
+const publicDistDir = join(rootDir, "dist", "public");
+if (existsSync(publicSrcDir)) {
+  cpSync(publicSrcDir, publicDistDir, { recursive: true });
+  console.log(`[OTA Build] Dashboard copié vers ${publicDistDir}`);
+}

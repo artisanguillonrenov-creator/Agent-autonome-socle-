@@ -151,6 +151,8 @@ export interface AgentPendingAction {
 export interface AgentStepResult {
   response: string;
   iterations: number;
+  /** Vague 13C : identifiant de trace (Tracer) de ce tour — permet de récupérer l'arbre complet des spans via GET /api/traces/{traceId}. */
+  traceId?: string;
   /** Exact operation encountered during this step; absent for ordinary completed responses. */
   pendingAction?: AgentPendingAction;
 }

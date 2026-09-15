@@ -1,0 +1,789 @@
+<!doctype html>
+<html lang="fr" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>JARVIS — Command Center</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg-0: #05070c;
+    --bg-1: #0b0f1a;
+    --bg-2: #10152400;
+    --panel: #0d1220;
+    --panel-border: #1c2740;
+    --accent: #00f0ff;
+    --accent-2: #ff2fd0;
+    --accent-3: #7a5cff;
+    --ok: #29ffb0;
+    --warn: #ffcc33;
+    --danger: #ff3860;
+    --text-0: #e6f1ff;
+    --text-1: #8ea0c0;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: radial-gradient(circle at 20% 0%, #0e1730 0%, var(--bg-0) 55%) fixed;
+    color: var(--text-0);
+    font-family: 'Inter', system-ui, sans-serif;
+    overflow: hidden;
+  }
+  .mono { font-family: 'Share Tech Mono', ui-monospace, monospace; }
+  .panel {
+    background: linear-gradient(180deg, rgba(20,28,48,.75), rgba(10,14,24,.85));
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    box-shadow: 0 0 0 1px rgba(0,240,255,.03), 0 8px 30px rgba(0,0,0,.35);
+  }
+  .glow-border { border-color: var(--accent); box-shadow: 0 0 12px rgba(0,240,255,.35); }
+  .scrollbar-thin::-webkit-scrollbar { width: 8px; height: 8px; }
+  .scrollbar-thin::-webkit-scrollbar-thumb { background: #1e2b45; border-radius: 8px; }
+  .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+  .neon-text { color: var(--accent); text-shadow: 0 0 8px rgba(0,240,255,.6); }
+  .dot { width: 8px; height: 8px; border-radius: 999px; display: inline-block; }
+  .dot-ok { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+  .dot-bad { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
+  .dot-warn { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+  .msg-bubble { border: 1px solid var(--panel-border); background: rgba(255,255,255,.02); }
+  .msg-user { border-color: rgba(122,92,255,.4); background: rgba(122,92,255,.06); }
+  .msg-assistant { border-color: rgba(0,240,255,.25); background: rgba(0,240,255,.03); }
+  details.thought { border: 1px dashed #2a3a5c; background: rgba(0,0,0,.25); border-radius: 8px; }
+  details.thought summary { cursor: pointer; user-select: none; color: var(--text-1); }
+  details.thought[open] summary { color: var(--accent); }
+  .prose-inv :where(p,li,code,pre,h1,h2,h3,blockquote) { color: var(--text-0); }
+  .prose-inv pre { background: #060a14; border: 1px solid var(--panel-border); border-radius: 8px; padding: .75rem; overflow: auto; }
+  .prose-inv code { color: var(--accent); }
+  .prose-inv a { color: var(--accent-3); }
+  .drop-overlay { backdrop-filter: blur(2px); background: rgba(0,240,255,.06); border: 2px dashed var(--accent); }
+  .bar-track { background: #0b1120; border: 1px solid var(--panel-border); border-radius: 999px; overflow: hidden; }
+  .bar-fill { height: 100%; transition: width .4s ease; }
+  input, textarea { color: var(--text-0); }
+  ::placeholder { color: #4f5f80; }
+  .modal-backdrop { background: rgba(2,4,10,.75); backdrop-filter: blur(3px); }
+  .btn { border-radius: 8px; padding: .5rem .9rem; font-weight: 600; transition: transform .1s ease, box-shadow .2s ease; }
+  .btn:active { transform: scale(.97); }
+  .btn-approve { background: linear-gradient(90deg,#0fbf7f,#29ffb0); color:#04140c; }
+  .btn-reject { background: linear-gradient(90deg,#ff3860,#ff7a3c); color:#210307; }
+  .btn-ghost { background: transparent; border: 1px solid var(--panel-border); color: var(--text-0); }
+  .mic-btn.recording { animation: pulse 1.2s infinite; background: var(--danger) !important; }
+  @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(255,56,96,.6);} 70%{box-shadow:0 0 0 12px rgba(255,56,96,0);} 100%{box-shadow:0 0 0 0 rgba(255,56,96,0);} }
+  .col-scroll { overflow-y: auto; overflow-x: hidden; }
+</style>
+</head>
+<body class="h-screen w-screen flex flex-col">
+
+  <!-- Top bar -->
+  <header class="flex items-center justify-between px-4 py-2 border-b border-[#1c2740] bg-[#080b13]">
+    <div class="flex items-center gap-2">
+      <span class="text-lg font-bold neon-text mono tracking-widest">JARVIS</span>
+      <span class="text-xs text-[var(--text-1)] mono">// COMMAND CENTER</span>
+    </div>
+    <div class="flex items-center gap-4 text-xs mono">
+      <span class="flex items-center gap-1"><i id="dot-api" class="dot dot-bad"></i> API</span>
+      <span class="flex items-center gap-1"><i id="dot-logs" class="dot dot-bad"></i> WS-LOGS</span>
+      <span class="flex items-center gap-1"><i id="dot-audio" class="dot dot-bad"></i> WS-AUDIO</span>
+      <button id="btn-token" class="btn btn-ghost text-xs py-1 px-2">🔑 Token</button>
+    </div>
+  </header>
+
+  <!-- 3-column layout -->
+  <main class="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-3 p-3 min-h-0">
+
+    <!-- LEFT: Contexte -->
+    <section class="lg:col-span-3 panel p-3 flex flex-col gap-3 min-h-0 col-scroll scrollbar-thin order-2 lg:order-1">
+      <h2 class="mono text-sm neon-text tracking-wider">📊 CONTEXTE</h2>
+
+      <div>
+        <div class="flex justify-between text-xs text-[var(--text-1)] mb-1">
+          <span>Budget de contexte</span>
+          <span id="ctx-numbers" class="mono">0 / 0</span>
+        </div>
+        <div class="bar-track h-2">
+          <div id="ctx-bar" class="bar-fill" style="width:0%; background: linear-gradient(90deg,var(--accent),var(--accent-3));"></div>
+        </div>
+        <div class="text-[10px] text-[var(--text-1)] mt-1" id="ctx-pieces"></div>
+      </div>
+
+      <div>
+        <div class="text-xs text-[var(--text-1)] mb-1">Serveurs MCP</div>
+        <ul id="mcp-list" class="text-xs mono flex flex-col gap-1"></ul>
+      </div>
+
+      <div class="flex-1 min-h-0 flex flex-col">
+        <div class="text-xs text-[var(--text-1)] mb-1">Mémoire relationnelle (entités)</div>
+        <ul id="memory-list" class="text-xs flex flex-col gap-1 overflow-y-auto scrollbar-thin pr-1"></ul>
+      </div>
+    </section>
+
+    <!-- CENTER: Chat -->
+    <section class="lg:col-span-6 panel p-3 flex flex-col min-h-0 relative order-1 lg:order-2">
+      <h2 class="mono text-sm neon-text tracking-wider mb-2">💬 CHAT &amp; RENDU</h2>
+
+      <div id="chat-log" class="flex-1 col-scroll scrollbar-thin flex flex-col gap-3 pr-1"></div>
+
+      <div id="drop-overlay" class="hidden absolute inset-0 drop-overlay rounded-lg items-center justify-center text-lg font-bold z-20">
+        Déposez un fichier ou une image ici
+      </div>
+
+      <form id="chat-form" class="mt-2 flex flex-col gap-2">
+        <div id="pending-uploads" class="flex flex-wrap gap-2 text-xs mono"></div>
+        <div class="flex items-end gap-2">
+          <textarea id="chat-input" rows="2" placeholder="Écris à JARVIS… (glisse-dépose un fichier, ou utilise le micro)"
+            class="flex-1 bg-[#060a14] border border-[var(--panel-border)] rounded-lg p-2 resize-none focus:outline-none focus:glow-border"></textarea>
+          <button type="button" id="mic-btn" class="mic-btn btn btn-ghost" title="Micro">🎤</button>
+          <button type="submit" id="send-btn" class="btn" style="background:linear-gradient(90deg,var(--accent),var(--accent-3)); color:#031018;">Envoyer</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- RIGHT: Activité Autonome -->
+    <section class="lg:col-span-3 panel p-3 flex flex-col gap-3 min-h-0 col-scroll scrollbar-thin order-3">
+      <h2 class="mono text-sm neon-text tracking-wider">⚙️ ACTIVITÉ AUTONOME</h2>
+
+      <div>
+        <div class="flex justify-between items-center text-xs text-[var(--text-1)] mb-1">
+          <span>Disjoncteur financier</span>
+          <button id="btn-rearm" class="hidden btn btn-ghost text-[10px] py-0.5 px-2">Réarmer</button>
+        </div>
+        <div id="breaker-banner" class="hidden text-xs text-[var(--danger)] mono mb-1">⚠ GELÉ</div>
+        <div class="bar-track h-2">
+          <div id="breaker-bar" class="bar-fill" style="width:0%; background: linear-gradient(90deg,var(--ok),var(--warn),var(--danger));"></div>
+        </div>
+        <div id="breaker-numbers" class="text-[10px] text-[var(--text-1)] mt-1 mono"></div>
+      </div>
+
+      <div class="min-h-0">
+        <div class="text-xs text-[var(--text-1)] mb-1">Arbre des tâches (Planner)</div>
+        <div id="planner-tree" class="text-xs flex flex-col gap-2 max-h-52 overflow-y-auto scrollbar-thin pr-1"></div>
+      </div>
+
+      <div class="flex-1 min-h-0 flex flex-col">
+        <div class="text-xs text-[var(--text-1)] mb-1">Logs d'arrière-plan</div>
+        <ul id="activity-list" class="text-[11px] mono flex flex-col gap-1 overflow-y-auto scrollbar-thin pr-1"></ul>
+      </div>
+    </section>
+  </main>
+
+  <!-- Gating modal (Vague 13C) -->
+  <div id="gating-modal" class="hidden fixed inset-0 z-50 modal-backdrop flex items-center justify-center p-4">
+    <div class="panel glow-border p-5 max-w-md w-full">
+      <div class="flex items-center gap-2 mb-2">
+        <span class="dot dot-bad"></span>
+        <h3 class="mono text-[var(--danger)] font-bold tracking-wide">VALIDATION HUMAINE REQUISE — CRITIQUE</h3>
+      </div>
+      <p class="text-sm text-[var(--text-1)] mb-3">L'agent demande l'autorisation d'exécuter une action à risque élevé avant de continuer.</p>
+      <div class="mono text-xs bg-black/40 border border-[var(--panel-border)] rounded p-3 mb-4 space-y-1">
+        <div><span class="text-[var(--text-1)]">Capacité :</span> <span id="gate-capability">—</span></div>
+        <div><span class="text-[var(--text-1)]">Objectif :</span> <span id="gate-objective">—</span></div>
+        <div><span class="text-[var(--text-1)]">Tâche :</span> <span id="gate-taskid">—</span></div>
+      </div>
+      <div class="flex gap-3">
+        <button id="gate-approve" class="btn btn-approve flex-1">✅ Approuver l'action</button>
+        <button id="gate-reject" class="btn btn-reject flex-1">✋ Rejeter / Modifier le plan</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+
+  const TOKEN_KEY = "jarvis_token";
+  const state = {
+    workspaceId: null,
+    uploads: [],
+    micActive: false,
+    audioWs: null,
+    audioCtx: null,
+    audioSessionId: null,
+    ttsChunks: [],
+    pendingApprovalTaskId: null,
+  };
+
+  // ---------- Auth ----------
+  function getToken() { try { return localStorage.getItem(TOKEN_KEY) || ""; } catch { return ""; } }
+  function setToken(t) { try { localStorage.setItem(TOKEN_KEY, t); } catch {} }
+
+  async function authFetch(path, opts) {
+    opts = opts || {};
+    const headers = Object.assign({}, opts.headers || {});
+    const token = getToken();
+    if (token) headers["authorization"] = "Bearer " + token;
+    let res = await fetch(path, Object.assign({}, opts, { headers }));
+    if (res.status === 401) {
+      const entered = prompt("JARVIS est protégé par un token API. Colle-le ici :");
+      if (entered) {
+        setToken(entered.trim());
+        headers["authorization"] = "Bearer " + entered.trim();
+        res = await fetch(path, Object.assign({}, opts, { headers }));
+      }
+    }
+    setDot("dot-api", res.ok || res.status < 500);
+    return res;
+  }
+
+  document.getElementById("btn-token").addEventListener("click", () => {
+    const entered = prompt("Token API JARVIS :", getToken());
+    if (entered !== null) setToken(entered.trim());
+  });
+
+  function setDot(id, ok, warn) {
+    const el = document.getElementById(id);
+    el.className = "dot " + (warn ? "dot-warn" : ok ? "dot-ok" : "dot-bad");
+  }
+
+  async function authBlobUrl(path) {
+    const res = await authFetch(path);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
+  }
+
+  // ---------- Markdown / rendu riche ----------
+  function renderMarkdown(md) {
+    const html = window.marked.parse(md || "", { breaks: true });
+    return window.DOMPurify.sanitize(html);
+  }
+
+  /** Rendu direct HTML/CSS (Software Factory) dans un iframe strictement sandboxée (jamais de scripts, jamais same-origin). */
+  function renderHtmlPreview(code) {
+    const iframe = document.createElement("iframe");
+    iframe.sandbox = ""; // aucune permission : ni scripts, ni same-origin, ni forms.
+    iframe.className = "w-full rounded border border-[var(--panel-border)] bg-white";
+    iframe.style.height = "260px";
+    iframe.srcdoc = code;
+    return iframe;
+  }
+
+  function extractCodeBlocks(md) {
+    const blocks = [];
+    const re = /```(\w+)?\n([\s\S]*?)```/g;
+    let m;
+    while ((m = re.exec(md))) blocks.push({ lang: (m[1] || "").toLowerCase(), code: m[2] });
+    return blocks;
+  }
+
+  /**
+   * Vague 12B/13B : le résultat brut de generate_image (JSON avec artifactId ou path sous
+   * data/workbench-images/) apparaît généralement, au moins partiellement, dans la réponse
+   * finale du modèle qui relaie ce résultat. On le détecte ici pour afficher l'image produite
+   * directement dans le fil de discussion, sans dépendre d'un format de sortie garanti.
+   */
+  function extractGeneratedImages(content) {
+    const images = [];
+    const artifactRe = /"artifactId"\s*:\s*"([0-9a-fA-F-]{36})"/g;
+    let m;
+    while ((m = artifactRe.exec(content))) images.push({ url: "/api/artifacts/" + m[1] + "?inline=1" });
+    const pathRe = /"path"\s*:\s*"([^"]*workbench-images[^"]*\.(?:png|jpe?g))"/g;
+    while ((m = pathRe.exec(content))) images.push({ url: "/api/workbench/images?path=" + encodeURIComponent(m[1]) });
+    return images;
+  }
+
+  function appendImagesTo(wrap, images) {
+    if (!images || !images.length) return;
+    const grid = document.createElement("div");
+    grid.className = "flex flex-wrap gap-2 mt-2";
+    for (const img of images) {
+      const el = document.createElement("img");
+      el.className = "rounded border border-[var(--panel-border)] max-h-64";
+      el.alt = "image générée";
+      authBlobUrl(img.url).then((u) => (el.src = u)).catch(() => (el.alt = "image indisponible"));
+      grid.appendChild(el);
+    }
+    wrap.appendChild(grid);
+  }
+
+  function appendMessage(role, content, opts) {
+    opts = opts || {};
+    const wrap = document.createElement("div");
+    wrap.className = "msg-bubble rounded-lg p-3 " + (role === "user" ? "msg-user self-end max-w-[85%]" : "msg-assistant max-w-[95%]");
+
+    const roleLabel = document.createElement("div");
+    roleLabel.className = "text-[10px] mono text-[var(--text-1)] mb-1";
+    roleLabel.textContent = role === "user" ? "VOUS" : "JARVIS";
+    wrap.appendChild(roleLabel);
+
+    if (opts.thoughtNode) wrap.appendChild(opts.thoughtNode);
+
+    const body = document.createElement("div");
+    body.className = "prose-inv prose-sm max-w-none";
+    body.innerHTML = renderMarkdown(content);
+    wrap.appendChild(body);
+
+    // Aperçu rendu direct pour tout bloc html/css détecté (Software Factory).
+    for (const block of extractCodeBlocks(content)) {
+      if (block.lang === "html" || block.lang === "preview-html") {
+        const label = document.createElement("div");
+        label.className = "text-[10px] mono text-[var(--accent)] mt-2 mb-1";
+        label.textContent = "▶ Aperçu rendu (sandbox) :";
+        wrap.appendChild(label);
+        wrap.appendChild(renderHtmlPreview(block.code));
+      }
+    }
+
+    document.getElementById("chat-log").appendChild(wrap);
+    document.getElementById("chat-log").scrollTop = 1e9;
+    return wrap;
+  }
+
+  /** Vague 13C : encapsule réflexion interne / tool calls / retries self-healing dans un <details> rétractable. */
+  function makeThoughtNode() {
+    const details = document.createElement("details");
+    details.className = "thought text-xs mono p-2 mb-2";
+    details.open = true;
+    const summary = document.createElement("summary");
+    summary.textContent = "🧠 Thought Process — en cours…";
+    details.appendChild(summary);
+    const body = document.createElement("div");
+    body.className = "mt-2 flex flex-col gap-1 text-[var(--text-1)]";
+    details.appendChild(body);
+    return { details, summary, body };
+  }
+
+  async function loadTraceIntoThought(thought, traceId) {
+    try {
+      const res = await authFetch("/api/traces/" + encodeURIComponent(traceId));
+      if (!res.ok) return;
+      const data = await res.json();
+      thought.body.innerHTML = "";
+      for (const span of data.spans || []) {
+        const line = document.createElement("div");
+        const durationMs = span.timestampFin ? span.timestampFin - span.timestampDeb : null;
+        const icon = span.status === "error" ? "❌" : span.status === "running" ? "⏳" : "✅";
+        line.textContent = `${icon} [${span.kind}] ${span.name}` + (durationMs !== null ? ` — ${durationMs}ms` : "");
+        thought.body.appendChild(line);
+      }
+      if (typeof data.costUsd === "number") {
+        const cost = document.createElement("div");
+        cost.className = "text-[10px] text-[var(--accent)]";
+        cost.textContent = `Coût estimé du tour : $${data.costUsd.toFixed(4)}`;
+        thought.body.appendChild(cost);
+      }
+    } catch {
+      // best-effort — l'absence de trace ne doit jamais bloquer l'affichage de la réponse.
+    }
+  }
+
+  // ---------- Chat streaming (SSE via fetch, POST avec corps JSON) ----------
+  function genId() { return "web-" + Math.random().toString(36).slice(2) + Date.now().toString(36); }
+
+  async function sendMessage(text) {
+    const requestId = genId();
+    appendMessage("user", text);
+    document.getElementById("chat-input").value = "";
+
+    const assistantThought = makeThoughtNode();
+    const assistantWrap = appendMessage("assistant", "", { thoughtNode: assistantThought.details });
+    const bodyEl = assistantWrap.querySelector(".prose-inv");
+    let acc = "";
+
+    setChatDisabled(true);
+    try {
+      const res = await authFetch("/api/chat/stream", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        // clientRequestId est le champ effectivement lu par conversationHttpIngress.ts (le
+        // gestionnaire réellement actif de /api/chat/stream) — c'est aussi le traceId que
+        // l'agent utilisera pour ce tour (voir agent.ts::step). "requestId" est conservé pour
+        // compatibilité avec un éventuel appelant historique de src/interfaces/httpApi.ts.
+        body: JSON.stringify({ message: text, workspaceId: state.workspaceId, requestId, clientRequestId: requestId }),
+      });
+      if (!res.ok || !res.body) throw new Error("HTTP " + res.status);
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const frames = buffer.split("\n\n");
+        buffer = frames.pop();
+        for (const frame of frames) {
+          const line = frame.split("\n").find((l) => l.startsWith("data: "));
+          if (!line) continue;
+          const raw = line.slice(6);
+          if (raw === "[DONE]") continue;
+          let evt;
+          try { evt = JSON.parse(raw); } catch { continue; }
+
+          if (evt.type === "thought") {
+            assistantThought.summary.textContent = "🧠 " + evt.content;
+          } else if (evt.type === "token") {
+            acc += evt.content;
+            bodyEl.innerHTML = renderMarkdown(acc);
+            document.getElementById("chat-log").scrollTop = 1e9;
+          } else if (evt.type === "done") {
+            assistantThought.summary.textContent = `🧠 Thought Process — ${evt.iterations} itération(s)`;
+            assistantThought.details.open = false;
+            if (evt.traceId) await loadTraceIntoThought(assistantThought, evt.traceId);
+            appendImagesTo(assistantWrap, extractGeneratedImages(acc));
+            if (evt.pendingAction) handlePendingAction(evt.pendingAction);
+          } else if (evt.type === "error") {
+            bodyEl.innerHTML = renderMarkdown("⚠️ Erreur : " + evt.error);
+          }
+        }
+      }
+    } catch (err) {
+      bodyEl.innerHTML = renderMarkdown("⚠️ Connexion perdue : " + err.message);
+    } finally {
+      setChatDisabled(false);
+    }
+  }
+
+  function handlePendingAction(action) {
+    // Best-effort : le WS /ws/logs (pendingApprovals) reste la source de vérité pour le
+    // gating CRITICAL ; ceci ne fait qu'accélérer l'ouverture de la modale sans attendre
+    // le prochain instantané périodique.
+    if (action && action.riskLevel === "CRITICAL" && action.taskId) openGatingModal(action);
+  }
+
+  function setChatDisabled(disabled) {
+    document.getElementById("chat-input").disabled = disabled || !!state.pendingApprovalTaskId;
+    document.getElementById("send-btn").disabled = disabled || !!state.pendingApprovalTaskId;
+  }
+
+  document.getElementById("chat-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const val = document.getElementById("chat-input").value.trim();
+    if (!val || state.pendingApprovalTaskId) return;
+    sendMessage(val);
+  });
+  document.getElementById("chat-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      document.getElementById("chat-form").requestSubmit();
+    }
+  });
+
+  // ---------- Drag & drop upload ----------
+  async function ensureWorkspace() {
+    if (state.workspaceId) return state.workspaceId;
+    const res = await authFetch("/api/workspaces", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Dashboard Session " + new Date().toISOString() }),
+    });
+    const w = await res.json();
+    state.workspaceId = w.id;
+    return w.id;
+  }
+
+  async function uploadFile(file) {
+    const workspaceId = await ensureWorkspace();
+    const buf = await file.arrayBuffer();
+    const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+    const res = await authFetch("/api/workspaces/" + workspaceId + "/files", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: file.name, contentBase64: b64 }),
+    });
+    if (!res.ok) throw new Error("upload échoué");
+    const chip = document.createElement("span");
+    chip.className = "px-2 py-1 rounded bg-[#0b1120] border border-[var(--panel-border)]";
+    chip.textContent = "📎 " + file.name;
+    document.getElementById("pending-uploads").appendChild(chip);
+    const input = document.getElementById("chat-input");
+    input.value = (input.value ? input.value + "\n" : "") + `[Fichier joint : ${file.name}]`;
+  }
+
+  const centerPanel = document.querySelector("section.lg\\:col-span-6");
+  const dropOverlay = document.getElementById("drop-overlay");
+  ["dragenter", "dragover"].forEach((evt) =>
+    centerPanel.addEventListener(evt, (e) => { e.preventDefault(); dropOverlay.classList.remove("hidden"); dropOverlay.classList.add("flex"); }),
+  );
+  ["dragleave", "drop"].forEach((evt) =>
+    centerPanel.addEventListener(evt, (e) => { e.preventDefault(); dropOverlay.classList.add("hidden"); dropOverlay.classList.remove("flex"); }),
+  );
+  centerPanel.addEventListener("drop", (e) => {
+    const files = Array.from(e.dataTransfer.files || []);
+    files.forEach((f) => uploadFile(f).catch((err) => console.warn("upload failed", err)));
+  });
+
+  // ---------- Micro (WebSocket /ws/audio, PCM16LE 16kHz) ----------
+  function pcm16FromFloat32(float32, inRate, outRate) {
+    const ratio = inRate / outRate;
+    const outLength = Math.floor(float32.length / ratio);
+    const out = new Int16Array(outLength);
+    for (let i = 0; i < outLength; i++) {
+      const s = Math.max(-1, Math.min(1, float32[Math.floor(i * ratio)]));
+      out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    return out;
+  }
+
+  async function startMic() {
+    const token = getToken();
+    const params = new URLSearchParams({ sampleRateHz: "16000" });
+    if (token) params.set("token", token);
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${proto}://${location.host}/ws/audio?${params.toString()}`);
+    ws.binaryType = "arraybuffer";
+    state.audioWs = ws;
+    state.ttsChunks = [];
+
+    ws.onopen = () => setDot("dot-audio", true);
+    ws.onclose = () => setDot("dot-audio", false);
+    ws.onerror = () => setDot("dot-audio", false);
+    ws.onmessage = (ev) => {
+      if (typeof ev.data === "string") {
+        let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+        if (msg.type === "session") state.audioSessionId = msg.sessionId;
+        if (msg.type === "transcript") appendMessage("user", "🎙️ " + msg.text);
+        if (msg.type === "response_text") {
+          const wrap = appendMessage("assistant", msg.text);
+          appendImagesTo(wrap, extractGeneratedImages(msg.text));
+        }
+        if (msg.type === "turn_complete") flushTts();
+        if (msg.type === "error") console.warn("[audio]", msg.error);
+      } else {
+        state.ttsChunks.push(ev.data);
+      }
+    };
+
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new AudioCtx();
+    state.audioCtx = ctx;
+    const source = ctx.createMediaStreamSource(stream);
+    const processor = ctx.createScriptProcessor(4096, 1, 1);
+    source.connect(processor);
+    processor.connect(ctx.destination);
+    processor.onaudioprocess = (e) => {
+      if (!state.micActive || ws.readyState !== WebSocket.OPEN) return;
+      const input = e.inputBuffer.getChannelData(0);
+      const pcm16 = pcm16FromFloat32(input, ctx.sampleRate, 16000);
+      ws.send(pcm16.buffer);
+    };
+    state._micStream = stream;
+    state._micProcessor = processor;
+  }
+
+  function flushTts() {
+    // Meilleur effort : le format exact des chunks TTS dépend du provider webhook configuré
+    // côté serveur (voir src/voice/ttsProvider.ts) — audio/mpeg couvre le cas le plus courant.
+    if (!state.ttsChunks.length) return;
+    const blob = new Blob(state.ttsChunks, { type: "audio/mpeg" });
+    state.ttsChunks = [];
+    const audio = new Audio(URL.createObjectURL(blob));
+    audio.play().catch(() => {});
+  }
+
+  function stopMic() {
+    state.micActive = false;
+    if (state._micStream) state._micStream.getTracks().forEach((t) => t.stop());
+    if (state._micProcessor) state._micProcessor.disconnect();
+    if (state.audioCtx) state.audioCtx.close().catch(() => {});
+    if (state.audioWs) state.audioWs.close();
+    document.getElementById("mic-btn").classList.remove("recording");
+  }
+
+  document.getElementById("mic-btn").addEventListener("click", async () => {
+    if (state.micActive) { stopMic(); return; }
+    try {
+      state.micActive = true;
+      document.getElementById("mic-btn").classList.add("recording");
+      await startMic();
+    } catch (err) {
+      state.micActive = false;
+      document.getElementById("mic-btn").classList.remove("recording");
+      alert("Micro indisponible : " + err.message);
+    }
+  });
+
+  // ---------- Gating CRITIQUE (Vague 13C) ----------
+  function openGatingModal(op) {
+    state.pendingApprovalTaskId = op.taskId;
+    document.getElementById("gate-capability").textContent = op.capability || "—";
+    document.getElementById("gate-objective").textContent = op.objective || "—";
+    document.getElementById("gate-taskid").textContent = op.taskId || "—";
+    document.getElementById("gating-modal").classList.remove("hidden");
+    document.getElementById("gating-modal").classList.add("flex");
+    setChatDisabled(true);
+  }
+  function closeGatingModal() {
+    state.pendingApprovalTaskId = null;
+    document.getElementById("gating-modal").classList.add("hidden");
+    document.getElementById("gating-modal").classList.remove("flex");
+    setChatDisabled(false);
+  }
+  document.getElementById("gate-approve").addEventListener("click", async () => {
+    const taskId = state.pendingApprovalTaskId;
+    if (!taskId) return;
+    await authFetch(`/api/operations/${encodeURIComponent(taskId)}/respond`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "authorize", value: "APPROVE_CRITICAL" }),
+    });
+    closeGatingModal();
+  });
+  document.getElementById("gate-reject").addEventListener("click", async () => {
+    const taskId = state.pendingApprovalTaskId;
+    if (!taskId) return;
+    await authFetch(`/api/operations/${encodeURIComponent(taskId)}/respond`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "reject" }),
+    });
+    closeGatingModal();
+  });
+
+  // ---------- Panneau Contexte : MCP, mémoire, budget ----------
+  async function refreshContextPanel() {
+    try {
+      const [ctxRes, mcpRes, memRes] = await Promise.all([
+        authFetch("/api/context/usage"),
+        authFetch("/api/mcp/servers"),
+        authFetch("/api/memory"),
+      ]);
+      if (ctxRes.ok) {
+        const ctx = await ctxRes.json();
+        const pct = ctx.tokenBudget ? Math.min(100, Math.round((ctx.usedTokens / ctx.tokenBudget) * 100)) : 0;
+        document.getElementById("ctx-bar").style.width = pct + "%";
+        document.getElementById("ctx-numbers").textContent = `${ctx.usedTokens} / ${ctx.tokenBudget} tok`;
+        document.getElementById("ctx-pieces").textContent = `${ctx.piecesKept} pièce(s) gardée(s), ${ctx.piecesDropped} écartée(s)`;
+      }
+      if (mcpRes.ok) {
+        const { servers } = await mcpRes.json();
+        const list = document.getElementById("mcp-list");
+        list.innerHTML = "";
+        (servers || []).forEach((s) => {
+          const li = document.createElement("li");
+          li.className = "flex items-center gap-2";
+          const ok = s.connected || s.status === "connected";
+          li.innerHTML = `<i class="dot ${ok ? "dot-ok" : "dot-bad"}"></i><span>${s.name || s.id}</span> <span class="text-[var(--text-1)]">(${(s.tools || []).length || 0} outils)</span>`;
+          list.appendChild(li);
+        });
+      }
+      if (memRes.ok) {
+        const mem = await memRes.json();
+        const list = document.getElementById("memory-list");
+        list.innerHTML = "";
+        (mem.facts || []).slice(0, 60).forEach((f) => {
+          const li = document.createElement("li");
+          li.className = "border-b border-[var(--panel-border)]/50 pb-1";
+          li.innerHTML = `<span class="text-[var(--accent)]">${f.entity}</span>.<span class="text-[var(--text-1)]">${f.attribute}</span> = ${f.value}`;
+          list.appendChild(li);
+        });
+      }
+    } catch {
+      // best-effort — le dashboard doit rester utilisable même sans backend joignable.
+    }
+  }
+
+  // ---------- Planner tree ----------
+  const NODE_ICON = { pending: "☐", in_progress: "⏳", done: "✅", abandoned: "🗑️", cancelled: "❌", failed: "❌" };
+  async function renderPlannerTree(plans) {
+    const container = document.getElementById("planner-tree");
+    container.innerHTML = "";
+    const active = (plans || []).slice(0, 5);
+    for (const run of active) {
+      const box = document.createElement("div");
+      box.className = "border border-[var(--panel-border)] rounded p-2";
+      const title = document.createElement("div");
+      title.className = "mono text-[11px] flex justify-between";
+      title.innerHTML = `<span>${(run.objective || run.id).slice(0, 40)}</span><span class="text-[var(--text-1)]">${run.status}</span>`;
+      box.appendChild(title);
+      if (run.rollbackCount > 0) {
+        const rb = document.createElement("div");
+        rb.className = "text-[10px] text-[var(--warn)] mono";
+        rb.textContent = `↺ ${run.rollbackCount} rollback(s)`;
+        box.appendChild(rb);
+      }
+      try {
+        const res = await authFetch("/api/plans/" + run.id + "/nodes");
+        if (res.ok) {
+          const nodes = await res.json();
+          const ul = document.createElement("ul");
+          ul.className = "mt-1 flex flex-col gap-0.5";
+          nodes.slice(0, 12).forEach((n) => {
+            const li = document.createElement("li");
+            li.className = "text-[11px] mono";
+            li.textContent = `${NODE_ICON[n.status] || "•"} ${n.title}`;
+            ul.appendChild(li);
+          });
+          box.appendChild(ul);
+        }
+      } catch {}
+      container.appendChild(box);
+    }
+  }
+
+  // ---------- Financial circuit breaker ----------
+  function renderBreaker(cb) {
+    if (!cb) return;
+    const pct = cb.limitUsd ? Math.min(100, Math.round((cb.windowCostUsd / cb.limitUsd) * 100)) : 0;
+    document.getElementById("breaker-bar").style.width = pct + "%";
+    document.getElementById("breaker-numbers").textContent = `$${cb.windowCostUsd.toFixed(4)} / $${cb.limitUsd.toFixed(2)} (fenêtre ${Math.round(cb.windowMs / 60000)}min)`;
+    document.getElementById("breaker-banner").classList.toggle("hidden", !cb.tripped);
+    document.getElementById("btn-rearm").classList.toggle("hidden", !cb.tripped);
+  }
+  document.getElementById("btn-rearm").addEventListener("click", async () => {
+    await authFetch("/api/circuit-breaker/rearm", { method: "POST" });
+  });
+
+  // ---------- Activity log ----------
+  function renderActivity(items) {
+    const list = document.getElementById("activity-list");
+    list.innerHTML = "";
+    (items || []).slice(-40).reverse().forEach((it) => {
+      const li = document.createElement("li");
+      li.className = "border-b border-[var(--panel-border)]/40 pb-0.5";
+      const ts = it.timestamp ? new Date(it.timestamp).toLocaleTimeString() : "";
+      li.textContent = `[${ts}] ${it.event_type || it.eventType || ""} ${it.message || ""}`.trim();
+      list.appendChild(li);
+    });
+  }
+
+  // ---------- WebSocket /ws/logs ----------
+  function connectLogsWs() {
+    const token = getToken();
+    const params = new URLSearchParams();
+    if (token) params.set("token", token);
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${proto}://${location.host}/ws/logs?${params.toString()}`);
+    ws.onopen = () => setDot("dot-logs", true);
+    ws.onclose = () => { setDot("dot-logs", false); setTimeout(connectLogsWs, 4000); };
+    ws.onerror = () => setDot("dot-logs", false);
+    ws.onmessage = (ev) => {
+      let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+      if (msg.type === "snapshot") {
+        renderBreaker(msg.circuitBreaker);
+        renderActivity(msg.activity);
+        renderPlannerTree(msg.plans);
+        if (msg.contextBudget) {
+          const ctx = msg.contextBudget;
+          const pct = ctx.tokenBudget ? Math.min(100, Math.round((ctx.usedTokens / ctx.tokenBudget) * 100)) : 0;
+          document.getElementById("ctx-bar").style.width = pct + "%";
+          document.getElementById("ctx-numbers").textContent = `${ctx.usedTokens} / ${ctx.tokenBudget} tok`;
+        }
+        if (msg.pendingApprovals && msg.pendingApprovals.length && !state.pendingApprovalTaskId) {
+          openGatingModal(msg.pendingApprovals[0]);
+        } else if ((!msg.pendingApprovals || !msg.pendingApprovals.length) && state.pendingApprovalTaskId) {
+          closeGatingModal();
+        }
+      } else if (msg.type === "autonomy_event") {
+        const li = document.createElement("li");
+        li.className = "border-b border-[var(--panel-border)]/40 pb-0.5 text-[var(--accent-3)]";
+        li.textContent = `[event] ${msg.event.type} — ${msg.event.source}`;
+        const list = document.getElementById("activity-list");
+        list.insertBefore(li, list.firstChild);
+      }
+    };
+  }
+
+  // ---------- Boot ----------
+  connectLogsWs();
+  refreshContextPanel();
+  setInterval(refreshContextPanel, 15000);
+  appendMessage("assistant", "Interface Command Center prête. Comment puis-je t'aider ?");
+})();
+</script>
+</body>
+</html>

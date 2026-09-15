@@ -300,4 +300,26 @@ export const config = {
     fcmWebhookUrl: process.env.ANDROID_FCM_WEBHOOK_URL || "",
     fcmWebhookToken: process.env.ANDROID_FCM_WEBHOOK_TOKEN || "",
   },
+  /**
+   * Vague 12A : génération d'images (ComfyUI local ou provider cloud FLUX). "comfyui" cible
+   * une instance ComfyUI locale/distante déjà démarrée (aucun lancement automatique du
+   * process) ; "together" appelle l'API Together AI (modèle FLUX.1-dev par défaut).
+   */
+  image: {
+    provider: (process.env.IMAGE_PROVIDER as "comfyui" | "together") || "comfyui",
+    defaultWidth: int(process.env.IMAGE_DEFAULT_WIDTH, 1024),
+    defaultHeight: int(process.env.IMAGE_DEFAULT_HEIGHT, 1024),
+    defaultSteps: int(process.env.IMAGE_DEFAULT_STEPS, 20),
+    timeoutMs: int(process.env.IMAGE_GENERATION_TIMEOUT_MS, 120_000),
+    comfyUi: {
+      baseUrl: stripTrailingSlash(process.env.COMFYUI_BASE_URL || "http://127.0.0.1:8188"),
+      workflowTemplatePath: process.env.COMFYUI_WORKFLOW_TEMPLATE_PATH || "./config/comfyui-workflow-template.json",
+      checkpoint: process.env.COMFYUI_CHECKPOINT || "flux1-dev-fp8.safetensors",
+    },
+    together: {
+      apiKey: process.env.TOGETHER_API_KEY || "",
+      baseUrl: stripTrailingSlash(process.env.TOGETHER_BASE_URL || "https://api.together.xyz"),
+      model: process.env.TOGETHER_IMAGE_MODEL || "black-forest-labs/FLUX.1-dev",
+    },
+  },
 };

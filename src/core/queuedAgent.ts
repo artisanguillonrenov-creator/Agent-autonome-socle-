@@ -14,11 +14,11 @@ export class QueuedAgent extends Agent {
     super(opts);
   }
 
-  override step(userInput: string, workspaceOrContext?: string | AgentExecutionContext): Promise<AgentStepResult> {
+  override step(userInput: string, workspaceOrContext?: string | AgentExecutionContext, chatRequestId?: string): Promise<AgentStepResult> {
     if (typeof workspaceOrContext === "object") {
-      return super.step(userInput, workspaceOrContext);
+      return super.step(userInput, workspaceOrContext, chatRequestId);
     }
-    return this.ingressQueue.run(() => super.step(userInput, workspaceOrContext));
+    return this.ingressQueue.run(() => super.step(userInput, workspaceOrContext, chatRequestId));
   }
 
   override regenerateLastResponse(context?: AgentExecutionContext, targetMessageId?: string): Promise<{ response: string }> {

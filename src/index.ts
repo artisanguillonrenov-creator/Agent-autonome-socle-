@@ -26,6 +26,8 @@ import { AutonomyPlanner } from "./autonomy/planner.js";
 import { Heartbeat } from "./autonomy/heartbeat.js";
 import { AudioStreamManager } from "./voice/audioStreamManager.js";
 import { startAutonomyWatchers } from "./autonomy/watchers.js";
+import { WsLogsChannel } from "./interfaces/wsLogsChannel.js";
+import { WsUpgradeRouter } from "./interfaces/wsRouter.js";
 
 async function main(): Promise<void> {
   registerChantier10Settings();
@@ -133,8 +135,20 @@ async function main(): Promise<void> {
 
     // Vague 9A/9B/9C : streaming audio bidirectionnel (WebSocket), désactivé par défaut
     // (AUDIO_STREAMING_ENABLED=true requis) — n'affecte jamais le chat texte existant.
+    // Vague 13A : un seul routeur d'upgrade WebSocket partagé entre tous les canaux
+    // (/ws/audio, chemin audio legacy, /ws/logs) — voir wsRouter.ts pour la raison pour
+    // laquelle plusieurs WebSocketServer indépendants sur le même http.Server ne peuvent pas
+    // coexister via `{ server, path }`.
+    const wsRouter = new WsUpgradeRouter();
+    wsRouter.attach(server);
+
     const audioStreamManager = config.audio.enabled ? new AudioStreamManager(agent) : undefined;
-    audioStreamManager?.attach(server);
+    audioStreamManager?.attach(wsRouter);
+
+    // Vague 13A : canal WebSocket /ws/logs (dashboard) — toujours actif dès que l'interface
+    // HTTP l'est, indépendamment du streaming audio (AUDIO_STREAMING_ENABLED).
+    const wsLogsChannel = new WsLogsChannel(agent);
+    wsLogsChannel.attach(wsRouter);
 
     // Vague 11A : observateurs d'état (fichiers du Document Workbench, cycle de vie des
     // conteneurs sandbox) — best-effort, ne bloque jamais le démarrage.
@@ -149,6 +163,8 @@ async function main(): Promise<void> {
       retentionScheduler.stop();
       autonomyWatchers.dispose();
       audioStreamManager?.dispose();
+      wsLogsChannel.dispose();
+      wsRouter.dispose();
       webConversationRuntime.dispose();
       conversationRuntime.dispose();
       voiceRuntime.dispose();
