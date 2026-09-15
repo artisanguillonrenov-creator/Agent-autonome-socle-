@@ -1,7 +1,3 @@
-The user wants to modify `android/app/build.gradle`.
-Current content has `versionCode 10` and `versionName "1.1.0"`.
-Instructions say: "Lire le fichier actuel sur main (versionCode 10, versionName "1.1.0"). Incrémenter versionCode à 97 et versionName à "0.1.97" pour que l'APK soit considéré comme mis à jour par rapport au build 96. Supprimer tout le texte parasite (thinking process, 
-
 apply plugin: 'com.android.application'
 
 android {
