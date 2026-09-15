@@ -1,12 +1,13 @@
 import { config } from "../../config.js";
-import { runJavaScript } from "../../execution/sandbox.js";
+import { runInSandbox } from "../../execution/sandbox.js";
 import type { SkillDefinition } from "../../types.js";
 
 export const executeCodeSkill: SkillDefinition = {
   name: "execute_code",
   description: config.codeExecution.enabled
-    ? "Exécute du code JavaScript (Node.js) et renvoie stdout/stderr. Isolation légère seulement " +
-      "(pas un vrai bac à sable) : réservé à du code de confiance."
+    ? "Exécute du code JavaScript (Node.js) et renvoie stdout/stderr, isolé dans un conteneur " +
+      "Docker éphémère (ou la sandbox managée E2B si configurée) : sans accès réseau ni au " +
+      "système hôte par défaut."
     : "Exécution de code — désactivée. Active ENABLE_CODE_EXECUTION=true dans .env pour l'utiliser " +
       "(capacité sensible en sécurité).",
   argsHint: '{"code": string}',
@@ -26,7 +27,7 @@ export const executeCodeSkill: SkillDefinition = {
     const code = String(input.code ?? "");
     if (!code.trim()) return "Erreur: le champ code est requis.";
 
-    const result = await runJavaScript(code, config.codeExecution.timeoutMs);
+    const result = await runInSandbox(code, config.codeExecution.timeoutMs);
     if (result.timedOut) {
       return `Exécution interrompue après ${config.codeExecution.timeoutMs}ms (timeout).`;
     }

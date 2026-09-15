@@ -286,6 +286,24 @@ export function getDb(): Database.Database {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_jarvis00_mission_events_seq ON jarvis00_mission_events(mission_id, sequence);
 
+    -- Brique mémoire relationnelle (5ème couche) : triplets (Sujet, Prédicat, Objet)
+    -- extraits par le module de réflexion, croisés avec la recherche vectorielle (voir
+    -- src/memory/graphMemory.ts et src/memory/memoryManager.ts::retrieve).
+    CREATE TABLE IF NOT EXISTS knowledge_graph_triples (
+      id TEXT PRIMARY KEY,
+      subject TEXT NOT NULL,
+      predicate TEXT NOT NULL,
+      object TEXT NOT NULL,
+      confidence REAL NOT NULL DEFAULT 1,
+      source TEXT,
+      workspace_id TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_kg_triples_subject ON knowledge_graph_triples(subject);
+    CREATE INDEX IF NOT EXISTS idx_kg_triples_object ON knowledge_graph_triples(object);
+    CREATE INDEX IF NOT EXISTS idx_kg_triples_workspace ON knowledge_graph_triples(workspace_id);
+
     CREATE TABLE IF NOT EXISTS jarvis00_context_versions (
       mission_id TEXT NOT NULL,
       trace_id TEXT NOT NULL,

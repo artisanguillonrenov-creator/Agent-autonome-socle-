@@ -40,6 +40,8 @@ import { connectMcpServers as bridgeMcpServers, closeMcpClients, type McpConnect
 import type { McpClient } from "../skills/mcp/mcpClient.js";
 
 const LEGACY_CONVERSATION_ID = "__legacy__";
+/** Auto-correction des erreurs d'outils (VAGUE 5) : plafond strict d'essais consécutifs avant de forcer une réponse finale sans outil. */
+const MAX_CONSECUTIVE_TOOL_FAILURES = 3;
 
 export interface AgentOptions {
   llm: LLMProvider;
@@ -172,6 +174,13 @@ export class Agent {
     let finalResponse = "";
     let lastActionOrStep = "Initialisation du cycle";
     let pendingAction: AgentStepResult["pendingAction"];
+    // Auto-correction des erreurs d'outils (VAGUE 5) : un échec (JSON invalide, outil
+    // indisponible, crash du handler) ne coupe jamais la boucle — l'erreur est réinjectée
+    // comme message d'outil et le LLM réitère immédiatement au tour suivant. Au-delà de
+    // MAX_CONSECUTIVE_TOOL_FAILURES échecs consécutifs, les outils sont retirés du tour
+    // suivant pour forcer une réponse finale plutôt que de boucler indéfiniment.
+    let consecutiveToolFailures = 0;
+    let suppressToolsNextTurn = false;
 
     const recordIntermediate = async (message: ChatMessage): Promise<void> => {
       if (durableContext) await this.memory.recordIntermediateTurn(message, durableContext);
@@ -210,6 +219,7 @@ export class Agent {
           ...(personalityInstructions ? [{ label: "Personnalité", content: personalityInstructions, priority: 110 }] : []),
           { label: "Faits connus", content: retrieved.facts.join("\n"), priority: 80 },
           { label: "Réflexions passées", content: reflections.map((memory) => memory.text).join("\n"), priority: 70 },
+          { label: "Relations connues (graphe)", content: retrieved.graphFacts.join("\n"), priority: 65 },
           { label: "Souvenirs pertinents", content: episodic.map((memory) => memory.text).join("\n"), priority: 50 },
         ],
         effectiveInputBudget,
@@ -244,11 +254,11 @@ export class Agent {
           const res = await completeWithLocalPriority(
             roleProvider,
             messages,
-            withGenerationDefaults({ tools: toolDefinitions.length > 0 ? toolDefinitions : undefined }),
+            withGenerationDefaults({ tools: !suppressToolsNextTurn && toolDefinitions.length > 0 ? toolDefinitions : undefined }),
           );
           const inputTokens = estimateTokens(messages.map((m) => (typeof m.content === "string" ? m.content : "")).join("\n"));
           const outputTokens = estimateTokens(res.content ?? "");
-          span.setTokens(inputTokens + outputTokens);
+          span.setUsage(inputTokens, outputTokens);
           span.setCost(estimateCostUsd(roleProvider.model, inputTokens, outputTokens));
           span.setOutputs({
             contentPreview: (res.content ?? "").slice(0, 300),
@@ -273,6 +283,7 @@ export class Agent {
         for (const toolCall of nativeToolCalls) {
           const skillName = toolCall.function?.name;
           if (!skillName || !availableSkillNames.has(skillName)) {
+            consecutiveToolFailures += 1;
             await recordIntermediate({
               role: "tool",
               name: skillName || "unavailable_tool",
@@ -287,47 +298,73 @@ export class Agent {
             const parsed = JSON.parse(toolCall.function?.arguments || "{}");
             if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) parsedInput = parsed as Record<string, unknown>;
           } catch (err) {
-            const errorResult = `Erreur : Arguments JSON invalides pour l'outil "${skillName}": ${(err as Error).message}`;
+            consecutiveToolFailures += 1;
+            const errorResult = `Erreur outil ${skillName} : arguments JSON invalides (${(err as Error).message}).`;
             console.error(`[Agent] ${errorResult}`);
             await recordIntermediate({ role: "tool", name: skillName, toolCallId: toolCall.id || "call_unknown", content: errorResult });
             continue;
           }
 
           lastActionOrStep = `Appel outil natif: ${skillName}`;
-          const context = {
-            rememberFact: (entity: string, attribute: string, value: string) => this.memory.facts.set(entity, attribute, value),
-            // Enveloppe légère : ne change que le traceId par défaut d'un dispatch (regroupe
-            // toutes les opérations de ce tour sous turnTraceId pour la corrélation côté
-            // client), sans dupliquer l'état de l'Orchestrator ni son API complète. Les skills
-            // qui ferment sur le ServiceOrchestrator d'origine (src/skills/runtime.ts) ne
-            // passent pas par cette enveloppe : elles lisent `traceId` ci-dessous directement.
-            serviceOrchestrator: {
-              registry: this.serviceOrchestrator.registry,
-              dispatchCapability: (
-                decision: Parameters<ServiceOrchestrator["dispatchCapability"]>[0],
-                opts?: Parameters<ServiceOrchestrator["dispatchCapability"]>[1],
-              ) => this.serviceOrchestrator.dispatchCapability(decision, { traceId: turnTraceId, ...opts }),
-            },
-            planner: this.planner,
-            skillRegistry: this.skills,
-            agentTeamCoordinator: this.multiAgent,
-            toolCallId: toolCall.id,
-            traceId: turnTraceId,
-          };
-          const result = await this.skills.execute(skillName, parsedInput, context);
-          const exactPending = this.pendingActionFromToolResult(result);
-          if (exactPending) pendingAction = exactPending;
-          if (durableContext?.personalityPolicy) {
-            Object.assign(
-              durableContext.personalityPolicy,
-              refinePolicyAfterToolResult(durableContext.personalityPolicy, result, exactPending),
-            );
+          // Auto-correction des erreurs d'outils (VAGUE 5) : ce bloc englobe toute
+          // l'exécution de la compétence (construction du contexte incluse) — un crash
+          // inattendu (paramètre manquant non détecté plus haut, exception du handler...)
+          // ne coupe jamais la boucle : l'erreur est formatée explicitement et réinjectée
+          // comme message d'outil, pour que le LLM se corrige au tour suivant.
+          try {
+            const context = {
+              rememberFact: (entity: string, attribute: string, value: string) => this.memory.facts.set(entity, attribute, value),
+              // Enveloppe légère : ne change que le traceId par défaut d'un dispatch (regroupe
+              // toutes les opérations de ce tour sous turnTraceId pour la corrélation côté
+              // client), sans dupliquer l'état de l'Orchestrator ni son API complète. Les skills
+              // qui ferment sur le ServiceOrchestrator d'origine (src/skills/runtime.ts) ne
+              // passent pas par cette enveloppe : elles lisent `traceId` ci-dessous directement.
+              serviceOrchestrator: {
+                registry: this.serviceOrchestrator.registry,
+                dispatchCapability: (
+                  decision: Parameters<ServiceOrchestrator["dispatchCapability"]>[0],
+                  opts?: Parameters<ServiceOrchestrator["dispatchCapability"]>[1],
+                ) => this.serviceOrchestrator.dispatchCapability(decision, { traceId: turnTraceId, ...opts }),
+              },
+              planner: this.planner,
+              skillRegistry: this.skills,
+              agentTeamCoordinator: this.multiAgent,
+              toolCallId: toolCall.id,
+              traceId: turnTraceId,
+            };
+            const result = await this.skills.execute(skillName, parsedInput, context);
+            const isToolError = /^Erreur\b/i.test(result);
+            consecutiveToolFailures = isToolError ? consecutiveToolFailures + 1 : 0;
+            const exactPending = this.pendingActionFromToolResult(result);
+            if (exactPending) pendingAction = exactPending;
+            if (durableContext?.personalityPolicy) {
+              Object.assign(
+                durableContext.personalityPolicy,
+                refinePolicyAfterToolResult(durableContext.personalityPolicy, result, exactPending),
+              );
+            }
+            await recordIntermediate({
+              role: "tool",
+              name: skillName,
+              toolCallId: toolCall.id || "call_unknown",
+              content: `[Résultat de l'outil '${skillName}']: ${result}`,
+            });
+          } catch (err) {
+            consecutiveToolFailures += 1;
+            const errorResult = `Erreur outil ${skillName} : échec inattendu de l'exécution (${(err as Error).message}).`;
+            console.error(`[Agent] ${errorResult}`);
+            await recordIntermediate({ role: "tool", name: skillName, toolCallId: toolCall.id || "call_unknown", content: errorResult });
           }
+        }
+
+        if (consecutiveToolFailures >= MAX_CONSECUTIVE_TOOL_FAILURES) {
+          suppressToolsNextTurn = true;
           await recordIntermediate({
-            role: "tool",
-            name: skillName,
-            toolCallId: toolCall.id || "call_unknown",
-            content: `[Résultat de l'outil '${skillName}']: ${result}`,
+            role: "user",
+            content:
+              `[SYSTÈME] ${MAX_CONSECUTIVE_TOOL_FAILURES} échecs d'outils consécutifs ont été atteints. ` +
+              "N'appelle plus aucun outil : réponds directement avec les informations dont tu disposes déjà, " +
+              "ou explique clairement à l'utilisateur ce qui bloque.",
           });
         }
         continue;
