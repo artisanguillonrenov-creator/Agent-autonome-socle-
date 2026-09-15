@@ -155,7 +155,7 @@ export class ContextVersionError extends Error {
 }
 export interface N8nIntakePayload {
   schema_version: number;
-  mission_id?: string;
+  mission_id: string;
   trace_id: string;
   project_id: string;
   status: MissionStatus;
