@@ -1,7 +1,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import type { AgentProfileDefinition } from "./types.js";
 
-const MODEL_ROLES = new Set(["coding", "research", "utility"]);
+// Doit rester synchronisé avec ModelRole (src/llm/modelRouter.ts) : un profil déclarant un
+// llmRole valide selon ce type (ex: "reasoning", utilisé par les profils reviewer/self_improver
+// de config/agent-profiles.json.example) ne doit jamais être silencieusement rejeté ici.
+const MODEL_ROLES = new Set(["coding", "research", "utility", "reasoning", "fast"]);
 
 /**
  * Trois profils par défaut couvrant le cycle recherche → rédaction → révision,

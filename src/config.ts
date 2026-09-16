@@ -152,6 +152,16 @@ export const config = {
   background: { maxConcurrent: Math.min(int(process.env.BACKGROUND_MAX_CONCURRENT, 3), 8) },
   reflection: {
     everyNSteps: int(process.env.REFLECTION_EVERY_N_STEPS, 8),
+    /**
+     * Auto-critique structurée (score 0-1 émis par le LLM de réflexion) : en-dessous de ce
+     * seuil, l'évolution de prompt (promptEvolver) est déclenchée même en l'absence de
+     * correction de self-healing détectée par pattern — la trajectoire récente est jugée
+     * insatisfaisante par le modèle lui-même, pas seulement par une regex.
+     */
+    selfCritiqueMinScore: (() => {
+      const n = Number(process.env.REFLECTION_SELF_CRITIQUE_MIN_SCORE);
+      return Number.isFinite(n) && n >= 0 && n <= 1 ? n : 0.5;
+    })(),
   },
   context: {
     tokenBudget: int(process.env.CONTEXT_TOKEN_BUDGET, 4000),
@@ -176,6 +186,20 @@ export const config = {
     knowledgeRag: false,
     autoIndexing: false,
     memoryRetentionDays: 30,
+  },
+  /**
+   * Rétention du graphe de connaissances (GraphMemory) : contrairement à la mémoire
+   * épisodique (projects.memoryRetentionDays), un triplet n'est jamais purgé par simple
+   * ancienneté — seuls les triplets à la fois anciens (non renforcés depuis
+   * graphRetentionDays) ET peu fiables (confidence < graphRetentionMaxConfidence) sont
+   * balayés. Désactivé par défaut (0 = no-op) pour ne changer aucun comportement existant.
+   */
+  memory: {
+    graphRetentionDays: int(process.env.MEMORY_GRAPH_RETENTION_DAYS, 0),
+    graphRetentionMaxConfidence: (() => {
+      const n = Number(process.env.MEMORY_GRAPH_RETENTION_MAX_CONFIDENCE);
+      return Number.isFinite(n) && n >= 0 && n <= 1 ? n : 0.4;
+    })(),
   },
   activity: {
     logLevel: "NORMAL" as "NORMAL" | "DETAILED" | "DEBUG",

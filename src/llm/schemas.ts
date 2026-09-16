@@ -31,6 +31,28 @@ export function planStepsArraySchema(maxSteps: number) {
 export type PlanStepZod = z.infer<typeof planStepSpecSchema>;
 
 /**
+ * Décomposition hiérarchique (façon LangGraph) : un step peut porter `sub_steps`, une
+ * liste imbriquée de steps de même forme — voir flattenHierarchicalSteps
+ * (src/planning/planner.ts) qui les aplatit en DAG plat avant les vérifications
+ * sémantiques existantes (validatePlanSteps). La profondeur est bornée à l'exécution
+ * (MAX_DECOMPOSITION_DEPTH), pas ici : z.lazy() ne peut pas exprimer une limite de
+ * profondeur au niveau du schéma.
+ */
+export interface HierarchicalPlanStepZod extends PlanStepZod {
+  sub_steps?: HierarchicalPlanStepZod[];
+}
+
+export const hierarchicalPlanStepSpecSchema: z.ZodType<HierarchicalPlanStepZod> = z.lazy(() =>
+  planStepSpecSchema.extend({
+    sub_steps: z.array(hierarchicalPlanStepSpecSchema).max(20).optional(),
+  }),
+);
+
+export function hierarchicalPlanStepsArraySchema(maxSteps: number) {
+  return z.array(hierarchicalPlanStepSpecSchema).min(1).max(maxSteps);
+}
+
+/**
  * Convertisseur minimal SkillParameterSchema (JSON-Schema-like, déjà utilisé pour décrire
  * les outils au LLM) -> schéma Zod. Couvre les formes réellement utilisées par les skills
  * du socle (string/number/integer/boolean/array/object, enum, required,

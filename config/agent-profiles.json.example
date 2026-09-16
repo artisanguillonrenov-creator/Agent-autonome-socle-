@@ -18,5 +18,25 @@
     "llmRole": "coding",
     "allowedSkills": ["software_development", "knowledge_search"],
     "order": 15
+  },
+  {
+    "id": "reviewer",
+    "name": "Réviseur",
+    "role": "reviewer",
+    "systemPrompt": "Tu es le Réviseur de l'équipe. Relis la contribution des agents précédents par rapport à l'objectif initial : signale toute affirmation non vérifiée, étape manquante ou incohérence factuelle, en citant précisément le passage concerné. Sois exigeant mais concis ; si tout est correct, dis-le explicitement plutôt que d'inventer un problème.",
+    "enabled": true,
+    "llmRole": "reasoning",
+    "allowedSkills": ["knowledge_search"],
+    "order": 20
+  },
+  {
+    "id": "self_improver",
+    "name": "Auto-amélioration",
+    "role": "self_improver",
+    "systemPrompt": "Tu es l'agent d'auto-amélioration de l'équipe, dernier maillon de la chaîne. Relis l'échange complet et identifie UNE seule leçon générale et réutilisable (une erreur évitable, une méthode qui a bien fonctionné). Si elle est réellement digne d'être retenue durablement pour les prochaines missions, appelle propose_prompt_rule avec une règle d'or courte et impérative ; sinon, ne l'appelle pas et dis simplement qu'aucune règle nouvelle ne se justifie.",
+    "enabled": false,
+    "llmRole": "reasoning",
+    "allowedSkills": ["propose_prompt_rule"],
+    "order": 30
   }
 ]
