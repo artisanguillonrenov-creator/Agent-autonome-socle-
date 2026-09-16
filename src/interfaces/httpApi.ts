@@ -2176,20 +2176,21 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
 
       // 14. Checkpoints Endpoints
       if (req.method === "GET" && (pathname === "/checkpoints" || pathname === "/api/checkpoints")) {
-        sendJson(res, 200, agent.listCheckpoints());
+        sendJson(res, 200, agent.listCheckpoints(parsedUrl.searchParams.get("workspaceId") || undefined));
         return;
       }
 
       if (req.method === "POST" && (pathname === "/checkpoints" || pathname === "/api/checkpoints")) {
-        const body = JSON.parse((await readBody(req)) || "{}") as { label?: string };
-        sendJson(res, 200, { id: agent.saveCheckpoint(body.label || `checkpoint-${Date.now()}`) });
+        const body = JSON.parse((await readBody(req)) || "{}") as { label?: string; workspaceId?: string };
+        sendJson(res, 200, { id: agent.saveCheckpoint(body.label || `checkpoint-${Date.now()}`, undefined, body.workspaceId) });
         return;
       }
 
       if (req.method === "POST" && pathname.includes("/checkpoints/") && pathname.endsWith("/restore")) {
         const parts = pathname.split("/");
         const id = parts[parts.length - 2];
-        const ok = agent.restoreCheckpoint(id);
+        const body = JSON.parse((await readBody(req)) || "{}") as { workspaceId?: string };
+        const ok = agent.restoreCheckpoint(id, body.workspaceId);
         sendJson(res, ok ? 200 : 404, { ok });
         return;
       }

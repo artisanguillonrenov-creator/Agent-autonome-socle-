@@ -389,11 +389,12 @@ export function getDb(): Database.Database {
     (db.pragma("table_info(checkpoints)") as Array<{ name: string }>).map((column) => column.name),
   );
   const missingCheckpointColumns: Record<string, string> = {
-    kind: "TEXT NOT NULL DEFAULT 'AGENT_STATE'", scope_id: "TEXT", schema_version: "INTEGER NOT NULL DEFAULT 1",
+    kind: "TEXT NOT NULL DEFAULT 'AGENT_STATE'", scope_id: "TEXT", schema_version: "INTEGER NOT NULL DEFAULT 1", workspace_id: "TEXT",
   };
   for (const [column, definition] of Object.entries(missingCheckpointColumns)) {
     if (!checkpointColumns.has(column)) db.exec(`ALTER TABLE checkpoints ADD COLUMN ${column} ${definition}`);
   }
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_checkpoints_workspace ON checkpoints(workspace_id)`);
 
   const connectionColumns = new Set(
     (db.pragma("table_info(service_connections)") as Array<{ name: string }>).map((column) => column.name),
