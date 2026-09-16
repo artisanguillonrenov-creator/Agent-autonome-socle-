@@ -8,6 +8,9 @@ Command Center : voir [Au-delà des 9 briques](#au-delà-des-9-briques)
 ci-dessous pour l'ampleur réelle du projet (Software Factory, bureaux
 métier, personnalité, voix, repository intelligence).
 
+Avant de modifier ce dépôt avec Claude Code, lire [`CLAUDE.md`](./CLAUDE.md)
+(conventions de code, commandes, frontières architecturales à respecter).
+
 ## Principes
 
 - **LLM-agnostique** : Anthropic, OpenAI, OpenRouter, Ollama, Infermatic ou un fournisseur `mock`
