@@ -9,6 +9,14 @@ import { maybeEvolvePrompt } from "./promptEvolver.js";
 const LEGACY_CONVERSATION_ID = "__legacy__";
 /** Sépare le résumé en prose (retourné/stocké tel quel) du bloc JSON de triplets, dans la même réponse LLM. */
 const GRAPH_TRIPLES_MARKER = "###TRIPLES###";
+/** Sépare le résumé en prose du bloc JSON d'auto-critique structurée, dans la même réponse LLM. */
+const CRITIQUE_MARKER = "###CRITIQUE###";
+
+export interface SelfCritique {
+  /** 0 = échec complet, 1 = objectif pleinement atteint sans erreur. */
+  score: number;
+  issues: string[];
+}
 
 /** Brique 3 : réflexion périodique, désormais isolée par conversation chaude. */
 export class ReflectionEngine {
@@ -96,7 +104,10 @@ export class ReflectionEngine {
               `Ensuite, sur une ligne séparée, écris exactement ${GRAPH_TRIPLES_MARKER} suivi d'un tableau JSON strict ` +
               'de triplets factuels (Sujet, Prédicat, Objet) extraits de cet échange : [{"subject":"...","predicate":"...","object":"..."}] ' +
               "(maximum 8, [] si aucun fait exploitable, uniquement des faits explicites et fiables). " +
-              "N'écris rien après ce tableau JSON.",
+              `Enfin, sur une nouvelle ligne séparée, écris exactement ${CRITIQUE_MARKER} suivi d'un objet JSON strict ` +
+              'd\'auto-critique de cet échange : {"score": 0 à 1 (1 = objectif pleinement atteint sans erreur ni ' +
+              'répétition, 0 = échec complet), "issues": string[] (problèmes concrets observés, [] si aucun)}. ' +
+              "N'écris rien après cet objet JSON.",
           },
           { role: "user", content: transcript },
         ],
@@ -106,19 +117,49 @@ export class ReflectionEngine {
       return res;
     });
     const rawContent = typeof rawInsight === "string" ? rawInsight : rawInsight.content ?? "";
-    const markerIndex = rawContent.indexOf(GRAPH_TRIPLES_MARKER);
-    const insight = markerIndex === -1 ? rawContent : rawContent.slice(0, markerIndex).trim();
-    if (markerIndex !== -1) {
-      this.extractGraphTriples(rawContent.slice(markerIndex + GRAPH_TRIPLES_MARKER.length), workspaceId);
+    const triplesMarkerIndex = rawContent.indexOf(GRAPH_TRIPLES_MARKER);
+    const critiqueMarkerIndex = rawContent.indexOf(CRITIQUE_MARKER);
+    const firstMarkerIndex = [triplesMarkerIndex, critiqueMarkerIndex].filter((i) => i !== -1).sort((a, b) => a - b)[0];
+    const insight = firstMarkerIndex === undefined ? rawContent : rawContent.slice(0, firstMarkerIndex).trim();
+    if (triplesMarkerIndex !== -1) {
+      this.extractGraphTriples(rawContent.slice(triplesMarkerIndex + GRAPH_TRIPLES_MARKER.length), workspaceId);
     }
+    const critique = critiqueMarkerIndex !== -1 ? this.extractSelfCritique(rawContent.slice(critiqueMarkerIndex + CRITIQUE_MARKER.length)) : null;
     if (insight.trim().length > 0) {
       await this.memory.vector.add(insight.trim(), "reflection", { workspaceId });
     }
-    // Vague 8C : best-effort strict — n'affecte jamais le résultat de la réflexion ci-dessus.
-    await maybeEvolvePrompt(recent, providerForRole("reasoning", this.llm)).catch((error) => {
+    // Vague 8C, élargie à l'auto-critique : une trajectoire jugée insatisfaisante par le
+    // modèle lui-même (score bas ou problèmes listés) déclenche l'évolution de prompt même
+    // sans correction de self-healing détectée par pattern. Best-effort strict : une erreur
+    // ici ne doit jamais dégrader le résultat de la réflexion ci-dessus.
+    const unsatisfactory = critique !== null && (critique.score < config.reflection.selfCritiqueMinScore || critique.issues.length > 0);
+    await maybeEvolvePrompt(recent, providerForRole("reasoning", this.llm), {
+      force: unsatisfactory,
+      extraContext: unsatisfactory ? `Auto-critique: score=${critique!.score}, issues=${critique!.issues.join("; ")}` : undefined,
+    }).catch((error) => {
       console.warn("[Reflection] Prompt evolution échouée (best-effort):", (error as Error).message);
     });
     return insight;
+  }
+
+  /**
+   * Auto-critique structurée (voir CRITIQUE_MARKER ci-dessus) : parse le bloc JSON que le LLM
+   * de réflexion joint à son insight dans le même appel. Best-effort strict, purement
+   * synchrone : tout JSON malformé ou score absent est ignoré silencieusement, jamais propagé.
+   */
+  private extractSelfCritique(rawBlock: string): SelfCritique | null {
+    try {
+      const jsonMatch = rawBlock.trim().match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return null;
+      const parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+      if (typeof parsed.score !== "number" || !Number.isFinite(parsed.score)) return null;
+      const score = Math.min(1, Math.max(0, parsed.score));
+      const issues = Array.isArray(parsed.issues) ? parsed.issues.filter((item): item is string => typeof item === "string").slice(0, 10) : [];
+      return { score, issues };
+    } catch (error) {
+      console.warn("[Reflection] Extraction de l'auto-critique échouée (best-effort):", (error as Error).message);
+      return null;
+    }
   }
 
   /**

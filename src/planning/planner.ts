@@ -6,7 +6,7 @@ import { ActivityStore } from "../observability/activityStore.js";
 import { WorkspaceStore } from "../workspaces/workspaceStore.js";
 import { savePlanCheckpoint, loadPlanCheckpoint, listPlanCheckpoints, type PlanSnapshotState } from "../persistence/checkpoint.js";
 import type { CheckpointSummary } from "../persistence/checkpoint.js";
-import { planStepsArraySchema } from "../llm/schemas.js";
+import { hierarchicalPlanStepsArraySchema } from "../llm/schemas.js";
 
 export const PLAN_STATUSES = ["PENDING","RUNNING","WAITING_PERMISSION","BLOCKED","CONSOLIDATING","COMPLETED","FAILED","CANCELLED"] as const;
 export type PlanRunStatus = typeof PLAN_STATUSES[number];
@@ -14,21 +14,83 @@ export const STEP_PRIORITIES = ["low","medium","high","urgent"] as const;
 export type StepPriority = typeof STEP_PRIORITIES[number];
 export type ExecutionNodeStatus = PlanNodeStatus | "waiting" | "failed" | "cancelled";
 export interface PlanStepSpec { local_id:string; title:string; capability:string; objective:string; context:Record<string,unknown>; constraints:string[]; priority:StepPriority; depends_on:string[] }
+/** Entrée brute avant aplatissement — voir flattenHierarchicalSteps ci-dessous. */
+export interface HierarchicalPlanStepSpec extends PlanStepSpec { sub_steps?: HierarchicalPlanStepSpec[] }
 export interface ExecutionPlanNode extends Omit<PlanNode,"status"> { status:ExecutionNodeStatus; planRunId?:string; position?:number; generation:number; capability?:string; objective?:string; context:Record<string,unknown>; constraints:string[]; priority?:StepPriority; dependencies:string[]; operationTaskId?:string; operationIdempotencyKey?:string; result?:string; error?:string; updatedAt:number; claimedAt?:number; attempt:number; specialistId?:string }
 export interface PlanRun { id:string; rootNodeId:string; objective:string; status:PlanRunStatus; generation:number; replanCount:number; maxReplans:number; workspaceId?:string; lastError?:string; createdAt:number; updatedAt:number; maxParallelism:number; peakParallelism:number; pendingReplanNodeId?:string; rollbackCount:number; maxRollbacks:number }
 
 const isObject=(v:unknown):v is Record<string,unknown>=>!!v&&typeof v==="object"&&!Array.isArray(v);
+
+const MAX_DECOMPOSITION_DEPTH = 3;
+
+function collectAllLocalIds(steps: HierarchicalPlanStepSpec[], out = new Set<string>()): Set<string> {
+  for (const step of steps) {
+    if (out.has(step.local_id)) throw new Error("INVALID_PLAN: local_id must be unique");
+    out.add(step.local_id);
+    if (step.sub_steps?.length) collectAllLocalIds(step.sub_steps, out);
+  }
+  return out;
+}
+
+/**
+ * Décomposition hiérarchique (façon LangGraph) : aplatit une arborescence de steps
+ * imbriqués en un DAG plat de PlanStepSpec, réutilisable tel quel par le reste du
+ * pipeline (validatePlanSteps, PlanRunner) sans aucun changement d'exécution. Un step
+ * "composite" (sub_steps non vide) n'est jamais exécuté lui-même — son capability/
+ * objective ne sert qu'à la lisibilité du plan proposé par le LLM ; il est entièrement
+ * remplacé par ses descendants. Tout step qui dépendait du composite dépend désormais de
+ * la "frontière" de sa sous-arborescence (les feuilles dont aucune autre feuille interne
+ * ne dépend), afin que l'ordre d'exécution respecte la décomposition sans changer le
+ * modèle de dépendances (toujours un simple DAG de local_id).
+ */
+export function flattenHierarchicalSteps(steps: HierarchicalPlanStepSpec[], depth = 1): PlanStepSpec[] {
+  if (depth > MAX_DECOMPOSITION_DEPTH) throw new Error("INVALID_PLAN: decomposition depth exceeds max");
+  const flat: PlanStepSpec[] = [];
+  const frontierByCompositeId = new Map<string, string[]>();
+
+  for (const step of steps) {
+    if (step.sub_steps && step.sub_steps.length > 0) {
+      const childFlat = flattenHierarchicalSteps(step.sub_steps, depth + 1);
+      const childIds = new Set(childFlat.map((child) => child.local_id));
+      for (const child of childFlat) {
+        if (child.depends_on.length === 0) child.depends_on = [...step.depends_on];
+      }
+      const dependedUpon = new Set(childFlat.flatMap((child) => child.depends_on.filter((d) => childIds.has(d))));
+      const frontier = childFlat.filter((child) => !dependedUpon.has(child.local_id)).map((child) => child.local_id);
+      frontierByCompositeId.set(step.local_id, frontier);
+      flat.push(...childFlat);
+    } else {
+      flat.push({
+        local_id: step.local_id, title: step.title, capability: step.capability, objective: step.objective,
+        context: step.context, constraints: step.constraints, priority: step.priority, depends_on: [...step.depends_on],
+      });
+    }
+  }
+
+  if (frontierByCompositeId.size > 0) {
+    for (const s of flat) s.depends_on = s.depends_on.flatMap((d) => frontierByCompositeId.get(d) ?? [d]);
+  }
+  return flat;
+}
+
 /**
  * Vague 6B (guardrails Zod) : la forme structurelle de chaque étape (types, présence des
- * champs, priorité dans l'énumération autorisée) est validée par le schéma Zod
- * planStepsArraySchema — rejet immédiat, avant toute autre logique. La sémantique propre
- * au plan (capacité connue du registre, dépendances résolues, absence de cycle) reste
- * vérifiée ici, car elle dépend de l'état runtime (ServiceRegistry) que Zod ignore.
+ * champs, priorité dans l'énumération autorisée, décomposition hiérarchique optionnelle
+ * via sub_steps) est validée par le schéma Zod hierarchicalPlanStepsArraySchema — rejet
+ * immédiat, avant toute autre logique. L'arborescence est ensuite aplatie
+ * (flattenHierarchicalSteps) en un DAG plat avant que la sémantique propre au plan
+ * (capacité connue du registre, dépendances résolues, absence de cycle) ne soit vérifiée
+ * ici, car elle dépend de l'état runtime (ServiceRegistry) que Zod ignore. Un appel avec
+ * des steps déjà plats (sans sub_steps, cas historique) traverse ce chemin sans aucun
+ * changement de comportement.
  */
 export function validatePlanSteps(input:unknown, registry:ServiceRegistry, maxSteps=50):PlanStepSpec[] {
-  const parsed=planStepsArraySchema(maxSteps).safeParse(input);
+  const parsed=hierarchicalPlanStepsArraySchema(maxSteps).safeParse(input);
   if(!parsed.success){const issue=parsed.error.issues[0];throw new Error(`INVALID_PLAN: ${issue?.path?.length?`${issue.path.join(".")}: `:""}${issue?.message??"malformed steps"}`);}
-  const steps=parsed.data as PlanStepSpec[];
+  const hierarchical=parsed.data as HierarchicalPlanStepSpec[];
+  collectAllLocalIds(hierarchical);
+  const steps=flattenHierarchicalSteps(hierarchical);
+  if(steps.length>maxSteps) throw new Error(`INVALID_PLAN: decomposition produces ${steps.length} steps, exceeds maxSteps ${maxSteps}`);
   const ids=new Set<string>();
   for(const s of steps){if(ids.has(s.local_id)) throw new Error("INVALID_PLAN: local_id must be unique"); ids.add(s.local_id);}
   for(const s of steps) if(!registry.findServiceForCapability(s.capability)) throw new Error(`INVALID_PLAN: unknown capability ${s.capability}`);

@@ -111,7 +111,11 @@ async function main(): Promise<void> {
     }
   }
 
-  const retentionScheduler = new MemoryRetentionScheduler(() => config.projects.memoryRetentionDays);
+  const retentionScheduler = new MemoryRetentionScheduler(
+    () => config.projects.memoryRetentionDays,
+    undefined,
+    () => ({ maxAgeDays: config.memory.graphRetentionDays, maxConfidence: config.memory.graphRetentionMaxConfidence }),
+  );
   retentionScheduler.start();
   const modes = new Set(config.interface.modes);
 
