@@ -1,3 +1,3 @@
-exporter fonction composerDynamicRulesSection():chaine {
-    retour "";
+export function composeDynamicRulesSection(): string {
+  return "";
 }
