@@ -250,7 +250,15 @@ export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
   }
 
   let surgicalEdit: SurgicalEditRequest | undefined = undefined;
-  if (typeof ctx.oldString === "string" && typeof ctx.newString === "string") {
+  // Présence (pas juste validité de type) : si l'un des deux champs est présent — même avec
+  // une valeur invalide, y compris si LES DEUX sont invalides — l'intention d'édition ciblée
+  // est là et doit être validée strictement, jamais retomber silencieusement sur la génération
+  // LLM du fichier entier (review Codex #111/#112 : "oldString: 123, newString: 456" ne doit
+  // pas passer inaperçu sous prétexte que hasOldString et hasNewString sont tous deux faux).
+  if (ctx.oldString !== undefined || ctx.newString !== undefined) {
+    if (typeof ctx.oldString !== "string" || typeof ctx.newString !== "string") {
+      throw new Error("SURGICAL_EDIT_INCOMPLETE_ARGS: oldString et newString doivent être fournis ensemble comme chaînes.");
+    }
     surgicalEdit = { oldString: ctx.oldString, newString: ctx.newString };
   }
 

@@ -2165,3 +2165,28 @@ test("surgical_edit — exactContent reste prioritaire si les deux sont fournis 
   assert.equal(params.exactContent, "CONTENU_EXACT");
   assert.deepEqual(params.surgicalEdit, { oldString: "a", newString: "b" });
 });
+
+// Review Codex (P1, PR #111) : oldString sans newString (ou l'inverse) retombait
+// silencieusement sur la génération LLM du fichier entier — un changement bien plus
+// large que l'édition ciblée demandée par un appel de tool mal formé.
+test("surgical_edit — oldString sans newString (ou l'inverse) est rejeté plutôt que de retomber silencieusement sur la génération LLM du fichier entier", () => {
+  for (const context of [
+    { filePath: "docs/runtime.md", instructions: "x", oldString: "a" },
+    { filePath: "docs/runtime.md", instructions: "x", newString: "b" },
+    { filePath: "docs/runtime.md", instructions: "x", oldString: 123, newString: "b" },
+    // review Codex #112 : les DEUX invalides (hasOldString===hasNewString===false) ne doit
+    // pas passer inaperçu sous prétexte que la comparaison d'égalité de booléens ne le voit pas.
+    { filePath: "docs/runtime.md", instructions: "x", oldString: 123, newString: 456 },
+  ]) {
+    assert.throws(
+      () => extractTaskParams(baseTaskRequest(context, "task-incomplete-surgical")),
+      (err: unknown) => err instanceof Error && err.message.includes("SURGICAL_EDIT_INCOMPLETE_ARGS"),
+      JSON.stringify(context),
+    );
+  }
+});
+
+test("surgical_edit — ni oldString ni newString fournis : comportement historique inchangé (pas d'erreur, génération LLM normale)", () => {
+  const params = extractTaskParams(baseTaskRequest({ filePath: "docs/runtime.md", instructions: "x" }, "task-no-surgical"));
+  assert.equal(params.surgicalEdit, undefined);
+});

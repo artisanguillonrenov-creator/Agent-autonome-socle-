@@ -3506,6 +3506,12 @@ async function renderCheckpointsPanel() {
   const list = elements.checkpointList;
   if (!list) return;
   try {
+    // conversationId réel (pas seulement workspaceId) : saveCheckpoint()/restoreCheckpoint()
+    // opèrent sur la session de mémoire de travail de CETTE conversation (voir agent.ts) —
+    // sans lui, ils retombaient sur une session "legacy" par défaut jamais lue par la
+    // conversation web réelle, donc un checkpoint sauvegardé/restauré depuis ce panneau
+    // capturait/restaurait silencieusement le mauvais contenu (review Codex #111).
+    const conversationId = window.JarvisConversationPersistence ? await window.JarvisConversationPersistence.ensureConversation() : undefined;
     // Même workspace que attachFileToConversation() : quand projects.projectIsolation est
     // actif côté backend, un checkpoint sauvegardé/listé/restauré sans workspaceId retombe
     // sur le comportement global historique (voir persistence/checkpoint.ts) — le passer ici
@@ -3542,7 +3548,7 @@ async function renderCheckpointsPanel() {
         if (!window.confirm(`Restaurer « ${cp.label} » ? Cela réinitialise la mémoire de travail et le plan internes de l'agent à cet état sauvegardé.`)) return;
         restore.disabled = true;
         try {
-          const res = await fetchApi(`/api/checkpoints/${encodeURIComponent(cp.id)}/restore`, { method: 'POST', body: JSON.stringify({ workspaceId }) });
+          const res = await fetchApi(`/api/checkpoints/${encodeURIComponent(cp.id)}/restore`, { method: 'POST', body: JSON.stringify({ conversationId, workspaceId }) });
           showToast(res && res.ok ? `✅ État de l'agent restauré : ${cp.label}` : '⚠️ Échec de la restauration.');
         } catch (err) {
           showToast(`⚠️ Erreur : ${err.message}`);
@@ -3566,8 +3572,9 @@ function initCheckpointsPanel() {
       if (!label || !label.trim()) return;
       elements.btnSaveCheckpoint.disabled = true;
       try {
+        const conversationId = window.JarvisConversationPersistence ? await window.JarvisConversationPersistence.ensureConversation() : undefined;
         const workspaceId = await ensureConversationWorkspaceId();
-        await fetchApi('/api/checkpoints', { method: 'POST', body: JSON.stringify({ label: label.trim(), workspaceId }) });
+        await fetchApi('/api/checkpoints', { method: 'POST', body: JSON.stringify({ label: label.trim(), conversationId, workspaceId }) });
         showToast(`💾 Point de sauvegarde créé : ${label.trim()}`);
         await renderCheckpointsPanel();
       } catch (err) {

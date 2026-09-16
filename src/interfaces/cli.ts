@@ -48,7 +48,7 @@ export async function runCli(agent: Agent, conversations?: ConversationExecution
       const [, sub, ...rest] = input.split(" ");
       if (sub === "save") {
         const label = rest.join(" ") || `checkpoint-${Date.now()}`;
-        console.log(`Checkpoint sauvegardé: ${agent.saveCheckpoint(label, activeConversationId)}`);
+        console.log(`Checkpoint sauvegardé: ${await agent.saveCheckpoint(label, activeConversationId)}`);
       } else if (sub === "load") {
         const id = rest[0];
         if (id && conversations) {
