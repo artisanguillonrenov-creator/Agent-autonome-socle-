@@ -461,9 +461,132 @@ function initNavigation() {
   elements.navItems.forEach((item) => {
     item.addEventListener('click', (e) => {
       e.preventDefault();
+      // Les raccourcis sans data-view (ex. "Artéfacts" dans la sidebar) portent leur
+      // propre écouteur dédié — voir initSidebarShortcuts() — plutôt que de naviguer
+      // vers une vue inexistante ("view-null" ne correspondrait à aucune section).
       const view = item.getAttribute('data-view');
-      switchView(view);
+      if (view) switchView(view);
     });
+  });
+}
+
+// --- SIDEBAR STYLE "CLAUDE" : nouvelle discussion, raccourcis, historique ------
+// Le raccourci "Artéfacts" n'a pas de vue dédiée : il rouvre le dernier artefact
+// affiché dans le chat (voir currentArtifact / openArtifactPanel plus bas), sur le
+// modèle du panneau Artifacts de Claude.
+function initSidebarShortcuts() {
+  const artifactsShortcut = document.getElementById('shortcut-artifacts');
+  if (artifactsShortcut) {
+    artifactsShortcut.addEventListener('click', (e) => {
+      e.preventDefault();
+      switchView('chat');
+      if (currentArtifact) openArtifactPanel(currentArtifact);
+      else showToast("Aucun artefact ouvert pour l'instant dans cette session.");
+    });
+  }
+
+  const newChatBtn = document.getElementById('btn-new-chat');
+  if (newChatBtn) {
+    newChatBtn.addEventListener('click', async () => {
+      newChatBtn.disabled = true;
+      try {
+        if (window.JarvisConversationPersistence) {
+          await window.JarvisConversationPersistence.newConversation();
+        }
+        switchView('chat');
+        await renderSidebarConversations();
+      } catch (err) {
+        showToast(`⚠️ Impossible de créer une nouvelle discussion : ${err.message}`);
+      } finally {
+        newChatBtn.disabled = false;
+      }
+    });
+  }
+}
+
+/** Menu contextuel (⋯) d'une discussion dans la sidebar : renommer / archiver. */
+function buildConversationItemMenu(session, onChanged) {
+  const wrap = document.createElement('div');
+  wrap.className = 'sidebar-conversation-menu-wrap';
+  const trigger = document.createElement('button');
+  trigger.type = 'button';
+  trigger.className = 'sidebar-conversation-menu-btn';
+  trigger.textContent = '⋯';
+  trigger.setAttribute('aria-label', 'Actions sur la discussion');
+  const menu = document.createElement('div');
+  menu.className = 'composer-menu sidebar-conversation-menu';
+  menu.hidden = true;
+
+  const renameBtn = document.createElement('button');
+  renameBtn.type = 'button'; renameBtn.className = 'composer-menu-item'; renameBtn.textContent = 'Renommer';
+  renameBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    menu.hidden = true;
+    const title = window.prompt('Nom de la discussion :', session.title || 'Nouvelle conversation');
+    if (title == null) return;
+    const clean = title.replace(/\s+/g, ' ').trim();
+    if (!clean) return;
+    try {
+      await fetchApi(`/api/conversations/${encodeURIComponent(session.conversationId)}`, { method: 'PATCH', body: JSON.stringify({ title: clean }) });
+      await onChanged();
+    } catch (err) { showToast(`⚠️ ${err.message}`); }
+  });
+
+  const archiveBtn = document.createElement('button');
+  archiveBtn.type = 'button'; archiveBtn.className = 'composer-menu-item'; archiveBtn.textContent = 'Archiver';
+  archiveBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    menu.hidden = true;
+    if (!window.confirm('Archiver cette discussion ? Elle ne sera plus affichée dans la liste active.')) return;
+    try {
+      await fetchApi(`/api/conversations/${encodeURIComponent(session.conversationId)}`, { method: 'DELETE' });
+      const activeId = window.JarvisConversationPersistence ? window.JarvisConversationPersistence.getActiveConversationId() : '';
+      if (activeId === session.conversationId) {
+        localStorage.removeItem('jarvis_active_conversation_id');
+        if (window.JarvisConversationPersistence) await window.JarvisConversationPersistence.ensureConversation();
+      }
+      await onChanged();
+    } catch (err) { showToast(`⚠️ ${err.message}`); }
+  });
+
+  menu.append(renameBtn, archiveBtn);
+  trigger.addEventListener('click', (e) => {
+    e.stopPropagation();
+    document.querySelectorAll('.sidebar-conversation-menu').forEach((m) => { if (m !== menu) m.hidden = true; });
+    menu.hidden = !menu.hidden;
+  });
+  document.addEventListener('click', () => { menu.hidden = true; });
+  wrap.append(trigger, menu);
+  return wrap;
+}
+
+async function renderSidebarConversations() {
+  const host = document.getElementById('sidebar-conversations');
+  if (!host || !state.backendUrl) return;
+  let data;
+  try { data = await fetchApi('/api/conversations'); } catch { return; }
+  const sessions = Array.isArray(data) ? data : Array.isArray(data?.items) ? data.items : [];
+  const activeId = window.JarvisConversationPersistence ? window.JarvisConversationPersistence.getActiveConversationId() : '';
+  host.replaceChildren();
+  if (!sessions.length) {
+    const empty = document.createElement('div'); empty.className = 'checkpoint-empty'; empty.textContent = 'Aucune discussion pour le moment.'; host.appendChild(empty);
+    return;
+  }
+  sessions.forEach((session) => {
+    const row = document.createElement('div');
+    row.className = 'sidebar-conversation-item' + (session.conversationId === activeId ? ' active' : '');
+    const titleBtn = document.createElement('button');
+    titleBtn.type = 'button';
+    titleBtn.className = 'sidebar-conversation-title';
+    titleBtn.textContent = session.title || 'Nouvelle conversation';
+    titleBtn.addEventListener('click', async () => {
+      if (window.JarvisConversationPersistence) await window.JarvisConversationPersistence.selectConversation(session.conversationId);
+      switchView('chat');
+      void renderSidebarConversations();
+    });
+    row.appendChild(titleBtn);
+    row.appendChild(buildConversationItemMenu(session, renderSidebarConversations));
+    host.appendChild(row);
   });
 }
 
@@ -1180,6 +1303,211 @@ async function streamChat(text, { onThought, onToken, onDone, onError, signal, c
   }
 }
 
+// --- MENU "+" DU COMPOSER DE CHAT (style Claude) -----------------------------
+// Réglage réel branché sur la case à cocher "Mémoire" : brique 2 (src/memory/),
+// section "Projets, Fichiers & Mémoire" des settings — indexation sémantique
+// Vector DB / RAG des documents de workspace (src/settings/catalog.ts).
+const MEMORY_SETTING_KEY = 'projects.knowledgeRag';
+
+async function fetchMemorySettingValue() {
+  try {
+    const settings = await fetchApi('/api/settings');
+    const items = Array.isArray(settings) ? settings : [];
+    const entry = items.find((item) => item.definition && item.definition.key === MEMORY_SETTING_KEY);
+    return entry ? Boolean(entry.effectiveValue) : false;
+  } catch { return false; }
+}
+
+async function syncMemoryMenuState(checkEl) {
+  checkEl.hidden = !(await fetchMemorySettingValue());
+}
+
+async function toggleMemorySetting(itemEl, checkEl) {
+  itemEl.disabled = true;
+  try {
+    const next = !(await fetchMemorySettingValue());
+    await fetchApi('/api/settings', { method: 'PATCH', body: JSON.stringify({ key: MEMORY_SETTING_KEY, value: next }) });
+    checkEl.hidden = !next;
+    showToast(next ? '🧠 Mémoire (indexation RAG) activée.' : '🧠 Mémoire (indexation RAG) désactivée.');
+  } catch (err) {
+    showToast(`⚠️ Impossible de modifier le réglage mémoire : ${err.message}`);
+  } finally {
+    itemEl.disabled = false;
+  }
+}
+
+/** Brique 5 (src/skills/) : équivalent web de la commande CLI `/skills` — bascule vers la vue Skills, qui liste GET /api/skills. */
+function openSkillsFromComposer() {
+  switchView('skills');
+}
+
+async function showMcpPluginsSummary() {
+  try {
+    const data = await fetchApi('/api/mcp/servers');
+    const servers = Array.isArray(data && data.servers) ? data.servers : [];
+    if (!servers.length) { showToast('Aucun plugin/serveur MCP configuré pour le moment.'); return; }
+    const names = servers.map((s) => `${s.name || s.id}${s.status ? ` (${s.status})` : ''}`).join(', ');
+    showToast(`🔌 Plugins MCP connectés : ${names}`);
+  } catch (err) {
+    showToast(`⚠️ Impossible de lister les plugins MCP : ${err.message}`);
+  }
+}
+
+/** Réutilise/crée un workspace dédié à la conversation active pour y déposer les
+ * fichiers joints depuis le composer, exploitables ensuite par les skills du
+ * "Document & Data Workbench" (document_work, spreadsheet_work, data_analysis…). */
+async function ensureConversationWorkspaceId() {
+  const conversationId = window.JarvisConversationPersistence
+    ? await window.JarvisConversationPersistence.ensureConversation()
+    : 'local';
+  const cacheKey = `jarvis_workspace_for_conversation_${conversationId}`;
+  const cached = localStorage.getItem(cacheKey);
+  if (cached) return cached;
+  const created = await fetchApi('/api/workspaces', { method: 'POST', body: JSON.stringify({ name: `Conversation ${conversationId}` }) });
+  if (!created || !created.id) throw new Error('WORKSPACE_CREATE_FAILED');
+  localStorage.setItem(cacheKey, created.id);
+  return created.id;
+}
+
+async function attachFileToConversation(file) {
+  try {
+    const workspaceId = await ensureConversationWorkspaceId();
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    let binary = '';
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    const contentBase64 = btoa(binary);
+    const result = await fetchApi(`/api/workspaces/${encodeURIComponent(workspaceId)}/files`, {
+      method: 'POST',
+      body: JSON.stringify({ path: file.name, contentBase64, mimeType: file.type || 'application/octet-stream' }),
+    });
+    const path = (result && result.file && result.file.path) || file.name;
+    const input = document.getElementById('chat-input');
+    if (input) {
+      const note = `[Fichier joint au workspace ${workspaceId}, chemin "${path}" — utilise document_work/spreadsheet_work pour l'exploiter.]`;
+      input.value = input.value ? `${input.value}\n${note}` : note;
+      input.dispatchEvent(new Event('input'));
+      input.focus();
+    }
+    showToast(`📎 « ${file.name} » ajouté au workspace de la conversation.`);
+  } catch (err) {
+    showToast(`⚠️ Échec de l'ajout du fichier : ${err.message}`);
+  }
+}
+
+async function captureScreenshotToWorkspace() {
+  if (!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia)) {
+    showToast("Capture d'écran indisponible sur cet appareil : utilisez « Ajouter des fichiers ou des photos ».");
+    return;
+  }
+  let stream = null;
+  try {
+    stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+    const video = document.createElement('video');
+    video.srcObject = stream;
+    await video.play();
+    if (video.readyState < 2) await new Promise((resolve) => { video.onloadeddata = resolve; });
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+    canvas.getContext('2d').drawImage(video, 0, 0);
+    stream.getTracks().forEach((t) => t.stop());
+    stream = null;
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+    if (!blob) throw new Error('CAPTURE_VIDE');
+    await attachFileToConversation(new File([blob], `capture-${Date.now()}.png`, { type: 'image/png' }));
+  } catch (err) {
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+    if (err && (err.name === 'NotAllowedError' || err.name === 'AbortError')) return;
+    showToast(`⚠️ Capture d'écran impossible : ${err.message}`);
+  }
+}
+
+/** Construit le bouton "+" et son menu flottant (toggle, fermeture au clic extérieur). */
+function buildComposerAttachControl() {
+  const container = document.createElement('div');
+  container.className = 'composer-attach';
+
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'composer-plus-btn';
+  button.textContent = '+';
+  button.setAttribute('aria-label', 'Ajouter');
+  button.setAttribute('aria-haspopup', 'true');
+  button.setAttribute('aria-expanded', 'false');
+
+  const fileInput = document.createElement('input');
+  fileInput.type = 'file';
+  fileInput.multiple = true;
+  fileInput.hidden = true;
+  fileInput.id = 'composer-file-input';
+
+  const menu = document.createElement('div');
+  menu.className = 'composer-menu';
+  menu.hidden = true;
+  menu.setAttribute('role', 'menu');
+  // Ancré à document.body (position:fixed) plutôt qu'à .composer-attach : un
+  // ancêtre avec overflow (le fil de discussion) rognerait sinon le menu quand
+  // le composer se trouve près du haut de l'écran (conversation courte/vide).
+  document.body.appendChild(menu);
+
+  const positionMenu = () => {
+    const rect = button.getBoundingClientRect();
+    menu.style.left = `${Math.round(rect.left)}px`;
+    menu.style.bottom = `${Math.round(window.innerHeight - rect.top + 10)}px`;
+  };
+  const closeMenu = () => { menu.hidden = true; button.setAttribute('aria-expanded', 'false'); };
+  const openMenu = () => { positionMenu(); menu.hidden = false; button.setAttribute('aria-expanded', 'true'); };
+
+  const makeItem = (label, handler, options = {}) => {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'composer-menu-item';
+    item.setAttribute('role', 'menuitem');
+    const text = document.createElement('span'); text.textContent = label;
+    item.appendChild(text);
+    if (options.trailing) item.appendChild(options.trailing);
+    item.addEventListener('click', async () => {
+      closeMenu();
+      await handler();
+    });
+    return item;
+  };
+
+  button.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (menu.hidden) openMenu(); else closeMenu();
+  });
+  document.addEventListener('click', (e) => { if (!container.contains(e.target) && !menu.contains(e.target)) closeMenu(); });
+  window.addEventListener('resize', () => { if (!menu.hidden) positionMenu(); });
+
+  menu.appendChild(makeItem('Ajouter des fichiers ou des photos…', async () => { fileInput.click(); }));
+  menu.appendChild(makeItem("Prendre une capture d'écran", async () => { await captureScreenshotToWorkspace(); }));
+  menu.appendChild(document.createElement('hr'));
+  menu.appendChild(makeItem('Compétences ›', async () => { openSkillsFromComposer(); }));
+  menu.appendChild(makeItem('Ajouter un connecteur ›', async () => {
+    switchView('settings');
+    showToast('Gérez vos connecteurs dans Paramètres → Connexions.');
+  }));
+  menu.appendChild(makeItem('Ajouter des plugins', async () => { await showMcpPluginsSummary(); }));
+  menu.appendChild(document.createElement('hr'));
+
+  const memoryCheck = document.createElement('span');
+  memoryCheck.className = 'composer-menu-check';
+  memoryCheck.textContent = '✓';
+  memoryCheck.hidden = true;
+  const memoryItem = makeItem('Mémoire', async () => { await toggleMemorySetting(memoryItem, memoryCheck); }, { trailing: memoryCheck });
+  menu.appendChild(memoryItem);
+  void syncMemoryMenuState(memoryCheck);
+
+  fileInput.addEventListener('change', async () => {
+    const files = Array.from(fileInput.files || []);
+    fileInput.value = '';
+    for (const file of files) await attachFileToConversation(file);
+  });
+
+  container.append(button, fileInput);
+  return container;
+}
+
 function renderChatView() {
   const container = document.getElementById('view-chat');
   if (!container || !container.children || container.children.length > 0) return;
@@ -1188,11 +1516,12 @@ function renderChatView() {
   const layout = document.createElement('div'); layout.className = 'chat-layout';
   const messages = document.createElement('div'); messages.id = 'chat-messages'; messages.className = 'chat-messages';
   const form = document.createElement('form'); form.id = 'chat-form'; form.className = 'chat-composer';
+  const attachControl = buildComposerAttachControl();
   const input = document.createElement('textarea'); input.id = 'chat-input'; input.className = 'input-field chat-input'; input.rows = 1; input.placeholder = 'Posez une question ou demandez une action…'; input.setAttribute('aria-label', 'Message à Jarvis');
   const sendButton = document.createElement('button'); sendButton.type = 'submit'; sendButton.id = 'chat-send'; sendButton.className = 'btn btn-primary chat-send'; sendButton.textContent = 'Envoyer';
   const stopButton = document.createElement('button'); stopButton.type = 'button'; stopButton.id = 'chat-stop'; stopButton.className = 'btn chat-stop'; stopButton.textContent = 'Stop';
   stopButton.title = "Interrompre l'affichage et annuler toute opération d'arrière-plan en cours";
-  form.append(input, sendButton, stopButton);
+  form.append(attachControl, input, sendButton, stopButton);
   layout.append(messages, form);
   workspace.append(layout);
   container.appendChild(workspace);
@@ -3244,6 +3573,13 @@ function bootstrapJarvis() {
 
   initNavigation();
   initCheckpointsPanel();
+  initSidebarShortcuts();
+  void renderSidebarConversations();
+  // typeof-guard : le harness de test charge app.js dans un contexte VM minimal
+  // (voir src/interfaces/httpApi.test.ts) qui ne fournit pas setInterval.
+  if (typeof setInterval === 'function') {
+    setInterval(() => { void renderSidebarConversations(); }, 4000);
+  }
 
   // Apply general settings saved in localStorage for instant initial rendering
   const savedTheme = localStorage.getItem('jarvis_theme') || 'SYSTEM';
