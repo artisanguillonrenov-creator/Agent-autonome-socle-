@@ -1,0 +1,15 @@
+# Base mémoire persistante (générée au runtime)
+data/chroma/
+data/*.sqlite3
+
+# Contenu créé par l'utilisateur dans le sandbox (sauf le repère de dossier)
+sandbox/*
+!sandbox/.gitkeep
+
+# Environnement Python
+.venv/
+__pycache__/
+*.pyc
+
+# Secrets
+.env

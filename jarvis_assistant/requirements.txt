@@ -1,0 +1,23 @@
+# --- Mémoire long terme (vectorielle, persistante) ---
+chromadb>=0.5.0
+
+# --- Voix : reconnaissance offline ---
+faster-whisper>=1.0.0
+vosk>=0.3.45
+sounddevice>=0.4.6
+numpy>=1.26.0
+
+# --- Voix : synthèse offline ---
+pyttsx3>=2.90
+
+# --- Voix : wake-word haute précision (optionnel, nécessite une clé Picovoice) ---
+# pvporcupine>=3.0.0
+
+# --- Voix : lecture audio du fallback TTS cloud (optionnel) ---
+# simpleaudio>=1.0.4
+
+# --- Outils / réseau ---
+requests>=2.31.0
+
+# --- Configuration ---
+python-dotenv>=1.0.1
