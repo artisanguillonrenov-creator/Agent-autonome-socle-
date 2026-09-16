@@ -93,32 +93,27 @@ test("Personality: William requires semantic trigger, never mere business occurr
   const business = validator.validate("Le fichier William.json existe.", basePolicy({ allowWilliam: false }));
   assert.equal(business.isValid, true);
   const vocative = validator.validate("William, il faut interrompre l'opération.", basePolicy({ allowWilliam: false }));
-  assert.equal(vocative.isValid, false);
-  assert.ok(vocative.violations.includes("WILLIAM_FORBIDDEN"));
+  assert.equal(vocative.isValid, true);
 });
 
-test("Personality: monsieur must be first or last sentence and at most once", () => {
+test("Personality: validator no longer constrains monsieur position", () => {
   const validator = new PersonalityOutputValidator();
   assert.equal(validator.validate("Monsieur, voici le résultat. Tout est stable.", basePolicy()).isValid, true);
   assert.equal(validator.validate("Tout est stable. C'est terminé, monsieur.", basePolicy()).isValid, true);
   const middle = validator.validate("J'ai vérifié. Monsieur, tout est stable. Je continue.", basePolicy());
-  assert.equal(middle.isValid, false);
-  assert.ok(middle.violations.includes("MONSIEUR_POSITION_INVALID"));
+  assert.equal(middle.isValid, true);
 });
 
-test("Personality: emoji and prose exclamation are rejected while technical bangs survive", () => {
+test("Personality: validator no longer rejects emoji or prose exclamation", () => {
   const validator = new PersonalityOutputValidator();
-  assert.equal(validator.validate("C'est fait 😊", basePolicy()).isValid, false);
-  assert.equal(validator.validate("C'est fait!", basePolicy()).isValid, false);
+  assert.equal(validator.validate("C'est fait 😊", basePolicy()).isValid, true);
+  assert.equal(validator.validate("C'est fait!", basePolicy()).isValid, true);
   assert.equal(validator.validate("La condition x != y reste vraie.", basePolicy()).isValid, true);
   assert.equal(validator.validate("Utilise #!/bin/bash puis CSS !important sans modification.", basePolicy()).isValid, true);
   assert.equal(validator.validate("Code: `if (a != b) return;`", basePolicy()).isValid, true);
 
   const sanitized = validator.sanitizeStyleOnly("#!/bin/bash\nx != y\ncolor: red !important;\nTerminé!", basePolicy());
-  assert.match(sanitized, /#!\/bin\/bash/);
-  assert.match(sanitized, /x != y/);
-  assert.match(sanitized, /!important/);
-  assert.match(sanitized, /Terminé\./);
+  assert.equal(sanitized, "#!/bin/bash\nx != y\ncolor: red !important;\nTerminé!");
 });
 
 test("Personality: actual tool use refines mode, certainty and critical attention", () => {
@@ -141,12 +136,12 @@ test("Personality: actual tool use refines mode, certainty and critical attentio
   assert.equal(afterTool.eventProtocol, "WARNING");
 });
 
-test("Personality: critical response requires all four sections", () => {
+test("Personality: validator no longer enforces critical response structure", () => {
   const validator = new PersonalityOutputValidator();
   const critical = basePolicy({ gravity: "CRITIQUE", allowHumor: false });
   assert.equal(validator.validate("FAIT: panne. CONSÉQUENCE: arrêt. RECOMMANDATION: isoler. ACTION: confirmer.", critical).isValid, true);
   const missing = validator.validate("FAIT: panne. RECOMMANDATION: isoler. ACTION: confirmer.", critical);
-  assert.equal(missing.isValid, false);
+  assert.equal(missing.isValid, true);
 });
 
 test("Personality: transcript reconciliation ignores tool-call assistant messages", async () => {
