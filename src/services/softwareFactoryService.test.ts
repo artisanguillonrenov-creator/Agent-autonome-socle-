@@ -2203,11 +2203,13 @@ function mockOctokitForRevertFlow(overrides: {
   targetPrFiles?: Array<{ filename: string }>;
   contentBeforeTargetPr?: string | null;
   currentContent?: string;
+  targetPrMerged?: boolean;
 } = {}): Octokit {
   const calls = overrides.calls;
   const record = (c: string) => { if (calls) calls.push(c); };
   const targetPrFiles = overrides.targetPrFiles ?? [{ filename: "docs/reverted.md" }];
   const currentContent = overrides.currentContent ?? "contenu actuel (la mauvaise version)";
+  const targetPrMerged = overrides.targetPrMerged ?? true;
   return {
     rest: {
       repos: {
@@ -2234,7 +2236,7 @@ function mockOctokitForRevertFlow(overrides: {
       pulls: {
         get: async ({ pull_number }: { pull_number: number }) => {
           record(`pulls.get:${pull_number}`);
-          return { data: { base: { sha: "sha-before-target-pr" }, title: "PR à annuler" } };
+          return { data: { base: { sha: "sha-before-target-pr" }, title: "PR à annuler", merged: targetPrMerged } };
         },
         listFiles: async ({ pull_number }: { pull_number: number }) => { record(`pulls.listFiles:${pull_number}`); return { data: targetPrFiles }; },
         list: async () => { record("pulls.list"); return { data: [] }; },
@@ -2322,6 +2324,30 @@ test("rollback — la PR ciblée introuvable échoue proprement, de façon repla
   const failed = events.find((e) => e.type === "TASK_FAILED");
   assert.equal(failed?.payload.error_code, "REVERT_PR_NOT_FOUND");
   assert.equal(failed?.payload.replannable, true);
+});
+
+test("rollback — refuse d'annuler une PR ciblée qui n'a jamais été fusionnée, avant toute écriture GitHub", async () => {
+  const calls: string[] = [];
+  const octokit = mockOctokitForRevertFlow({ calls, targetPrMerged: false });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const req = baseTaskRequest({ filePath: "docs/reverted.md", instructions: "Annule", revertPrNumber: 42 }, "task-rollback-not-merged");
+  const events = await service.handleTaskRequest(req);
+  const failed = events.find((e) => e.type === "TASK_FAILED");
+  assert.equal(failed?.payload.error_code, "REVERT_PR_NOT_MERGED");
+  assert.equal(calls.includes("pulls.listFiles:42"), false, "aucun autre appel GitHub après le constat de non-fusion");
+  assert.equal(calls.includes("repos.createOrUpdateFileContents"), false);
+});
+
+test("rollback — revertPrNumber combiné à TARGET_PR/TARGET_BRANCH est rejeté avant tout accès réseau (l'annulation doit toujours ouvrir une PR propre)", () => {
+  assert.throws(
+    () => extractTaskParams(baseTaskRequest({ filePath: "docs/reverted.md", instructions: "TARGET_PR=7", revertPrNumber: 42 }, "task-rollback-conflict-pr")),
+    (err: unknown) => err instanceof Error && err.message.includes("REVERT_TARGET_CONFLICT"),
+  );
+  assert.throws(
+    () => extractTaskParams(baseTaskRequest({ filePath: "docs/reverted.md", instructions: "TARGET_BRANCH=jarvis/existing", revertPrNumber: 42 }, "task-rollback-conflict-branch")),
+    (err: unknown) => err instanceof Error && err.message.includes("REVERT_TARGET_CONFLICT"),
+  );
 });
 
 test("rollback — un revertPrNumber invalide est rejeté avant tout accès réseau", () => {

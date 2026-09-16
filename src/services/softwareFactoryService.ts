@@ -247,6 +247,10 @@ export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
   if (targetBranchMatch && !targetBranch) {
     throw new Error("TARGET_BRANCH_INVALID: TARGET_BRANCH ne peut pas être vide.");
   }
+
+  if (revertPrNumber !== undefined && (targetBranch !== undefined || targetPr !== undefined)) {
+    throw new Error("REVERT_TARGET_CONFLICT: revertPrNumber ne peut pas être combiné avec TARGET_BRANCH/TARGET_PR : une annulation doit toujours ouvrir une nouvelle PR propre, jamais réutiliser une branche/PR existante.");
+  }
   const textToSearch = instructionsStr ? `${objectiveStr}\n${instructionsStr}` : objectiveStr;
 
   if (!filePath) {
@@ -655,6 +659,14 @@ export class SoftwareFactoryService {
           throw new SoftwareFactoryWorkflowError("REVERT_PR_NOT_FOUND", `La Pull Request #${params.revertPrNumber} à annuler est introuvable.`, true, "none");
         }
         throw error;
+      }
+      if (!targetPr.data.merged) {
+        throw new SoftwareFactoryWorkflowError(
+          "REVERT_PR_NOT_MERGED",
+          `La PR #${params.revertPrNumber} n'est pas fusionnée : ses changements ne sont jamais arrivés sur la branche par défaut, donc rien à en annuler (une PR ouverte ou fermée sans fusion doit être fermée directement, pas annulée).`,
+          false,
+          "none",
+        );
       }
       const revertFiles = await this.octokit.rest.pulls.listFiles({ owner, repo, pull_number: params.revertPrNumber, per_page: 2 });
       if (revertFiles.data.length !== 1) {
