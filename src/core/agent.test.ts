@@ -625,10 +625,10 @@ test("ISOLATION: projectIsolation=true empêche un checkpoint de fuiter entre wo
     assert.ok(listForB.some((c) => c.id === checkpointIdB), "le workspace B voit son propre checkpoint");
     assert.equal(listForB.some((c) => c.id === checkpointIdA), false, "le workspace B ne doit jamais voir le checkpoint du workspace A");
 
-    const restoredIntoB = agent.restoreCheckpoint(checkpointIdA, "workspace-b");
+    const restoredIntoB = agent.restoreCheckpoint(checkpointIdA, undefined, "workspace-b");
     assert.equal(restoredIntoB, false, "restaurer le checkpoint A depuis le workspace B doit être refusé, pas silencieusement ignoré");
 
-    const restoredIntoA = agent.restoreCheckpoint(checkpointIdA, "workspace-a");
+    const restoredIntoA = agent.restoreCheckpoint(checkpointIdA, undefined, "workspace-a");
     assert.equal(restoredIntoA, true, "le workspace propriétaire peut toujours restaurer son propre checkpoint");
   } finally {
     config.projects.projectIsolation = previousIsolation;
@@ -677,7 +677,7 @@ test("ISOLATION: le contenu restauré par restoreCheckpoint reste visible au wor
 
     // Nouvel agent (mémoire de travail vierge) qui restaure le checkpoint de A dans A.
     const restorer = new Agent({ llm: { name: "restorer-spy", async complete() { return { content: "ok" }; } }, embeddings: new LocalHashingEmbeddingProvider() });
-    const restored = restorer.restoreCheckpoint(checkpointIdA, "workspace-a");
+    const restored = restorer.restoreCheckpoint(checkpointIdA, undefined, "workspace-a");
     assert.equal(restored, true);
 
     const retrieved = await restorer.memory.retrieve("Message confidentiel du projet A", 5, "workspace-a");
@@ -688,6 +688,40 @@ test("ISOLATION: le contenu restauré par restoreCheckpoint reste visible au wor
   } finally {
     config.projects.projectIsolation = previousIsolation;
   }
+});
+
+// Review Codex (P1, PR #111) : saveCheckpoint()/restoreCheckpoint() sans conversationId
+// opéraient sur la session "legacy" par défaut (agent.memory.working), jamais lue par une
+// vraie session de conversation durable (voir agent.memory.getOrLoadSession) — un checkpoint
+// sauvegardé/restauré depuis le panneau web (qui a un vrai conversationId) capturait/
+// restaurait silencieusement le mauvais contenu.
+test("saveCheckpoint/restoreCheckpoint avec conversationId opèrent sur la vraie session de cette conversation, jamais sur la session legacy par défaut", async () => {
+  const agent = new Agent({ llm: { name: "checkpoint-conversation-spy", async complete() { return { content: "ok" }; } }, embeddings: new LocalHashingEmbeddingProvider() });
+
+  agent.memory.getOrCreateSession("conv-1").add({ role: "user", content: "Message de la conversation 1" });
+  // La session legacy par défaut (agent.memory.working) ne contient rien de "conv-1".
+  assert.equal(agent.memory.working.all().some((m) => String(m.content ?? "").includes("conversation 1")), false);
+
+  const checkpointId = agent.saveCheckpoint("checkpoint-conv-1", "conv-1");
+  const state = loadCheckpoint(checkpointId);
+  assert.ok(state);
+  assert.ok(
+    state!.workingMemory.some((m) => String(m.content ?? "").includes("Message de la conversation 1")),
+    "saveCheckpoint(label, conversationId) doit capturer la session de CETTE conversation, pas la session legacy par défaut",
+  );
+
+  const restorer = new Agent({ llm: { name: "restorer-conversation-spy", async complete() { return { content: "ok" }; } }, embeddings: new LocalHashingEmbeddingProvider() });
+  const restored = restorer.restoreCheckpoint(checkpointId, "conv-1");
+  assert.equal(restored, true);
+  assert.ok(
+    restorer.memory.getOrCreateSession("conv-1").all().some((m) => String(m.content ?? "").includes("Message de la conversation 1")),
+    "restoreCheckpoint(id, conversationId) doit restaurer dans la session de CETTE conversation",
+  );
+  assert.equal(
+    restorer.memory.working.all().some((m) => String(m.content ?? "").includes("Message de la conversation 1")),
+    false,
+    "la restauration ne doit jamais atterrir dans la session legacy par défaut quand un conversationId est fourni",
+  );
 });
 
 test("ISOLATION: projectIsolation=false conserve le comportement global historique des checkpoints (aucune régression)", async () => {

@@ -741,19 +741,24 @@ export class Agent {
   }
 
   /** Legacy direct restoration. Interactive 11A callers must use checkpoint branching via ConversationExecutionService. */
-  restoreCheckpoint(checkpointId: string, workspaceId?: string): boolean {
+  restoreCheckpoint(checkpointId: string, conversationId?: string, workspaceId?: string): boolean {
     const state = loadCheckpoint(checkpointId, workspaceId, config.projects.projectIsolation && Boolean(workspaceId));
     if (!state) return false;
-    return this.applyCheckpointRuntimeState(state, true, workspaceId);
+    return this.applyCheckpointRuntimeState(state, true, conversationId, workspaceId);
   }
 
-  applyCheckpointRuntimeState(state: CheckpointState, restoreLegacyWorkingMemory = false, workspaceId?: string): boolean {
+  applyCheckpointRuntimeState(state: CheckpointState, restoreLegacyWorkingMemory = false, conversationId?: string, workspaceId?: string): boolean {
     try { this.planner.restore(state.planNodes); } catch { return false; }
     if (restoreLegacyWorkingMemory) {
+      // getOrCreateSession(conversationId) (pas this.memory.working) : sans conversationId, la
+      // restauration retombait sur la session par défaut du legacy diagnostics, jamais lue par
+      // la vraie session durable d'une conversation web (review Codex #111) — restaurer "avec
+      // succès" n'avait alors aucun effet visible sur la conversation affichée.
       // restoreEntries() (pas restore()) : tague chaque message restauré avec workspaceId,
       // sinon les entrées reviennent non scopées et allFor() sous isolation les exclurait
       // silencieusement du contexte qu'on vient pourtant de restaurer avec succès (review PR #110).
-      this.memory.working.restoreEntries(state.workingMemory.map((message) => ({ message, workspaceId })));
+      const working = conversationId ? this.memory.getOrCreateSession(conversationId, workspaceId) : this.memory.working;
+      working.restoreEntries(state.workingMemory.map((message) => ({ message, workspaceId })));
     }
     this.stepCount = state.stepCount;
     return true;

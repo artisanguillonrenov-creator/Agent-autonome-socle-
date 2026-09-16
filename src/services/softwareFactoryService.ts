@@ -250,8 +250,16 @@ export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
   }
 
   let surgicalEdit: SurgicalEditRequest | undefined = undefined;
-  if (typeof ctx.oldString === "string" && typeof ctx.newString === "string") {
-    surgicalEdit = { oldString: ctx.oldString, newString: ctx.newString };
+  const hasOldString = typeof ctx.oldString === "string";
+  const hasNewString = typeof ctx.newString === "string";
+  // Les deux doivent être fournis ensemble ou pas du tout : un seul champ présent (ou d'un
+  // type invalide) ne doit jamais retomber silencieusement sur la génération LLM du fichier
+  // entier — un changement bien plus large que l'édition ciblée demandée (review Codex #111).
+  if (hasOldString !== hasNewString) {
+    throw new Error("SURGICAL_EDIT_INCOMPLETE_ARGS: oldString et newString doivent être fournis ensemble, jamais un seul des deux.");
+  }
+  if (hasOldString && hasNewString) {
+    surgicalEdit = { oldString: ctx.oldString as string, newString: ctx.newString as string };
   }
 
   let exactContent: string | undefined = undefined;
