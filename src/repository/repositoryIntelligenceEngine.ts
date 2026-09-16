@@ -1,4 +1,4 @@
-import type { GithubReadOnlyClient, RepoRef, TreeEntry, PullRequestFileEntry } from "./githubReadOnlyClient.js";
+import type { GithubReadOnlyClient, RepoRef, TreeEntry, PullRequestFileEntry, CiOverallState, CiCheckEntry } from "./githubReadOnlyClient.js";
 import { redactSecrets, isSensitivePath } from "./secretScanner.js";
 import { REPOSITORY_INTELLIGENCE_LIMITS as LIMITS, repositoryIntelligenceError } from "./limits.js";
 import { parseRepoUrl } from "../services/softwareFactoryService.js";
@@ -431,6 +431,42 @@ export async function readCommit(client: GithubReadOnlyClient, target: RepoRef, 
     deletions: commit.deletions,
     files: boundedFiles,
     totalFiles: commit.totalFiles,
+    truncated,
+    warnings,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// CI_STATUS — statut CI réel d'un commit (borné, comme les autres actions)
+// ---------------------------------------------------------------------------
+
+export interface CiStatusReadResult {
+  owner: string;
+  repo: string;
+  sha: string;
+  overallState: CiOverallState;
+  totalCount: number;
+  checks: CiCheckEntry[];
+  truncated: boolean;
+  warnings: string[];
+}
+
+export async function readCiStatus(client: GithubReadOnlyClient, target: RepoRef, sha: string): Promise<CiStatusReadResult> {
+  if (!sha || typeof sha !== "string") throw repositoryIntelligenceError("REPOSITORY_SHA_REQUIRED");
+  const status = await client.getCiStatus(target, sha);
+  const warnings: string[] = [];
+  const boundedChecks = status.checks.slice(0, LIMITS.CI_STATUS_MAX_CHECKS);
+  const truncated = status.checks.length > boundedChecks.length;
+  if (truncated) warnings.push("REPOSITORY_CI_STATUS_CHECKS_TRUNCATED");
+  return {
+    owner: target.owner,
+    repo: target.repo,
+    sha: status.sha,
+    // overallState/totalCount portent toujours l'agrégat réel sur l'ensemble des checks,
+    // jamais recalculés sur la liste bornée — la troncature ne doit jamais fausser le verdict.
+    overallState: status.overallState,
+    totalCount: status.totalCount,
+    checks: boundedChecks,
     truncated,
     warnings,
   };

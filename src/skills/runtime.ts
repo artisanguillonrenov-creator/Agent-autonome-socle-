@@ -42,6 +42,7 @@ import {
   readPullRequestFiles,
   readPullRequestDiff,
   readCommit,
+  readCiStatus,
   readDiffBetweenVersions,
   buildRepositoryContext,
   auditRepository,
@@ -135,7 +136,7 @@ export function createRuntimeSkills(orchestrator:ServiceOrchestrator,planner:Pla
       case"READ_DIFF":return JSON.stringify(await readDiffBetweenVersions(repositoryClient,target,String(i.base??""),String(i.head??"")));
       case"BUILD_CONTEXT":{const ref=await resolveRepositoryRef(repositoryClient,target,i.ref);return JSON.stringify(await buildRepositoryContext(repositoryClient,target,ref,String(i.query??"")));}
       case"AUDIT":return JSON.stringify(await auditRepository(repositoryClient,target,{ref:i.ref as string|undefined,prNumber:i.prNumber as number|undefined}));
-      case"CI_STATUS":{if(!nonEmpty(i.sha))throw new Error("CI_STATUS_SHA_REQUIRED");return JSON.stringify(await repositoryClient.getCiStatus(target,i.sha));}
+      case"CI_STATUS":{if(!nonEmpty(i.sha))throw new Error("CI_STATUS_SHA_REQUIRED");return JSON.stringify(await readCiStatus(repositoryClient,target,i.sha));}
       case"MAIN_PROTECTION":{const branch=await resolveRepositoryRef(repositoryClient,target,i.branch);return JSON.stringify(await repositoryClient.getMainProtectionStatus(target,branch));}
       default:throw new Error("REPOSITORY_ACTION_INVALID");
     }

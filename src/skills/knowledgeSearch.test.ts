@@ -163,6 +163,20 @@ test("knowledge_search CI_STATUS exige un sha", async () => {
   await assert.rejects(() => skill.handler!({ action: "CI_STATUS" }, {} as any), /CI_STATUS_SHA_REQUIRED/);
 });
 
+test("knowledge_search CI_STATUS borne les checks retournés au LLM sans fausser overallState/totalCount (P2 review Codex #109)", async () => {
+  const manyChecks = Array.from({ length: 202 }, (_, n) => ({ name: `check-${n}`, source: "check_run" as const, state: "success" as const, url: null, startedAt: null, completedAt: null }));
+  const client = mockRepositoryClient();
+  const withManyChecks: GithubReadOnlyClient = { ...client, async getCiStatus(_target, sha) { return { sha, overallState: "success", totalCount: manyChecks.length, checks: manyChecks }; } };
+  const h = harness(withManyChecks);
+  const skill = h.get("knowledge_search");
+  const result = JSON.parse(await skill.handler!({ action: "CI_STATUS", sha: "deadbeef" }, {} as any));
+  assert.equal(result.totalCount, 202);
+  assert.equal(result.overallState, "success");
+  assert.ok(result.checks.length < 202);
+  assert.equal(result.truncated, true);
+  assert.ok(result.warnings.includes("REPOSITORY_CI_STATUS_CHECKS_TRUNCATED"));
+});
+
 test("knowledge_search MAIN_PROTECTION lit la protection de branche réelle via githubReadOnlyClient.getMainProtectionStatus (gap read_main_protection câblé)", async () => {
   const h = harness();
   const skill = h.get("knowledge_search");
