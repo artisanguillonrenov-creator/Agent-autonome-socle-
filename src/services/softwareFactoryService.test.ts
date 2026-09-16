@@ -2174,6 +2174,9 @@ test("surgical_edit — oldString sans newString (ou l'inverse) est rejeté plut
     { filePath: "docs/runtime.md", instructions: "x", oldString: "a" },
     { filePath: "docs/runtime.md", instructions: "x", newString: "b" },
     { filePath: "docs/runtime.md", instructions: "x", oldString: 123, newString: "b" },
+    // review Codex #112 : les DEUX invalides (hasOldString===hasNewString===false) ne doit
+    // pas passer inaperçu sous prétexte que la comparaison d'égalité de booléens ne le voit pas.
+    { filePath: "docs/runtime.md", instructions: "x", oldString: 123, newString: 456 },
   ]) {
     assert.throws(
       () => extractTaskParams(baseTaskRequest(context, "task-incomplete-surgical")),

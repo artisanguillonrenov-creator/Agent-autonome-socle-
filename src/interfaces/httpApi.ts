@@ -2182,7 +2182,7 @@ export function startHttpApi(agent: Agent, port: number): ReturnType<typeof crea
 
       if (req.method === "POST" && (pathname === "/checkpoints" || pathname === "/api/checkpoints")) {
         const body = JSON.parse((await readBody(req)) || "{}") as { label?: string; conversationId?: string; workspaceId?: string };
-        sendJson(res, 200, { id: agent.saveCheckpoint(body.label || `checkpoint-${Date.now()}`, body.conversationId, body.workspaceId) });
+        sendJson(res, 200, { id: await agent.saveCheckpoint(body.label || `checkpoint-${Date.now()}`, body.conversationId, body.workspaceId) });
         return;
       }
 

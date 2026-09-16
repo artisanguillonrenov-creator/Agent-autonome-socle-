@@ -727,8 +727,20 @@ export class Agent {
     ].filter(Boolean).join("\n");
   }
 
-  saveCheckpoint(label: string, conversationId?: string, workspaceId?: string): string {
-    const working = conversationId ? this.memory.getWorkingSession(conversationId) : this.memory.working;
+  async saveCheckpoint(label: string, conversationId?: string, workspaceId?: string): Promise<string> {
+    // getOrLoadSession() (pas seulement getWorkingSession()) : une conversation durable pas
+    // encore "chaude" en mémoire (redémarrage serveur, évincée par le cache LRU) faisait
+    // silencieusement échouer getWorkingSession() -> [] -- un checkpoint "réussi" mais vide,
+    // sans aucun signal d'erreur (review Codex #112). Repli sur getWorkingSession() seulement
+    // si aucun ConversationRepository n'est configuré (CLI/tests sans persistance durable).
+    let working = conversationId ? this.memory.getWorkingSession(conversationId) : this.memory.working;
+    if (conversationId && !working) {
+      try {
+        working = await this.memory.getOrLoadSession(conversationId, undefined, workspaceId);
+      } catch {
+        working = this.memory.getWorkingSession(conversationId);
+      }
+    }
     const isolate = config.projects.projectIsolation && Boolean(workspaceId);
     return saveCheckpoint(label, {
       // allFor() (pas all()) : une session de travail partagée peut déjà contenir des tours

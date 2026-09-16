@@ -147,7 +147,7 @@ test("un checkpoint restaure la mémoire de travail et le plan", async () => {
   await agent.step("Premier message");
   agent.planner.createNode("Objectif de test");
 
-  const checkpointId = agent.saveCheckpoint("test");
+  const checkpointId = await agent.saveCheckpoint("test");
 
   const fresh = new Agent({ llm: new MockProvider(), embeddings: new LocalHashingEmbeddingProvider() });
   const restored = fresh.restoreCheckpoint(checkpointId);
@@ -616,10 +616,10 @@ test("ISOLATION: projectIsolation=true empêche un checkpoint de fuiter entre wo
     const agent = new Agent({ llm: { name: "checkpoint-spy", async complete() { return { content: "ok" }; } }, embeddings: new LocalHashingEmbeddingProvider() });
 
     await agent.step("Message confidentiel du projet A", "workspace-a");
-    const checkpointIdA = agent.saveCheckpoint("checkpoint-a", undefined, "workspace-a");
+    const checkpointIdA = await agent.saveCheckpoint("checkpoint-a", undefined, "workspace-a");
 
     await agent.step("Message du projet B", "workspace-b");
-    const checkpointIdB = agent.saveCheckpoint("checkpoint-b", undefined, "workspace-b");
+    const checkpointIdB = await agent.saveCheckpoint("checkpoint-b", undefined, "workspace-b");
 
     const listForB = agent.listCheckpoints("workspace-b");
     assert.ok(listForB.some((c) => c.id === checkpointIdB), "le workspace B voit son propre checkpoint");
@@ -651,7 +651,7 @@ test("ISOLATION: saveCheckpoint ne capture que le contenu du workspace demandé,
     await agent.step("Message confidentiel du projet A", "workspace-a");
     await agent.step("Message du projet B", "workspace-b");
 
-    const checkpointIdB = agent.saveCheckpoint("checkpoint-b", undefined, "workspace-b");
+    const checkpointIdB = await agent.saveCheckpoint("checkpoint-b", undefined, "workspace-b");
     const restored = loadCheckpoint(checkpointIdB, "workspace-b", true);
     assert.ok(restored, "le workspace propriétaire doit pouvoir recharger son propre checkpoint");
     const restoredText = restored!.workingMemory.map((m) => String(m.content ?? "")).join("\n");
@@ -673,7 +673,7 @@ test("ISOLATION: le contenu restauré par restoreCheckpoint reste visible au wor
     const agent = new Agent({ llm: { name: "checkpoint-restore-visibility-spy", async complete() { return { content: "ok" }; } }, embeddings: new LocalHashingEmbeddingProvider() });
 
     await agent.step("Message confidentiel du projet A", "workspace-a");
-    const checkpointIdA = agent.saveCheckpoint("checkpoint-a", undefined, "workspace-a");
+    const checkpointIdA = await agent.saveCheckpoint("checkpoint-a", undefined, "workspace-a");
 
     // Nouvel agent (mémoire de travail vierge) qui restaure le checkpoint de A dans A.
     const restorer = new Agent({ llm: { name: "restorer-spy", async complete() { return { content: "ok" }; } }, embeddings: new LocalHashingEmbeddingProvider() });
@@ -702,7 +702,7 @@ test("saveCheckpoint/restoreCheckpoint avec conversationId opèrent sur la vraie
   // La session legacy par défaut (agent.memory.working) ne contient rien de "conv-1".
   assert.equal(agent.memory.working.all().some((m) => String(m.content ?? "").includes("conversation 1")), false);
 
-  const checkpointId = agent.saveCheckpoint("checkpoint-conv-1", "conv-1");
+  const checkpointId = await agent.saveCheckpoint("checkpoint-conv-1", "conv-1");
   const state = loadCheckpoint(checkpointId);
   assert.ok(state);
   assert.ok(
@@ -724,12 +724,43 @@ test("saveCheckpoint/restoreCheckpoint avec conversationId opèrent sur la vraie
   );
 });
 
+// Review Codex (P1, PR #112) : une conversation durable jamais "chauffée" en mémoire depuis
+// le démarrage du serveur (ou évincée par le cache LRU) faisait échouer getWorkingSession()
+// silencieusement -> [] : saveCheckpoint() rapportait un succès en persistant un checkpoint
+// vide, perdant silencieusement l'historique réel de la conversation.
+test("saveCheckpoint charge une conversation durable non chauffée en mémoire au lieu de persister un checkpoint vide", async () => {
+  const storedMessage = {
+    messageId: "msg-1",
+    conversationId: "conv-cold",
+    turnId: null,
+    sequence: 1,
+    status: "completed" as const,
+    revisionOfId: null,
+    createdAt: Date.now(),
+    message: { role: "user" as const, content: "Message persisté avant redémarrage du serveur" },
+  };
+  const fakeRepository = {
+    getLastActiveMessages: async (conversationId: string) => (conversationId === "conv-cold" ? [storedMessage] : []),
+  } as unknown as import("../persistence/conversations/conversationRepository.js").IConversationRepository;
+
+  const agent = new Agent({ llm: { name: "cold-session-spy", async complete() { return { content: "ok" }; } }, embeddings: new LocalHashingEmbeddingProvider(), conversationRepository: fakeRepository });
+
+  // "conv-cold" n'a jamais été chauffée : aucun agent.step()/getOrCreateSession() appelé pour elle.
+  const checkpointId = await agent.saveCheckpoint("checkpoint-cold", "conv-cold");
+  const state = loadCheckpoint(checkpointId);
+  assert.ok(state);
+  assert.ok(
+    state!.workingMemory.some((m) => String(m.content ?? "").includes("Message persisté avant redémarrage du serveur")),
+    "saveCheckpoint doit charger la conversation durable depuis le repository plutôt que de persister un checkpoint vide",
+  );
+});
+
 test("ISOLATION: projectIsolation=false conserve le comportement global historique des checkpoints (aucune régression)", async () => {
   const previousIsolation = config.projects.projectIsolation;
   config.projects.projectIsolation = false;
   try {
     const agent = new Agent({ llm: { name: "checkpoint-spy-global", async complete() { return { content: "ok" }; } }, embeddings: new LocalHashingEmbeddingProvider() });
-    const checkpointIdA = agent.saveCheckpoint("checkpoint-a", undefined, "workspace-a");
+    const checkpointIdA = await agent.saveCheckpoint("checkpoint-a", undefined, "workspace-a");
     const listForB = agent.listCheckpoints("workspace-b");
     assert.ok(listForB.some((c) => c.id === checkpointIdA), "sans isolation, les checkpoints restent visibles depuis n'importe quel workspace (comportement historique)");
   } finally {
