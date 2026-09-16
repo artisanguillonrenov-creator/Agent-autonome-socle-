@@ -3575,7 +3575,11 @@ function bootstrapJarvis() {
   initCheckpointsPanel();
   initSidebarShortcuts();
   void renderSidebarConversations();
-  setInterval(() => { void renderSidebarConversations(); }, 4000);
+  // typeof-guard : le harness de test charge app.js dans un contexte VM minimal
+  // (voir src/interfaces/httpApi.test.ts) qui ne fournit pas setInterval.
+  if (typeof setInterval === 'function') {
+    setInterval(() => { void renderSidebarConversations(); }, 4000);
+  }
 
   // Apply general settings saved in localStorage for instant initial rendering
   const savedTheme = localStorage.getItem('jarvis_theme') || 'SYSTEM';
