@@ -727,18 +727,18 @@ export class Agent {
     ].filter(Boolean).join("\n");
   }
 
-  saveCheckpoint(label: string, conversationId?: string): string {
+  saveCheckpoint(label: string, conversationId?: string, workspaceId?: string): string {
     const working = conversationId ? this.memory.getWorkingSession(conversationId) : this.memory.working;
     return saveCheckpoint(label, {
       workingMemory: working?.all() ?? [],
       planNodes: this.planner.legacyNodes(),
       stepCount: this.stepCount,
-    });
+    }, workspaceId);
   }
 
   /** Legacy direct restoration. Interactive 11A callers must use checkpoint branching via ConversationExecutionService. */
-  restoreCheckpoint(checkpointId: string): boolean {
-    const state = loadCheckpoint(checkpointId);
+  restoreCheckpoint(checkpointId: string, workspaceId?: string): boolean {
+    const state = loadCheckpoint(checkpointId, workspaceId, config.projects.projectIsolation && Boolean(workspaceId));
     if (!state) return false;
     return this.applyCheckpointRuntimeState(state, true);
   }
@@ -750,7 +750,7 @@ export class Agent {
     return true;
   }
 
-  listCheckpoints() { return listCheckpoints(); }
+  listCheckpoints(workspaceId?: string) { return listCheckpoints(workspaceId, config.projects.projectIsolation && Boolean(workspaceId)); }
 
   setLLMProvider(llm: LLMProvider): void {
     this.llm = llm;

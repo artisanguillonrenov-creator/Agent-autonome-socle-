@@ -619,6 +619,35 @@ test("API workspaces couvre CRUD, artifacts, téléchargements et validation", a
   } finally {config.api.token=previousToken;await new Promise<void>(resolve=>server.close(()=>resolve()));}
 });
 
+// Audit préventif JARVIS-00 (brief tâche 7) : /checkpoints ne prenait aucun workspaceId
+// (ni query param GET, ni champ body POST) — un checkpoint d'un projet était visible et
+// restaurable depuis n'importe quel autre projet sous projects.projectIsolation=true.
+test("API /checkpoints respecte projects.projectIsolation via le paramètre workspaceId (fuite corrigée)", async () => {
+  const previousToken=config.api.token;config.api.token="checkpoints-api-token";
+  const agent=new Agent({llm:new MockProvider(),embeddings:new LocalHashingEmbeddingProvider()});
+  const {server,baseUrl:base}=await startTestHttpApi(agent);
+  // applyAllEffectiveRuntimeSettings() (dans startHttpApi) applique les réglages persistés au
+  // démarrage du serveur, donc écrase toute affectation faite avant : n'activer l'isolation qu'après.
+  const previousIsolation=config.projects.projectIsolation;config.projects.projectIsolation=true;
+  const call=(path:string,init:RequestInit={})=>fetch(`${base}${path}`,{...init,headers:{"content-type":"application/json",authorization:`Bearer ${config.api.token}`,...init.headers}});
+  try {
+    const savedA=await call("/api/checkpoints",{method:"POST",body:JSON.stringify({label:"checkpoint-a",workspaceId:"workspace-a"})});
+    assert.equal(savedA.status,200);const {id:idA}=await savedA.json() as {id:string};
+
+    const listForB=await (await call("/api/checkpoints?workspaceId=workspace-b")).json() as Array<{id:string}>;
+    assert.equal(listForB.some(c=>c.id===idA),false,"le workspace B ne doit jamais voir un checkpoint sauvegardé par le workspace A");
+
+    const listForA=await (await call("/api/checkpoints?workspaceId=workspace-a")).json() as Array<{id:string}>;
+    assert.ok(listForA.some(c=>c.id===idA),"le workspace A voit bien son propre checkpoint");
+
+    const restoreFromB=await call(`/api/checkpoints/${idA}/restore`,{method:"POST",body:JSON.stringify({workspaceId:"workspace-b"})});
+    assert.equal((await restoreFromB.json() as {ok:boolean}).ok,false,"restaurer depuis un autre workspace doit échouer, pas restaurer silencieusement");
+
+    const restoreFromA=await call(`/api/checkpoints/${idA}/restore`,{method:"POST",body:JSON.stringify({workspaceId:"workspace-a"})});
+    assert.equal((await restoreFromA.json() as {ok:boolean}).ok,true,"le workspace propriétaire peut restaurer son propre checkpoint");
+  } finally {config.api.token=previousToken;config.projects.projectIsolation=previousIsolation;await new Promise<void>(resolve=>server.close(()=>resolve()));}
+});
+
 test("Infermatic : base URL par défaut, catalogue dynamique, jamais de faux repli, aucune fuite de clé, effets de bord nuls", async () => {
   const previousToken = config.api.token;
   const previousInfermaticKey = config.llm.infermaticApiKey;

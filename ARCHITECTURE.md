@@ -353,3 +353,96 @@ réelles manque). PR-I n'a pas été traitée dans la même session que ce
 document (chantier de pipeline substantiel, à vérifier avec un scénario
 CI-rouge reproduit puis corrigé avant toute PR, pas seulement une
 affirmation) — voir le suivi séparé.
+
+## 9. Reviewer Gate (tâches 3/4 du brief JARVIS-00) : questions ouvertes avant implémentation
+
+Recherche menée pour tenter d'implémenter la tâche 3 ("intégrer un vrai
+build/test dans le pipeline de fusion") : le câblage n'a **pas** été fait
+dans cette session, parce que la recherche a mis au jour une ambiguïté
+d'architecture réelle qui dépasse le code — exactement le cas où la règle
+absolue n°6 du brief ("documenter et proposer, laisser la décision finale
+à William") s'applique. Ce qui suit est un compte-rendu factuel de ce qui
+existe, pas une proposition d'implémentation à l'aveugle.
+
+### Constat : deux pipelines distincts, ni l'un ni l'autre n'a de Reviewer Gate câblé
+
+**Pipeline A — Software Factory déclenchée par l'agent** (`src/services/
+softwareFactoryService.ts#executeWorkflow`, skill `software_development`) :
+c'est le pipeline réellement actif aujourd'hui — c'est lui qui a produit
+chaque PR "[Jarvis Software Factory] Patch for X". Il authentifie, lit le
+fichier, génère le code, passe le secret guard et le diff-fidelity control,
+crée la branche/le commit, **ouvre la PR, et retourne immédiatement** — sans
+attendre la CI (qui ne démarre qu'après l'ouverture de la PR) ni appeler
+aucun "auditeur". `diffFidelity` est déjà calculé et disponible dans cette
+fonction au moment du retour ; `ci`/`mainProtection` n'y sont jamais lus.
+Ce pipeline n'a ni `missionId` ni `traceId` ni `ContextVersion` — juste un
+`taskId` simple.
+
+**Pipeline B — Mission JARVIS-00 orchestrée par n8n** (`src/coordination/
+missionStore.ts` + `callbackTransport.ts`) : `AuditPacketInput` (`contracts.ts`)
+exige `missionId`/`traceId`/`ContextVersion` — des concepts qui n'existent
+que dans ce pipeline-ci, jamais dans le Pipeline A. `CALLBACK_EVENT_TYPES`
+inclut déjà `CI_STATUS_UPDATE` et `BUILD_RESULT` : le transport est conçu
+pour recevoir un statut CI/build d'une source externe (n8n ?) et le
+journaliser sur une mission. Mais **rien ne consomme ces événements
+journalisés** pour construire un `AuditPacket` ou produire un
+`ReviewerVerdict` — confirmé par une recherche exhaustive de
+`buildAuditPacket`/`buildReviewerVerdict` dans tout le dépôt : les seuls
+appelants sont `src/coordination/contracts.test.ts`. `processCallback()`
+journalise, point final ("Aucune logique de fusion GitHub n'existe dans ce
+module", docstring de `callbackTransport.ts`).
+
+Dans les deux cas, **aucun "auditeur" LLM qui lit un diff et rend un avis
+n'existe nulle part dans le dépôt** (recherche exhaustive de "auditor" /
+"reviewer" / "audit" côté LLM — rien trouvé hors le rôle `Reviewer` de
+`AgentTeam`, un système multi-agents sans rapport). La tâche 4 du brief
+("enrichir le contexte de l'auditeur au-delà du diff seul") présuppose un
+auditeur diff-only déjà existant à corriger — il n'existe pas encore à
+construire d'abord, donc les tâches 3 et 4 doivent en réalité être conçues
+ensemble, pas en deux passages séquentiels indépendants.
+
+### Pourquoi ce n'est pas un simple "appeler getCiStatus au bon endroit"
+
+`buildReviewerVerdict()` refuse déjà `GO_FUSION` si `ci.overallState !==
+"success"` — la logique de refus (critère d'acceptation de la tâche 3) est
+déjà écrite et testée (`contracts.test.ts`). Ce qui manque n'est donc pas
+cette logique, mais : (a) un point d'entrée qui construise un `AuditPacket`
+réel avec un `getCiStatus` réel, et (b) le fait que la CI n'existe pas
+encore au moment où le Pipeline A ouvre la PR — il n'y a rien à lire avant
+que GitHub Actions ait eu le temps de tourner (quelques minutes, observé
+sur ce dépôt : ~1-5 min selon le job).
+
+### Options pour combler ce gap (aucune tranchée ici)
+
+1. **Câbler dans le Pipeline A, en différé.** Ajouter une étape séparée
+   (nouvelle action de skill, ou tâche planifiée via `schedule_task`/
+   `monitor_condition` déjà existants) qui, après l'ouverture de la PR,
+   attend/sonde la CI jusqu'à complétion (borné, le timeout du skill
+   `software_development` est déjà de 600000ms) puis construit le verdict.
+   Nécessite de décider : `missionId`/`traceId` fabriqués à partir de
+   `taskId`, ou `AuditPacketInput` étendu (composition, jamais redéfini —
+   règle absolue n°2) pour rendre ces champs optionnels hors contexte
+   mission. Où le verdict est-il rendu visible ? (commentaire sur la PR
+   GitHub, la seule surface que William regarde déjà pour approuver.)
+2. **Câbler dans le Pipeline B (mission n8n).** Ajoute un consommateur des
+   `MissionEvent` `CI_STATUS_UPDATE`/`BUILD_RESULT` déjà journalisés, qui
+   construit l'`AuditPacket` et produit le verdict. Colle exactement au
+   contrat existant (`missionId`/`traceId` déjà là) mais suppose que ce
+   pipeline externe est réellement utilisé aujourd'hui — à confirmer, aucun
+   workflow n8n n'est présent dans ce dépôt pour le vérifier.
+3. **Construire l'auditeur LLM avant tout câblage CI.** Sans lui, le
+   critère d'acceptation de la tâche 3 ("REFUS_FUSION même si l'auditeur
+   n'a rien trouvé de gênant") ne peut pas être démontré — il faut un
+   auditeur pour observer qu'il n'a "rien trouvé de gênant". Implique de
+   choisir : quel `LLMProvider` l'exécute, avec quel prompt, sur quel
+   déclencheur, avec quelle preuve de non-régression (le risque PR #81 —
+   faux positif par manque de contexte — vise directement ce composant).
+
+**Recommandation, sans trancher** : l'option 1 est la seule qui touche un
+pipeline réellement actif aujourd'hui. Construire l'auditeur (item 3) est un
+prérequis technique aux deux options, pas une tâche 4 séparée qui suivrait
+une tâche 3 déjà posée — les deux devraient être conçues comme un seul
+chantier (PR-I+PR-J fusionnées), pas deux PR séquentielles indépendantes.
+Avant d'écrire du code sur ce chantier, la question à trancher par William :
+quel pipeline (A, B, ou les deux) ce Reviewer Gate doit-il réellement
+gouverner, et où le verdict doit-il apparaître pour qu'un humain le voie ?

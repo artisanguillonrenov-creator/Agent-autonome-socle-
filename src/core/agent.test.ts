@@ -599,6 +599,54 @@ test("ISOLATION: projectIsolation=true empêche toute fuite inter-projets (messa
   }
 });
 
+// ---------------------------------------------------------------------------
+// GAP D'ISOLATION (audit préventif JARVIS-00, brief tâche 7) : le correctif
+// PR #59 laissait explicitement les checkpoints hors scope ("checkpoints
+// predate this feature"). saveCheckpoint() capture pourtant workingMemory —
+// même contenu que PR #59 isolait pour recentMessages. Sans ce correctif,
+// /checkpoint list d'un projet montre les checkpoints d'un autre, et
+// /checkpoint load peut restaurer la mémoire de travail d'un autre projet.
+// ---------------------------------------------------------------------------
+
+test("ISOLATION: projectIsolation=true empêche un checkpoint de fuiter entre workspaces (saveCheckpoint/listCheckpoints/restoreCheckpoint)", async () => {
+  const previousIsolation = config.projects.projectIsolation;
+  config.projects.projectIsolation = true;
+  try {
+    const agent = new Agent({ llm: { name: "checkpoint-spy", async complete() { return { content: "ok" }; } }, embeddings: new LocalHashingEmbeddingProvider() });
+
+    await agent.step("Message confidentiel du projet A", "workspace-a");
+    const checkpointIdA = agent.saveCheckpoint("checkpoint-a", undefined, "workspace-a");
+
+    await agent.step("Message du projet B", "workspace-b");
+    const checkpointIdB = agent.saveCheckpoint("checkpoint-b", undefined, "workspace-b");
+
+    const listForB = agent.listCheckpoints("workspace-b");
+    assert.ok(listForB.some((c) => c.id === checkpointIdB), "le workspace B voit son propre checkpoint");
+    assert.equal(listForB.some((c) => c.id === checkpointIdA), false, "le workspace B ne doit jamais voir le checkpoint du workspace A");
+
+    const restoredIntoB = agent.restoreCheckpoint(checkpointIdA, "workspace-b");
+    assert.equal(restoredIntoB, false, "restaurer le checkpoint A depuis le workspace B doit être refusé, pas silencieusement ignoré");
+
+    const restoredIntoA = agent.restoreCheckpoint(checkpointIdA, "workspace-a");
+    assert.equal(restoredIntoA, true, "le workspace propriétaire peut toujours restaurer son propre checkpoint");
+  } finally {
+    config.projects.projectIsolation = previousIsolation;
+  }
+});
+
+test("ISOLATION: projectIsolation=false conserve le comportement global historique des checkpoints (aucune régression)", async () => {
+  const previousIsolation = config.projects.projectIsolation;
+  config.projects.projectIsolation = false;
+  try {
+    const agent = new Agent({ llm: { name: "checkpoint-spy-global", async complete() { return { content: "ok" }; } }, embeddings: new LocalHashingEmbeddingProvider() });
+    const checkpointIdA = agent.saveCheckpoint("checkpoint-a", undefined, "workspace-a");
+    const listForB = agent.listCheckpoints("workspace-b");
+    assert.ok(listForB.some((c) => c.id === checkpointIdA), "sans isolation, les checkpoints restent visibles depuis n'importe quel workspace (comportement historique)");
+  } finally {
+    config.projects.projectIsolation = previousIsolation;
+  }
+});
+
 test("ISOLATION: projectIsolation=false conserve le comportement global historique (aucune régression)", async () => {
   const previousIsolation = config.projects.projectIsolation;
   config.projects.projectIsolation = false;
