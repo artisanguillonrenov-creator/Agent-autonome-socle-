@@ -15,6 +15,7 @@ import { captureScreenshotSkill, analyzeScreenshotSkill } from "./visionTools.js
 import { sendAndroidCommandSkill } from "./androidCommand.js";
 import { generateImageSkill, validateGeneratedImageSkill } from "./imageGenerationSkill.js";
 import { proposePromptRuleSkill } from "./proposePromptRule.js";
+import { webImageSearchSkill } from "./webImageSearchSkill.js";
 
 export const builtinSkills: SkillDefinition[] = [
   getCurrentTimeSkill,
@@ -37,4 +38,5 @@ export const builtinSkills: SkillDefinition[] = [
   generateImageSkill,
   validateGeneratedImageSkill,
   proposePromptRuleSkill,
+  webImageSearchSkill,
 ];

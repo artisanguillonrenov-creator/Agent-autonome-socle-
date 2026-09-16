@@ -1057,9 +1057,19 @@ function escapeHtml(str) {
     .replace(/'/g, '&#39;');
 }
 
+// URL d'image acceptée : absolue http(s) (web/génération cloud) ou chemin relatif commençant
+// par "/" (endpoints locaux de ce serveur, ex. /api/workbench/images, /api/artifacts/...).
+const MARKDOWN_IMAGE_URL_RE = /(https?:\/\/[^\s)]+|\/[^\s)]+)/;
+
 function renderInlineMarkdown(text) {
   let out = escapeHtml(text);
   out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
+  // Image AVANT lien : `![alt](url)` doit être reconnu comme image, pas comme un lien précédé
+  // d'un "!" littéral.
+  out = out.replace(
+    new RegExp(`!\\[([^\\]]*)\\]\\(${MARKDOWN_IMAGE_URL_RE.source}\\)`, 'g'),
+    (_match, alt, url) => `<img src="${url}" alt="${alt}" loading="lazy" class="chat-image" />`,
+  );
   out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   out = out.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
   out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
