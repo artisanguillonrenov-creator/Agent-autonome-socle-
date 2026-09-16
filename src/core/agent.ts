@@ -729,8 +729,12 @@ export class Agent {
 
   saveCheckpoint(label: string, conversationId?: string, workspaceId?: string): string {
     const working = conversationId ? this.memory.getWorkingSession(conversationId) : this.memory.working;
+    const isolate = config.projects.projectIsolation && Boolean(workspaceId);
     return saveCheckpoint(label, {
-      workingMemory: working?.all() ?? [],
+      // allFor() (pas all()) : une session de travail partagée peut déjà contenir des tours
+      // d'autres workspaces (ex. isolation activée après coup) — sérialiser tout puis ne
+      // taguer que la ligne du checkpoint laisserait fuiter leur contenu (review PR #110).
+      workingMemory: working?.allFor(workspaceId, isolate) ?? [],
       planNodes: this.planner.legacyNodes(),
       stepCount: this.stepCount,
     }, workspaceId);
@@ -740,12 +744,17 @@ export class Agent {
   restoreCheckpoint(checkpointId: string, workspaceId?: string): boolean {
     const state = loadCheckpoint(checkpointId, workspaceId, config.projects.projectIsolation && Boolean(workspaceId));
     if (!state) return false;
-    return this.applyCheckpointRuntimeState(state, true);
+    return this.applyCheckpointRuntimeState(state, true, workspaceId);
   }
 
-  applyCheckpointRuntimeState(state: CheckpointState, restoreLegacyWorkingMemory = false): boolean {
+  applyCheckpointRuntimeState(state: CheckpointState, restoreLegacyWorkingMemory = false, workspaceId?: string): boolean {
     try { this.planner.restore(state.planNodes); } catch { return false; }
-    if (restoreLegacyWorkingMemory) this.memory.working.restore(state.workingMemory);
+    if (restoreLegacyWorkingMemory) {
+      // restoreEntries() (pas restore()) : tague chaque message restauré avec workspaceId,
+      // sinon les entrées reviennent non scopées et allFor() sous isolation les exclurait
+      // silencieusement du contexte qu'on vient pourtant de restaurer avec succès (review PR #110).
+      this.memory.working.restoreEntries(state.workingMemory.map((message) => ({ message, workspaceId })));
+    }
     this.stepCount = state.stepCount;
     return true;
   }
