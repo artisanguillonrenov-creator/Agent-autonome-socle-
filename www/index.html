@@ -25,56 +25,98 @@
       <div class="sidebar-header">
         <span class="sidebar-logo">🤖 JARVIS</span>
       </div>
-      <nav class="sidebar-nav">
-        <a class="nav-item active" data-view="accueil">
-          <span class="nav-icon">🏠</span>
-          <span>Accueil</span>
+
+      <!-- Style Claude : nouvelle discussion en tête de sidebar. -->
+      <div class="sidebar-primary">
+        <button type="button" id="btn-new-chat" class="sidebar-newchat-btn">
+          <span class="sidebar-newchat-icon">✎</span>
+          <span>Nouvelle discussion</span>
+        </button>
+      </div>
+
+      <!-- Raccourcis façon Claude (Projets / Artéfacts / Programmé / Personnaliser),
+           mappés sur des fonctionnalités réelles de Jarvis : voir wiring dans app.js. -->
+      <nav class="sidebar-shortcuts">
+        <a class="nav-item shortcut-item" data-view="tasks">
+          <span class="nav-icon">📁</span>
+          <span>Projets</span>
         </a>
-        <a class="nav-item" data-view="chat">
-          <span class="nav-icon">💬</span>
-          <span>Chat</span>
+        <a class="shortcut-item nav-item" id="shortcut-artifacts" href="#" role="button">
+          <span class="nav-icon">🧩</span>
+          <span>Artéfacts</span>
         </a>
-        <a class="nav-item" data-view="operations">
-          <span class="nav-icon">⚡</span>
-          <span>Opérations</span>
+        <a class="nav-item shortcut-item" data-view="autonomy">
+          <span class="nav-icon">🗓️</span>
+          <span>Programmé</span>
         </a>
-        <a class="nav-item" data-view="services">
-          <span class="nav-icon">🔌</span>
-          <span>Services</span>
-        </a>
-        <a class="nav-item" data-view="tasks">
-          <span class="nav-icon">📋</span>
-          <span>Tâches & Plans</span>
-        </a>
-        <a class="nav-item" data-view="autonomy">
-          <span class="nav-icon">🔔</span>
-          <span>Autonomie <strong id="notification-count"></strong></span>
-        </a>
-        <a class="nav-item" data-view="memory">
-          <span class="nav-icon">🧠</span>
-          <span>Mémoire</span>
-        </a>
-        <a class="nav-item" data-view="skills">
-          <span class="nav-icon">🛠️</span>
-          <span>Skills</span>
-        </a>
-        <a class="nav-item" data-view="models">
-          <span class="nav-icon">🤖</span>
-          <span>Modèles IA</span>
-        </a>
-        <a class="nav-item" data-view="reflection">
-          <span class="nav-icon">🔍</span>
-          <span>Réflexion</span>
-        </a>
-        <a class="nav-item" data-view="system">
-          <span class="nav-icon">🖥️</span>
-          <span>Système</span>
-        </a>
-        <a class="nav-item" data-view="settings">
-          <span class="nav-icon">⚙️</span>
-          <span>Paramètres</span>
+        <a class="nav-item shortcut-item" data-view="settings">
+          <span class="nav-icon">🎛️</span>
+          <span>Personnaliser</span>
         </a>
       </nav>
+
+      <div class="sidebar-section-title">
+        <span>Discussions et tâches</span>
+      </div>
+      <div id="sidebar-conversations" class="sidebar-conversations">
+        <div class="checkpoint-empty">Chargement…</div>
+      </div>
+
+      <!-- Console complète de Jarvis (les 11 vues historiques) : repliée par défaut
+           pour rapprocher visuellement la sidebar de Claude, toujours accessible. -->
+      <details class="sidebar-console">
+        <summary>Console Jarvis</summary>
+        <nav class="sidebar-nav">
+          <a class="nav-item active" data-view="accueil">
+            <span class="nav-icon">🏠</span>
+            <span>Accueil</span>
+          </a>
+          <a class="nav-item" data-view="chat">
+            <span class="nav-icon">💬</span>
+            <span>Chat</span>
+          </a>
+          <a class="nav-item" data-view="operations">
+            <span class="nav-icon">⚡</span>
+            <span>Opérations</span>
+          </a>
+          <a class="nav-item" data-view="services">
+            <span class="nav-icon">🔌</span>
+            <span>Services</span>
+          </a>
+          <a class="nav-item" data-view="tasks">
+            <span class="nav-icon">📋</span>
+            <span>Tâches & Plans</span>
+          </a>
+          <a class="nav-item" data-view="autonomy">
+            <span class="nav-icon">🔔</span>
+            <span>Autonomie <strong id="notification-count"></strong></span>
+          </a>
+          <a class="nav-item" data-view="memory">
+            <span class="nav-icon">🧠</span>
+            <span>Mémoire</span>
+          </a>
+          <a class="nav-item" data-view="skills">
+            <span class="nav-icon">🛠️</span>
+            <span>Skills</span>
+          </a>
+          <a class="nav-item" data-view="models">
+            <span class="nav-icon">🤖</span>
+            <span>Modèles IA</span>
+          </a>
+          <a class="nav-item" data-view="reflection">
+            <span class="nav-icon">🔍</span>
+            <span>Réflexion</span>
+          </a>
+          <a class="nav-item" data-view="system">
+            <span class="nav-icon">🖥️</span>
+            <span>Système</span>
+          </a>
+          <a class="nav-item" data-view="settings">
+            <span class="nav-icon">⚙️</span>
+            <span>Paramètres</span>
+          </a>
+        </nav>
+      </details>
 
       <!-- Brique 9 : gestion graphique des checkpoints (équivalent visuel de
            `/checkpoint save` en CLI) — sauvegarde et restauration d'un état de
