@@ -5,6 +5,7 @@ import { createImageProvider } from "../../llm/providers/imageProviderFactory.js
 import { createLLMProvider, resolveLLMSelection } from "../../llm/providers/index.js";
 import { ArtifactStore } from "../../workspaces/artifactStore.js";
 import { writeGeneratedImage, isWithinImageWorkbench } from "../../workbench/imageWorkbench.js";
+import { searchWebImages } from "../../web/imageSearch.js";
 
 const artifactStore = new ArtifactStore();
 
@@ -24,7 +25,9 @@ export const generateImageSkill: SkillDefinition = {
   name: "generate_image",
   description:
     "Génère une image à partir d'un prompt texte via le backend de génération d'images actif (ComfyUI local ou provider cloud FLUX). " +
-    "Le prompt est transmis exactement tel quel au backend. Retourne le chemin local du fichier créé (ou l'artifactId si workspaceId est fourni).",
+    "Le prompt est transmis exactement tel quel au backend. Retourne un champ 'url' (chemin servi par ce serveur, à afficher directement en " +
+    "Markdown via ![alt](url) dans la réponse) ainsi que le chemin local du fichier créé (ou l'artifactId si workspaceId est fourni). " +
+    "En cas d'échec du backend, retourne à la place des suggestions d'images web existantes sur le même sujet.",
   argsHint: '{"prompt": string, "negativePrompt"?: string, "width"?: number, "height"?: number, "steps"?: number, "seed"?: number, "workspaceId"?: string}',
   category: "Technique",
   parameters: {
@@ -60,7 +63,19 @@ export const generateImageSkill: SkillDefinition = {
         format,
       });
     } catch (error) {
-      return `Erreur generate_image : génération échouée (${(error as Error).message}).`;
+      // Le backend de génération (ComfyUI/FLUX) est indisponible ou en erreur : plutôt que de
+      // renvoyer une simple erreur que l'agent répercuterait telle quelle à l'utilisateur, on
+      // propose immédiatement des images web existantes sur le même sujet (voir
+      // search_web_image) pour que la conversation reste utile.
+      const fallback = await searchWebImages(prompt, 3).catch(() => []);
+      return JSON.stringify({
+        error: `génération échouée (${(error as Error).message})`,
+        fallbackSuggestion:
+          fallback.length > 0
+            ? "Backend de génération indisponible : voici des images existantes trouvées sur le web à proposer à la place, en citant leur source."
+            : "Backend de génération indisponible et aucune image de secours trouvée sur le web.",
+        results: fallback,
+      });
     }
 
     const bytes = Buffer.from(base64, "base64");
@@ -74,7 +89,13 @@ export const generateImageSkill: SkillDefinition = {
           mimeType: format === "jpeg" ? "image/jpeg" : "image/png",
           content: bytes,
         });
-        return JSON.stringify({ artifactId: artifact.id, workspaceId, sizeBytes: artifact.sizeBytes, provider: provider.name });
+        return JSON.stringify({
+          artifactId: artifact.id,
+          workspaceId,
+          sizeBytes: artifact.sizeBytes,
+          provider: provider.name,
+          url: `/api/artifacts/${encodeURIComponent(artifact.id)}?inline=1`,
+        });
       } catch (error) {
         return `Erreur generate_image : enregistrement artefact échoué (${(error as Error).message}).`;
       }
@@ -82,7 +103,12 @@ export const generateImageSkill: SkillDefinition = {
 
     try {
       const filePath = await writeGeneratedImage(bytes, format);
-      return JSON.stringify({ path: filePath, sizeBytes: bytes.length, provider: provider.name });
+      return JSON.stringify({
+        path: filePath,
+        sizeBytes: bytes.length,
+        provider: provider.name,
+        url: `/api/workbench/images?path=${encodeURIComponent(filePath)}`,
+      });
     } catch (error) {
       return `Erreur generate_image : écriture disque échouée (${(error as Error).message}).`;
     }

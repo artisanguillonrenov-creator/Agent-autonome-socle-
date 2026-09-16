@@ -719,6 +719,9 @@ export class Agent {
         : "",
       `PLANIFICATION : utilise 'execute_mission' uniquement pour un objectif réellement multi-étapes. Capabilities actuellement planifiables : ${this.serviceOrchestrator.registry.listServices().filter((service) => service.enabled).flatMap((service) => service.capabilities).filter((value, index, array) => array.indexOf(value) === index).join(", ") || "aucune"}.`,
       "ENRICHISSEMENT VISUEL : Structure TOUTES tes réponses complexes (listes, classements, comparaisons, synthèses) sous forme de tableaux Markdown, listes à puces thématiques et liens cliquables.",
+      selectedNames.has("generate_image") || selectedNames.has("search_web_image") || selectedNames.has("validate_generated_image")
+        ? "AFFICHAGE D'IMAGES : l'interface de chat rend le Markdown, y compris la syntaxe image ![alt](url) — tu PEUX et DOIS afficher des images directement dans ta réponse, jamais dire que c'est impossible. Pour une création originale, appelle 'generate_image' puis intègre tel quel le champ 'url' de son résultat en ![description](url) ; s'il échoue, le résultat contient un 'fallbackSuggestion' avec des images web existantes ('results': [{title, imageUrl, sourceUrl}]) à afficher à la place (mentionne la source). Pour une vraie photo d'un sujet existant, appelle plutôt 'search_web_image' et affiche directement le ou les 'imageUrl' renvoyés, avec un lien vers 'sourceUrl' en légende."
+        : "",
       "RÈGLE DE FORMAT : Utilise les outils natifs mis à ta disposition. Ne rédiges JAMAIS de structures techniques JSON ou balises XML dans le texte adressé à l'utilisateur.",
       composeDynamicRulesSection(),
     ].filter(Boolean).join("\n");

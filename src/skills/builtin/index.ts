@@ -14,6 +14,7 @@ import { runAgentTeamSkill } from "./agentTeam.js";
 import { captureScreenshotSkill, analyzeScreenshotSkill } from "./visionTools.js";
 import { sendAndroidCommandSkill } from "./androidCommand.js";
 import { generateImageSkill, validateGeneratedImageSkill } from "./imageGenerationSkill.js";
+import { webImageSearchSkill } from "./webImageSearchSkill.js";
 
 export const builtinSkills: SkillDefinition[] = [
   getCurrentTimeSkill,
@@ -35,4 +36,5 @@ export const builtinSkills: SkillDefinition[] = [
   sendAndroidCommandSkill,
   generateImageSkill,
   validateGeneratedImageSkill,
+  webImageSearchSkill,
 ];
