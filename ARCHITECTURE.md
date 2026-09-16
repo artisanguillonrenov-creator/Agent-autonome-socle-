@@ -273,3 +273,83 @@ traiter comme des chantiers séparés plutôt qu'en un seul passage :
 - `repositoryIntelligenceEngine.ts` : approfondir la compréhension inter-
   fichiers (dépendances, graphe d'imports) au-delà de la lecture/recherche
   actuelle.
+
+## 8. Chevauchements architecturaux identifiés par l'audit Skills & Capabilities
+
+`src/coordination/gapAnalysis.ts#KNOWN_ARCHITECTURAL_OVERLAPS` (chantier
+Skills & Capabilities, PR #90) liste 3 chevauchements constatés qu'aucun
+croisement programmatique ne peut détecter seul (noms différents, même
+rôle). Le verdict y est volontairement `UNKNOWN` — "ne supprime rien
+automatiquement sans preuve que c'est inutilisé" — un humain tranche. Cette
+section documente chacun et propose une résolution, sans trancher : le
+`verdict` dans `gapAnalysis.ts` reste `UNKNOWN` tant que William n'a pas
+validé l'une des options ci-dessous.
+
+### 8.1 Deux instances `TaskStore` indépendantes sur la même table SQLite
+
+`src/skills/builtin/tasks.ts` instancie un `TaskStore` module-level
+(`create_task`/`list_tasks`/`complete_task`) et `src/skills/runtime.ts#createRuntimeSkills`
+en instancie un second (`schedule_task`/`monitor_condition`/`inspect_task`/
+`cancel_task`). Les deux pointent vers la même table SQLite (`tasks`,
+`src/tasks/taskStore.ts`) — donc pas de divergence de données entre les
+deux familles de skills — mais exposent au LLM deux surfaces différentes
+pour manipuler le même concept, avec un risque de confusion sur laquelle
+utiliser pour quel besoin.
+
+**Proposition** : `MERGE` — fusionner les deux familles de skills sous un
+seul jeu d'actions porté par une seule instance de `TaskStore` injectée
+(comme `repositoryClient`/`vectorMemory` le sont déjà dans
+`createRuntimeSkills`), au lieu de deux instanciations indépendantes.
+Risque faible (même backing store, donc pas de migration de données) mais
+touche la surface de tool-calling exposée au LLM — à valider par William
+avant d'y toucher, et à traiter comme un chantier dédié (pas un side-effect
+d'une autre PR).
+
+### 8.2 Trois alias de type portant le même ensemble de valeurs
+
+`src/orchestration/contract.ts#RiskLevel`, `src/types.ts#SkillRisk` et
+`src/types.ts#PendingActionRisk` sont trois `type` distincts, tous égaux à
+`"LOW" | "MEDIUM" | "HIGH" | "CRITICAL"`. Aucune divergence de valeur
+constatée à ce jour — le risque est une dérive future si l'un des trois est
+étendu (ex. ajout de `"NONE"`) sans les deux autres, ce qui romprait
+silencieusement l'interopérabilité entre modules qui se passent un risque
+d'un contrat à l'autre.
+
+**Proposition** : `MERGE` — garder `RiskLevel` (`src/orchestration/contract.ts`)
+comme unique source de vérité (c'est déjà le nom le plus générique et le
+plus utilisé transversalement) et faire de `SkillRisk`/`PendingActionRisk`
+des ré-exports (`export type SkillRisk = RiskLevel`) plutôt que des
+définitions dupliquées. Risque très faible (signature de type identique
+aujourd'hui, changement mécanique), mais volontairement laissé hors de
+PR-G/PR-M pour respecter la règle "une PR par sujet" — chantier séparé et
+trivial à vérifier (le compilateur TypeScript signale immédiatement tout
+site d'usage incompatible).
+
+### 8.3 Pipeline Reviewer Gate : les deux moitiés existent, rien ne les relie encore en production
+
+`src/repository/githubReadOnlyClient.ts#getCiStatus`/`getMainProtectionStatus`
+(lecture réelle GitHub) et `src/coordination/contracts.ts#AuditPacketInput`
+(contrat de preuves attendu par le Reviewer, avec un champ `ci: CiStatusResult`
+non optionnel) sont chacun testés isolément, mais aucun appelant en
+production ne construit encore d'`AuditPacket` réel à partir d'un appel
+`getCiStatus` — confirmé par une recherche exhaustive de `buildAuditPacket`/
+`buildReviewerVerdict` dans le dépôt : les seuls appelants sont
+`src/coordination/contracts.test.ts`. `src/services/softwareFactoryService.ts`
+(le pipeline de chantier réel) ne référence ni `AuditPacket` ni
+`ReviewerVerdict` du tout. Ce n'est pas un doublon à fusionner : c'est
+l'intégration manquante que la tâche 3 de ce brief (PR-I, "intégrer un vrai
+build/test dans le pipeline de fusion") est censée combler — cf. incident
+PR #83 (pipeline ne lance pas `npm run build`/`npm test` avant verdict).
+
+**Proposition** : pas de verdict de déduplication ici (ce n'est pas un
+chevauchement au sens strict, les deux moitiés ont des responsabilités
+distinctes et complémentaires) — la résolution est le câblage lui-même,
+scope de PR-I : appeler `getCiStatus`/`getMainProtectionStatus` au bon
+moment du pipeline, peupler `AuditPacketInput.ci`/`mainProtection`, et
+bloquer `GO_FUSION` si le statut agrégé n'est pas `success`
+(`buildReviewerVerdict` refuse déjà `GO_FUSION` si `ci.overallState !==
+"success"` — la logique de refus existe, seule l'alimentation en données
+réelles manque). PR-I n'a pas été traitée dans la même session que ce
+document (chantier de pipeline substantiel, à vérifier avec un scénario
+CI-rouge reproduit puis corrigé avant toute PR, pas seulement une
+affirmation) — voir le suivi séparé.

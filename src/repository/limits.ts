@@ -33,6 +33,8 @@ export const REPOSITORY_INTELLIGENCE_LIMITS = Object.freeze({
 
   AUDIT_MAX_FILES: 40,
   AUDIT_MAX_FINDINGS: 100,
+
+  CI_STATUS_MAX_CHECKS: 50,
 });
 
 /** Erreur stable : le message porte le code, jamais de texte libre imprévisible. */

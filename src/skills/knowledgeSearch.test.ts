@@ -16,7 +16,7 @@ import { Planner } from "../planning/planner.js";
 import { PlanRunner } from "../planning/planRunner.js";
 import { WorkflowRegistry } from "../workflows/workflowRegistry.js";
 import { createRuntimeSkills } from "./runtime.js";
-import type { GithubReadOnlyClient, RepoRef, TreeEntry } from "../repository/githubReadOnlyClient.js";
+import type { CiStatusResult, GithubReadOnlyClient, MainProtectionResult, RepoRef, TreeEntry } from "../repository/githubReadOnlyClient.js";
 
 const TARGET: RepoRef = { owner: "artisanguillonrenov-creator", repo: "Agent-autonome-socle-" };
 
@@ -76,6 +76,12 @@ function mockRepositoryClient(): GithubReadOnlyClient {
     },
     async compare() {
       return { aheadBy: 1, behindBy: 0, totalCommits: 1, files: [], totalFiles: 0 };
+    },
+    async getCiStatus(_target, sha): Promise<CiStatusResult> {
+      return { sha, overallState: "success", totalCount: 1, checks: [{ name: "build", source: "check_run", state: "success", url: null, startedAt: "2024-01-01T00:00:00Z", completedAt: "2024-01-01T00:05:00Z" }] };
+    },
+    async getMainProtectionStatus(_target, branch): Promise<MainProtectionResult> {
+      return { status: "MAIN_PROTECTION_VERIFIED", branch, pullRequestRequired: true, requiredChecksConfigured: true, forcePushBlocked: true, adminsEnforced: true, reason: "PR obligatoire et interdiction de force-push confirmées par la protection de branche GitHub." };
     },
   };
 }
@@ -142,6 +148,51 @@ test("knowledge_search READ_FILE bloque un fichier sensible même demandé expli
   assert.equal(result.text, undefined);
 });
 
+test("knowledge_search CI_STATUS lit le statut CI réel d'un commit via githubReadOnlyClient.getCiStatus (gap read_ci_status câblé)", async () => {
+  const h = harness();
+  const skill = h.get("knowledge_search");
+  const result = JSON.parse(await skill.handler!({ action: "CI_STATUS", sha: "deadbeef" }, {} as any));
+  assert.equal(result.sha, "deadbeef");
+  assert.equal(result.overallState, "success");
+  assert.equal(result.checks.length, 1);
+});
+
+test("knowledge_search CI_STATUS exige un sha", async () => {
+  const h = harness();
+  const skill = h.get("knowledge_search");
+  await assert.rejects(() => skill.handler!({ action: "CI_STATUS" }, {} as any), /CI_STATUS_SHA_REQUIRED/);
+});
+
+test("knowledge_search CI_STATUS borne les checks retournés au LLM sans fausser overallState/totalCount (P2 review Codex #109)", async () => {
+  const manyChecks = Array.from({ length: 202 }, (_, n) => ({ name: `check-${n}`, source: "check_run" as const, state: "success" as const, url: null, startedAt: null, completedAt: null }));
+  const client = mockRepositoryClient();
+  const withManyChecks: GithubReadOnlyClient = { ...client, async getCiStatus(_target, sha) { return { sha, overallState: "success", totalCount: manyChecks.length, checks: manyChecks }; } };
+  const h = harness(withManyChecks);
+  const skill = h.get("knowledge_search");
+  const result = JSON.parse(await skill.handler!({ action: "CI_STATUS", sha: "deadbeef" }, {} as any));
+  assert.equal(result.totalCount, 202);
+  assert.equal(result.overallState, "success");
+  assert.ok(result.checks.length < 202);
+  assert.equal(result.truncated, true);
+  assert.ok(result.warnings.includes("REPOSITORY_CI_STATUS_CHECKS_TRUNCATED"));
+});
+
+test("knowledge_search MAIN_PROTECTION lit la protection de branche réelle via githubReadOnlyClient.getMainProtectionStatus (gap read_main_protection câblé)", async () => {
+  const h = harness();
+  const skill = h.get("knowledge_search");
+  const result = JSON.parse(await skill.handler!({ action: "MAIN_PROTECTION", branch: "main" }, {} as any));
+  assert.equal(result.status, "MAIN_PROTECTION_VERIFIED");
+  assert.equal(result.branch, "main");
+  assert.equal(result.forcePushBlocked, true);
+});
+
+test("knowledge_search MAIN_PROTECTION retombe sur la branche par défaut si non précisée", async () => {
+  const h = harness();
+  const skill = h.get("knowledge_search");
+  const result = JSON.parse(await skill.handler!({ action: "MAIN_PROTECTION" }, {} as any));
+  assert.equal(result.branch, "main");
+});
+
 test("knowledge_search READ_PR / READ_PR_DIFF fonctionnent via le runtime réel", async () => {
   const h = harness();
   const skill = h.get("knowledge_search");
@@ -202,6 +253,34 @@ test("intégration Agent réelle : un tool call knowledge_search est exécuté d
   assert.match(toolResult, /Résultat de l'outil 'knowledge_search'/);
   const parsed = JSON.parse(toolResult.replace(/^\[Résultat de l'outil '[^']+'\]:\s*/, ""));
   assert.ok(parsed.text.includes("Jarvis"));
+});
+
+test("intégration Agent réelle : un tool call knowledge_search CI_STATUS est exécuté de bout en bout (facade réellement invocable, pas juste importable)", async () => {
+  const { Agent } = await import("../core/agent.js");
+  config.db.path = ":memory:";
+  config.workspace.root = mkdtempSync(join(tmpdir(), "knowledge-search-ci-agent-"));
+  closeDb();
+  let calls = 0;
+  let toolResult = "";
+  const llm = {
+    name: "gate",
+    supportsNativeTools: true,
+    async complete(messages: any[], options: any) {
+      calls++;
+      if (calls === 1) {
+        assert.ok((options.tools ?? []).some((t: any) => t.function.name === "knowledge_search"), "knowledge_search doit être proposé au LLM");
+        return { content: null, toolCalls: [{ id: "call-1", type: "function", function: { name: "knowledge_search", arguments: JSON.stringify({ action: "CI_STATUS", sha: "deadbeef" }) } }] };
+      }
+      toolResult = messages.find((m) => m.role === "tool" && m.toolCallId === "call-1")?.content ?? "";
+      return { content: "done" };
+    },
+  };
+  const agent = new Agent({ llm: llm as any, embeddings: new LocalHashingEmbeddingProvider(), repositoryClient: mockRepositoryClient() });
+  (agent.skillSelector as any).select = async () => [agent.skills.get("knowledge_search")!];
+  await agent.step("le build est-il vert sur le commit deadbeef ?");
+  assert.equal(calls, 2);
+  const parsed = JSON.parse(toolResult.replace(/^\[Résultat de l'outil '[^']+'\]:\s*/, ""));
+  assert.equal(parsed.overallState, "success");
 });
 
 test("intégration Agent réelle : refuse un tool call knowledge_search forgé hors sélection (exposure gate)", async () => {
