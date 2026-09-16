@@ -199,3 +199,49 @@ test("Agent enchaîne knowledge_search puis software_development jusqu'à la PR"
   assert.match(result.response, /https:\/\/github\.com\/example\/repo\/pull\/999/);
   assert.equal(result.iterations, 3, "Jarvis ne doit pas s'arrêter après knowledge_search");
 });
+
+// surgical_edit (tâche 5, brief JARVIS-00) : oldString/newString doivent atteindre
+// TaskRequest.context à travers le schéma réel du skill (additionalProperties:false
+// les rejetterait silencieusement s'ils n'étaient pas déclarés) — pas seulement
+// vérifiés côté SoftwareFactoryService (voir softwareFactoryService.test.ts).
+test("Agent : un tool call software_development avec oldString/newString atteint bien TaskRequest.context (schéma du skill câblé, pas seulement le service)", async () => {
+  setupDb();
+  const adapter = new FakeFactoryAdapter();
+  const orchestrator = new ServiceOrchestrator({ adapter });
+  let call = 0;
+  const llm: LLMProvider = {
+    name: "surgical-edit-schema-test",
+    async complete(_messages, options) {
+      call += 1;
+      if (call === 1) {
+        return {
+          content: null,
+          toolCalls: [
+            {
+              id: "call-surgical",
+              type: "function",
+              function: {
+                name: "software_development",
+                arguments: JSON.stringify({
+                  objective: "Corrige le test qui échoue",
+                  filePath: "src/memory/memoryManager.ts",
+                  oldString: "return undefined;",
+                  newString: "return 42;",
+                }),
+              },
+            },
+          ],
+        };
+      }
+      return { content: "PR créée : https://github.com/example/repo/pull/999" };
+    },
+  };
+  const agent = new Agent({ llm, embeddings: new LocalHashingEmbeddingProvider(), orchestrator, maxIterations: 4, reflectionEveryNSteps: 999 });
+  (agent.skillSelector as any).select = async () => [agent.skills.get("software_development")!];
+
+  await agent.step("corrige ce bug précis dans memoryManager.ts");
+
+  assert.equal(adapter.factoryCalls.length, 1);
+  assert.equal(adapter.factoryCalls[0].context.oldString, "return undefined;");
+  assert.equal(adapter.factoryCalls[0].context.newString, "return 42;");
+});

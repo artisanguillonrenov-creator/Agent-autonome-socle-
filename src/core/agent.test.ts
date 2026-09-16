@@ -14,6 +14,7 @@ const { builtinSkills } = await import("../skills/builtin/index.js");
 const { dispatchCapabilitySkill } = await import("../skills/builtin/dispatchCapability.js");
 const { selectRecentMessages } = await import("../memory/selectRecentMessages.js");
 const { config } = await import("../config.js");
+const { loadCheckpoint } = await import("../persistence/checkpoint.js");
 
 const ordinaryMessage = (content: string): ChatMessage => ({ role: "user", content });
 const toolBlock = (...ids: string[]): ChatMessage[] => [
@@ -629,6 +630,61 @@ test("ISOLATION: projectIsolation=true empêche un checkpoint de fuiter entre wo
 
     const restoredIntoA = agent.restoreCheckpoint(checkpointIdA, "workspace-a");
     assert.equal(restoredIntoA, true, "le workspace propriétaire peut toujours restaurer son propre checkpoint");
+  } finally {
+    config.projects.projectIsolation = previousIsolation;
+  }
+});
+
+// Review Codex (P1, PR #110) : une session de travail partagée (ex. isolation activée
+// après que A et B ont déjà écrit dans la même session) contient un mélange de tours
+// A et B avant même qu'aucun checkpoint ne soit sauvegardé. Sauvegarder un checkpoint
+// "pour B" ne doit alors capturer QUE les tours de B, jamais tout le mélange sous
+// prétexte que seule la ligne du checkpoint est taguée.
+test("ISOLATION: saveCheckpoint ne capture que le contenu du workspace demandé, même si la session de travail contient déjà un mélange d'autres workspaces", async () => {
+  const previousIsolation = config.projects.projectIsolation;
+  config.projects.projectIsolation = true;
+  try {
+    const agent = new Agent({ llm: { name: "checkpoint-mixed-spy", async complete() { return { content: "ok" }; } }, embeddings: new LocalHashingEmbeddingProvider() });
+
+    // A et B écrivent tous les deux dans la session de travail par défaut AVANT toute
+    // sauvegarde de checkpoint — le scénario exact manqué par le premier jeu de tests.
+    await agent.step("Message confidentiel du projet A", "workspace-a");
+    await agent.step("Message du projet B", "workspace-b");
+
+    const checkpointIdB = agent.saveCheckpoint("checkpoint-b", undefined, "workspace-b");
+    const restored = loadCheckpoint(checkpointIdB, "workspace-b", true);
+    assert.ok(restored, "le workspace propriétaire doit pouvoir recharger son propre checkpoint");
+    const restoredText = restored!.workingMemory.map((m) => String(m.content ?? "")).join("\n");
+    assert.ok(restoredText.includes("Message du projet B"), "le checkpoint de B doit contenir le message de B");
+    assert.equal(restoredText.includes("Message confidentiel du projet A"), false, "le checkpoint de B ne doit jamais contenir le message de A, même s'il était déjà présent dans la session de travail partagée");
+  } finally {
+    config.projects.projectIsolation = previousIsolation;
+  }
+});
+
+// Review Codex (P2, PR #110) : une fois le chargement autorisé, WorkingMemory.restore()
+// (sans tag) rendait les tours restaurés invisibles à allFor(workspaceId, true) au tour
+// suivant — restoreCheckpoint() renvoyait true mais le contexte restauré était en réalité
+// perdu pour le workspace qui vient de restaurer.
+test("ISOLATION: le contenu restauré par restoreCheckpoint reste visible au workspace restaurateur au tour suivant (le tag de workspace survit à la restauration)", async () => {
+  const previousIsolation = config.projects.projectIsolation;
+  config.projects.projectIsolation = true;
+  try {
+    const agent = new Agent({ llm: { name: "checkpoint-restore-visibility-spy", async complete() { return { content: "ok" }; } }, embeddings: new LocalHashingEmbeddingProvider() });
+
+    await agent.step("Message confidentiel du projet A", "workspace-a");
+    const checkpointIdA = agent.saveCheckpoint("checkpoint-a", undefined, "workspace-a");
+
+    // Nouvel agent (mémoire de travail vierge) qui restaure le checkpoint de A dans A.
+    const restorer = new Agent({ llm: { name: "restorer-spy", async complete() { return { content: "ok" }; } }, embeddings: new LocalHashingEmbeddingProvider() });
+    const restored = restorer.restoreCheckpoint(checkpointIdA, "workspace-a");
+    assert.equal(restored, true);
+
+    const retrieved = await restorer.memory.retrieve("Message confidentiel du projet A", 5, "workspace-a");
+    assert.ok(
+      retrieved.recentMessages.some((m) => String(m.content ?? "").includes("Message confidentiel du projet A")),
+      "le message restauré doit rester visible au workspace qui vient de le restaurer, pas silencieusement exclu faute de tag",
+    );
   } finally {
     config.projects.projectIsolation = previousIsolation;
   }

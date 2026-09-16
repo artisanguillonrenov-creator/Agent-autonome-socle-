@@ -3506,7 +3506,12 @@ async function renderCheckpointsPanel() {
   const list = elements.checkpointList;
   if (!list) return;
   try {
-    const allCheckpoints = await fetchApi('/api/checkpoints');
+    // Même workspace que attachFileToConversation() : quand projects.projectIsolation est
+    // actif côté backend, un checkpoint sauvegardé/listé/restauré sans workspaceId retombe
+    // sur le comportement global historique (voir persistence/checkpoint.ts) — le passer ici
+    // permet à cette isolation de s'appliquer réellement au panneau de checkpoints.
+    const workspaceId = await ensureConversationWorkspaceId();
+    const allCheckpoints = await fetchApi(`/api/checkpoints?workspaceId=${encodeURIComponent(workspaceId)}`);
     // /api/checkpoints renvoie aussi des checkpoints PLAN_EXECUTION (créés en interne
     // pendant le replanning) : seuls les checkpoints AGENT_STATE sont restaurables par
     // agent.restoreCheckpoint (voir persistence/checkpoint.ts). Les autres feraient
@@ -3537,7 +3542,7 @@ async function renderCheckpointsPanel() {
         if (!window.confirm(`Restaurer « ${cp.label} » ? Cela réinitialise la mémoire de travail et le plan internes de l'agent à cet état sauvegardé.`)) return;
         restore.disabled = true;
         try {
-          const res = await fetchApi(`/api/checkpoints/${encodeURIComponent(cp.id)}/restore`, { method: 'POST' });
+          const res = await fetchApi(`/api/checkpoints/${encodeURIComponent(cp.id)}/restore`, { method: 'POST', body: JSON.stringify({ workspaceId }) });
           showToast(res && res.ok ? `✅ État de l'agent restauré : ${cp.label}` : '⚠️ Échec de la restauration.');
         } catch (err) {
           showToast(`⚠️ Erreur : ${err.message}`);
@@ -3561,7 +3566,8 @@ function initCheckpointsPanel() {
       if (!label || !label.trim()) return;
       elements.btnSaveCheckpoint.disabled = true;
       try {
-        await fetchApi('/api/checkpoints', { method: 'POST', body: JSON.stringify({ label: label.trim() }) });
+        const workspaceId = await ensureConversationWorkspaceId();
+        await fetchApi('/api/checkpoints', { method: 'POST', body: JSON.stringify({ label: label.trim(), workspaceId }) });
         showToast(`💾 Point de sauvegarde créé : ${label.trim()}`);
         await renderCheckpointsPanel();
       } catch (err) {
