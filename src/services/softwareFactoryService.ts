@@ -8,6 +8,7 @@ import type { ChatMessage } from "../types.js";
 import { scanForSecrets } from "../repository/secretScanner.js";
 import { checkDiffFidelity, type DiffFidelityResult } from "./diffFidelity.js";
 import { runCommandInSandbox, type ExecutionResult } from "../execution/sandbox.js";
+import { applySurgicalEdit, type SurgicalEditRequest } from "./surgicalEdit.js";
 
 export type SoftwareFactorySideEffectState = "none" | "partial" | "uncertain";
 
@@ -92,6 +93,12 @@ export interface ParsedSoftwareTask {
   filePath: string;
   instructions: string;
   exactContent?: string;
+  /**
+   * Édition ciblée (str-replace, tâche 5) : alternative à `exactContent`/génération
+   * LLM du fichier entier. Ignorée si `exactContent` est fourni (`exactContent` a
+   * priorité — comportement historique inchangé pour tout appelant existant).
+   */
+  surgicalEdit?: SurgicalEditRequest;
   targetBranch?: string;
   targetPr?: number;
   /** Autorisation explicite de créer le fichier s'il n'existe pas. */
@@ -242,6 +249,11 @@ export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
     throw new Error("FILE_PATH_MISSING: Le chemin du fichier (filePath) est obligatoire et introuvable.");
   }
 
+  let surgicalEdit: SurgicalEditRequest | undefined = undefined;
+  if (typeof ctx.oldString === "string" && typeof ctx.newString === "string") {
+    surgicalEdit = { oldString: ctx.oldString, newString: ctx.newString };
+  }
+
   let exactContent: string | undefined = undefined;
 
   if (typeof ctx.exactContent === "string") {
@@ -292,6 +304,7 @@ export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
     filePath,
     instructions,
     exactContent,
+    surgicalEdit,
     targetBranch,
     targetPr,
     createIfMissing,
@@ -603,10 +616,21 @@ export class SoftwareFactoryService {
     }
 
     // 4. Générer ou utiliser le code exact — toujours avant toute mutation GitHub.
+    // surgicalEdit (tâche 5) produit lui aussi un `updatedCode` = contenu complet du
+    // fichier après édition, exactement comme exactContent/génération LLM : le secret
+    // guard (4b) et le contrôle de fidélité (4c) ci-dessous continuent de s'appliquer
+    // au fichier entier résultant sans aucune adaptation.
     let updatedCode: string;
     if (typeof params.exactContent === "string") {
       onStep?.("USING_EXACT_CONTENT", { filePath });
       updatedCode = params.exactContent;
+    } else if (params.surgicalEdit) {
+      onStep?.("APPLYING_SURGICAL_EDIT", { filePath });
+      try {
+        updatedCode = applySurgicalEdit(existingContent, params.surgicalEdit);
+      } catch (error: unknown) {
+        throw asWorkflowFailure(error, "none", true);
+      }
     } else {
       onStep?.("GENERATING_CODE_UPDATE", { filePath });
       updatedCode = await this.generateCodeUpdate(existingContent, filePath, instructions);

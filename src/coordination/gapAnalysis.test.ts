@@ -111,12 +111,22 @@ test("le rapport de gap analysis assemble matrice, doublons, chevauchements conn
 
 test("SOFTWARE_FACTORY_CAPABILITY_AUDIT documente les gaps réels (run_build/run_tests/rollback/generate_revert_pr absents)", () => {
   const capIds = SOFTWARE_FACTORY_CAPABILITY_AUDIT.map((r) => r.capability);
-  for (const expectedGap of ["run_build", "run_tests", "run_lint", "run_typecheck", "rollback", "generate_revert_pr", "delete_file", "surgical_edit", "branch_from_exact_sha"]) {
+  for (const expectedGap of ["run_build", "run_tests", "run_lint", "run_typecheck", "rollback", "generate_revert_pr", "delete_file", "branch_from_exact_sha"]) {
     const row = SOFTWARE_FACTORY_CAPABILITY_AUDIT.find((r) => r.capability === expectedGap);
     assert.ok(row, `${expectedGap} doit être audité`);
     assert.equal(row!.status, "MISSING");
     assert.equal(row!.gap, "MISSING");
   }
+});
+
+// surgical_edit (tâche 5, câblé PR-N) : n'est plus un gap — sorti de la liste "encore
+// manquant" ci-dessus, vérifié ici comme AVAILABLE avec sa propre preuve.
+test("SOFTWARE_FACTORY_CAPABILITY_AUDIT reflète surgical_edit comme câblé (AVAILABLE, plus MISSING)", () => {
+  const row = SOFTWARE_FACTORY_CAPABILITY_AUDIT.find((r) => r.capability === "surgical_edit");
+  assert.ok(row, "surgical_edit doit être audité");
+  assert.equal(row!.status, "AVAILABLE");
+  assert.equal(row!.gap, "SERVICE_INTERNAL");
+  assert.ok(row!.proof, "surgical_edit AVAILABLE doit citer une preuve réelle");
 });
 
 // --- O/P. Aucune méthode d'écriture/fusion GitHub INVOQUÉE dans ce module. ---

@@ -2071,3 +2071,97 @@ test("Chemin runtime — valeurs valides (create/update, booléen correct) ne so
   const events = await service.handleTaskRequest(req);
   assert.ok(events.find((e) => e.type === "TASK_COMPLETED"), "des valeurs valides ne doivent jamais être rejetées");
 });
+
+// ---------------------------------------------------------------------------
+// surgical_edit (tâche 5 du brief JARVIS-00 : gap `surgical_edit` de
+// gapAnalysis.ts, probable cause de la boucle de patches répétés PR #22-#27).
+// Testé via le chemin d'appel réel (TaskRequest -> handleTaskRequest ->
+// extractTaskParams -> executeWorkflow), pas seulement applySurgicalEdit()
+// en isolation — preuve du câblage, pas juste de l'existence du code.
+// ---------------------------------------------------------------------------
+
+test("surgical_edit — corrige un test qui échoue par édition ciblée sans jamais appeler le LLM", async () => {
+  const calls: string[] = [];
+  const octokit = mockOctokitForTaskRequestFlow({ calls, existingContent: "function broken() {\n  return undefined;\n}\n" });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+  service.generateCodeUpdate = async () => { throw new Error("generateCodeUpdate ne doit PAS être appelé si surgicalEdit est présent !"); };
+
+  const req = baseTaskRequest(
+    { filePath: "docs/runtime.md", instructions: "Corrige la fonction", oldString: "return undefined;", newString: "return 42;" },
+    "task-surgical-edit-basic",
+  );
+  const events = await service.handleTaskRequest(req);
+  const completed = events.find((e) => e.type === "TASK_COMPLETED");
+  assert.ok(completed, "TASK_COMPLETED doit être émis");
+  assert.ok(calls.includes("repos.createOrUpdateFileContents"), "le fichier édité doit être committé");
+});
+
+test("surgical_edit — le contenu committé est le fichier entier après édition, pas un fragment (secret guard/diff fidelity restent sur le fichier entier)", async () => {
+  let writtenContent = "";
+  const octokit = mockOctokitForTaskRequestFlow({ existingContent: "const a = 1;\nconst target = 'old';\nconst c = 3;\n" });
+  (octokit.rest.repos as unknown as { createOrUpdateFileContents: (args: { content: string }) => Promise<{ data: { commit: { sha: string } } }> }).createOrUpdateFileContents =
+    async ({ content }) => { writtenContent = Buffer.from(content, "base64").toString("utf-8"); return { data: { commit: { sha: "sha-surgical" } } }; };
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const req = baseTaskRequest(
+    { filePath: "docs/runtime.md", instructions: "Corrige la valeur", oldString: "const target = 'old';", newString: "const target = 'new';" },
+    "task-surgical-edit-full-file",
+  );
+  await service.handleTaskRequest(req);
+  assert.equal(writtenContent, "const a = 1;\nconst target = 'new';\nconst c = 3;\n", "les lignes non concernées par l'édition doivent rester intactes, contrairement à une régénération LLM du fichier entier");
+});
+
+test("surgical_edit — le secret guard bloque toujours un secret introduit par l'édition, exactement comme pour exactContent/génération LLM (invariant préservé sans adaptation)", async () => {
+  const calls: string[] = [];
+  const octokit = mockOctokitForTaskRequestFlow({ calls, existingContent: "const token = 'placeholder';\n" });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const req = baseTaskRequest(
+    { filePath: "docs/runtime.md", instructions: "Mets à jour le token", oldString: "'placeholder'", newString: "'AKIAABCDEFGHIJKLMNOP'" },
+    "task-surgical-edit-secret",
+  );
+  const events = await service.handleTaskRequest(req);
+  const failed = events.find((e) => e.type === "TASK_FAILED");
+  assert.equal(failed?.payload.error_code, "SECRET_DETECTED");
+  assert.equal(calls.includes("repos.createOrUpdateFileContents"), false, "aucun commit ne doit être tenté avec un secret détecté");
+});
+
+test("surgical_edit — oldString introuvable échoue avant toute écriture GitHub, de façon replannable", async () => {
+  const calls: string[] = [];
+  const octokit = mockOctokitForTaskRequestFlow({ calls, existingContent: "const a = 1;\n" });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const req = baseTaskRequest(
+    { filePath: "docs/runtime.md", instructions: "Corrige", oldString: "const zzz = 999;", newString: "const zzz = 1000;" },
+    "task-surgical-edit-not-found",
+  );
+  const events = await service.handleTaskRequest(req);
+  const failed = events.find((e) => e.type === "TASK_FAILED");
+  assert.equal(failed?.payload.error_code, "SURGICAL_EDIT_OLD_STRING_NOT_FOUND");
+  assert.equal(failed?.payload.replannable, true);
+  assert.equal(calls.includes("git.createRef"), false, "aucune branche ne doit être créée");
+  assert.equal(calls.includes("repos.createOrUpdateFileContents"), false, "aucun commit ne doit être tenté");
+});
+
+test("surgical_edit — oldString ambigu (plusieurs occurrences) échoue plutôt que d'éditer au hasard, avant toute écriture GitHub", async () => {
+  const calls: string[] = [];
+  const octokit = mockOctokitForTaskRequestFlow({ calls, existingContent: "x = 1;\nx = 1;\n" });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const req = baseTaskRequest(
+    { filePath: "docs/runtime.md", instructions: "Corrige", oldString: "x = 1;", newString: "x = 2;" },
+    "task-surgical-edit-ambiguous",
+  );
+  const events = await service.handleTaskRequest(req);
+  const failed = events.find((e) => e.type === "TASK_FAILED");
+  assert.equal(failed?.payload.error_code, "SURGICAL_EDIT_OLD_STRING_NOT_UNIQUE");
+  assert.equal(calls.includes("repos.createOrUpdateFileContents"), false, "aucun commit ne doit être tenté sur une édition ambiguë");
+});
+
+test("surgical_edit — exactContent reste prioritaire si les deux sont fournis (comportement historique inchangé pour les appelants existants)", () => {
+  const params = extractTaskParams(
+    baseTaskRequest({ filePath: "docs/runtime.md", instructions: "x", exactContent: "CONTENU_EXACT", oldString: "a", newString: "b" }, "task-priority"),
+  );
+  assert.equal(params.exactContent, "CONTENU_EXACT");
+  assert.deepEqual(params.surgicalEdit, { oldString: "a", newString: "b" });
+});
