@@ -65,6 +65,39 @@ test("une auto-critique insatisfaisante déclenche l'évolution de prompt même 
   }
 });
 
+test("un triplet suivi d'un bloc critique est extrait correctement, sans que le tableau issues ne pollue le JSON des triplets", async () => {
+  setupTestDb();
+  const memory = new MemoryManager(new LocalHashingEmbeddingProvider());
+  await memory.recordTurn({ role: "user", content: "Jarvis est développé par artisanguillonrenov." });
+
+  const provider: LLMProvider = {
+    name: "combined-blocks-spy",
+    async complete(messages: ChatMessage[]) {
+      if (isReflectionSystemPrompt(messages)) {
+        return {
+          content:
+            "Résumé.\n" +
+            '###TRIPLES###\n[{"subject":"Jarvis","predicate":"développé par","object":"artisanguillonrenov"}]\n' +
+            '###CRITIQUE###\n{"score":0.9,"issues":["détail mineur", "autre détail"]}',
+        };
+      }
+      return { content: "ne devrait pas être appelé (score satisfaisant)" };
+    },
+  };
+
+  const engine = new ReflectionEngine(provider, memory, 1);
+  await engine.reflect();
+
+  const triples = memory.graph.all();
+  assert.equal(triples.length, 1, "le triplet doit être extrait malgré le bloc critique qui le suit");
+  assert.equal(triples[0].subject, "Jarvis");
+  assert.equal(triples[0].object, "artisanguillonrenov");
+  assert.ok(
+    triples[0].confidence < 0.4,
+    "un triplet fraîchement extrait par la réflexion doit rester sous le seuil par défaut de rétention, sinon aucun réglage ne peut jamais le purger",
+  );
+});
+
 test("une auto-critique satisfaisante ne déclenche pas l'évolution de prompt", async () => {
   setupTestDb();
   const dir = mkdtempSync(join(tmpdir(), "reflection-self-critique-"));

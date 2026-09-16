@@ -42,6 +42,24 @@ test("flattenHierarchicalSteps() décompose un step composite et fait hériter s
   assert.deepEqual(b.depends_on, ["gather.a"], "un enfant avec sa propre dépendance interne la conserve telle quelle");
 });
 
+test("flattenHierarchicalSteps() préserve le prérequis du composite pour un enfant d'entrée qui a déjà sa propre dépendance externe", () => {
+  const composite: HierarchicalPlanStepSpec = {
+    local_id: "gather", title: "Gather", capability: "ignored", objective: "ignored",
+    context: {}, constraints: [], priority: "medium", depends_on: ["A"],
+    sub_steps: [leaf("gather.a", ["B"]), leaf("gather.b", ["gather.a"])],
+  };
+  const flat = flattenHierarchicalSteps([leaf("A"), leaf("B"), composite]);
+
+  const entry = flat.find((s) => s.local_id === "gather.a")!;
+  assert.deepEqual(
+    new Set(entry.depends_on), new Set(["A", "B"]),
+    "l'enfant d'entrée doit attendre à la fois le prérequis du composite ET sa propre dépendance externe, jamais l'un à la place de l'autre",
+  );
+
+  const internal = flat.find((s) => s.local_id === "gather.b")!;
+  assert.deepEqual(internal.depends_on, ["gather.a"], "un enfant avec un prédécesseur interne n'est pas modifié");
+});
+
 test("flattenHierarchicalSteps() réécrit une dépendance externe vers le composite en dépendance vers la frontière de sa sous-arborescence", () => {
   const composite: HierarchicalPlanStepSpec = {
     local_id: "gather", title: "Gather", capability: "ignored", objective: "ignored",

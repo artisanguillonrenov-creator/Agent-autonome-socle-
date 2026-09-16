@@ -52,8 +52,13 @@ export function flattenHierarchicalSteps(steps: HierarchicalPlanStepSpec[], dept
     if (step.sub_steps && step.sub_steps.length > 0) {
       const childFlat = flattenHierarchicalSteps(step.sub_steps, depth + 1);
       const childIds = new Set(childFlat.map((child) => child.local_id));
+      // Un enfant "d'entrée" (sans prédécesseur interne à la sous-arborescence) doit
+      // attendre les prérequis du composite EN PLUS de ses éventuelles dépendances
+      // externes propres — pas à leur place : sinon il peut démarrer dès sa seule
+      // dépendance externe satisfaite, avant le prérequis déclaré du composite.
       for (const child of childFlat) {
-        if (child.depends_on.length === 0) child.depends_on = [...step.depends_on];
+        const hasInternalPredecessor = child.depends_on.some((d) => childIds.has(d));
+        if (!hasInternalPredecessor) child.depends_on = [...new Set([...step.depends_on, ...child.depends_on])];
       }
       const dependedUpon = new Set(childFlat.flatMap((child) => child.depends_on.filter((d) => childIds.has(d))));
       const frontier = childFlat.filter((child) => !dependedUpon.has(child.local_id)).map((child) => child.local_id);

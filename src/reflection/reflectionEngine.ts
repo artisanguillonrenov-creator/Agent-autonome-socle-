@@ -11,6 +11,18 @@ const LEGACY_CONVERSATION_ID = "__legacy__";
 const GRAPH_TRIPLES_MARKER = "###TRIPLES###";
 /** Sépare le résumé en prose du bloc JSON d'auto-critique structurée, dans la même réponse LLM. */
 const CRITIQUE_MARKER = "###CRITIQUE###";
+/**
+ * Confiance initiale d'un triplet extrait automatiquement par la réflexion : une seule
+ * mention dans un échange n'est pas encore un fait établi. Volontairement sous le seuil par
+ * défaut de rétention (config.memory.graphRetentionMaxConfidence, 0.4) : sans cela, tout
+ * triplet de réflexion prenait la confiance par défaut de GraphMemory.addTriple() (1),
+ * plafond de la config Zod — aucun réglage de rétention ne pouvait alors jamais purger un
+ * triplet issu de la réflexion, même jamais revu, rendant sweepStaleGraphTriples() inopérant
+ * en pratique sur son seul appelant de production. Une confirmation explicite ultérieure à
+ * confiance plus haute (ex: correction manuelle) le promeut immédiatement via l'upsert
+ * existant de GraphMemory (Math.max) et le rend alors durablement non purgeable.
+ */
+const REFLECTION_TRIPLE_INITIAL_CONFIDENCE = 0.3;
 
 export interface SelfCritique {
   /** 0 = échec complet, 1 = objectif pleinement atteint sans erreur. */
@@ -122,7 +134,12 @@ export class ReflectionEngine {
     const firstMarkerIndex = [triplesMarkerIndex, critiqueMarkerIndex].filter((i) => i !== -1).sort((a, b) => a - b)[0];
     const insight = firstMarkerIndex === undefined ? rawContent : rawContent.slice(0, firstMarkerIndex).trim();
     if (triplesMarkerIndex !== -1) {
-      this.extractGraphTriples(rawContent.slice(triplesMarkerIndex + GRAPH_TRIPLES_MARKER.length), workspaceId);
+      // Le bloc triplets s'arrête au marqueur critique s'il suit (ordre attendu du prompt) :
+      // sans cette borne, le "]" de fermeture du tableau "issues" de la critique prolongerait
+      // le match glouton de extractGraphTriples au-delà du tableau de triplets, produisant un
+      // JSON invalide et perdant silencieusement tous les triplets de ce cycle.
+      const triplesBlockEnd = critiqueMarkerIndex > triplesMarkerIndex ? critiqueMarkerIndex : undefined;
+      this.extractGraphTriples(rawContent.slice(triplesMarkerIndex + GRAPH_TRIPLES_MARKER.length, triplesBlockEnd), workspaceId);
     }
     const critique = critiqueMarkerIndex !== -1 ? this.extractSelfCritique(rawContent.slice(critiqueMarkerIndex + CRITIQUE_MARKER.length)) : null;
     if (insight.trim().length > 0) {
@@ -183,7 +200,7 @@ export class ReflectionEngine {
         const predicate = typeof entry.predicate === "string" ? entry.predicate.trim() : "";
         const object = typeof entry.object === "string" ? entry.object.trim() : "";
         if (!subject || !predicate || !object) continue;
-        this.memory.graph.addTriple(subject, predicate, object, { source: "reflection", workspaceId });
+        this.memory.graph.addTriple(subject, predicate, object, { source: "reflection", workspaceId, confidence: REFLECTION_TRIPLE_INITIAL_CONFIDENCE });
       }
     } catch (error) {
       console.warn("[Reflection] Extraction du graphe de connaissances échouée (best-effort):", (error as Error).message);
