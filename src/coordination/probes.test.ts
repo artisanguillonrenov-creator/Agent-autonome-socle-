@@ -96,7 +96,7 @@ test("createRepositoryReadProbe échoue proprement si le fichier est un réperto
   assert.equal(result.success, false);
 });
 
-// --- read_ci_status : capacité réelle, jamais encore câblée à un skill (voir gap analysis) ---
+// --- read_ci_status : capacité réelle, câblée à knowledge_search (action CI_STATUS) depuis PR-G ---
 test("createCiStatusProbe lit réellement le statut CI d'un SHA connu", async () => {
   const target: RepoRef = { owner: "acme", repo: "demo" };
   const client = fakeGithubClient({

@@ -10,10 +10,12 @@
  *
  * `status`/`remediationType` reflètent l'état RÉEL constaté à l'audit
  * (ex. les 4 bureaux métier sont `DISABLED` car `enabled:false` dans
- * `config/services.json` ; `read_ci_status`/`read_main_protection` sont
- * `MISSING` car `githubReadOnlyClient.ts` les implémente et les teste, mais
- * aucun skill ne les expose encore à l'agent — un vrai gap, pas une
- * supposition).
+ * `config/services.json`). `read_ci_status`/`read_main_protection` étaient
+ * `MISSING` à l'audit initial (§PHASE 12) car `githubReadOnlyClient.ts` les
+ * implémentait et les testait sans qu'aucun skill ne les expose à l'agent ;
+ * PR-G les a câblés comme actions `CI_STATUS`/`MAIN_PROTECTION` du skill
+ * `knowledge_search` (`src/skills/runtime.ts`) — désormais `AVAILABLE`,
+ * preuve dans `src/skills/knowledgeSearch.test.ts`.
  *
  * Ce catalogue ne couvre PAS les skills de contrôle interne (`get_current_time`,
  * `remember_fact`, `execute_code`, `execute_mission`, `execute_workflow`,
@@ -415,16 +417,16 @@ export const REAL_SKILL_CATALOG: readonly SkillDescriptor[] = Object.freeze([
     lastVerifiedAt: SKILL_CATALOG_AUDITED_AT,
   }),
 
-  // --- Gaps réels identifiés par l'audit (Phase 12) : le "tool" existe et est testé isolément,
-  // aucun skill ne l'expose encore à l'agent. MISSING honnête, pas AVAILABLE. ---
+  // --- Gaps identifiés par l'audit (Phase 12), câblés depuis (PR-G) : le "tool" existait et était
+  // testé isolément mais aucun skill ne l'exposait à l'agent ; câblé comme actions de knowledge_search. ---
   defineSkill({
     skillId: "read_ci_status",
-    skillName: "Lecture du statut CI (non câblé)",
-    skillVersion: "0.0.0",
-    description: "githubReadOnlyClient.getCiStatus() existe et est testé isolément (githubReadOnlyClient.test.ts) mais AUCUN skill ne l'expose à l'agent — zéro appelant en production trouvé à l'audit. Gap réel, pas une supposition.",
+    skillName: "Lecture du statut CI",
+    skillVersion: "1.0.0",
+    description: "githubReadOnlyClient.getCiStatus() est exposé à l'agent via l'action CI_STATUS du skill knowledge_search (src/skills/runtime.ts) — câblé PR-G, plus un simple import isolé. Zéro appelant en production avant PR-G ; désormais un appel skill réel (knowledge_search{action:CI_STATUS,sha}) déclenche getCiStatus() de bout en bout, prouvé par un test d'intégration qui passe par le runtime réel et la boucle Agent, pas seulement la fonction unitaire.",
     serviceScope: { type: "TRANSVERSAL" },
     capabilitiesProvided: ["read_ci_status"],
-    toolsRequired: ["src/repository/githubReadOnlyClient.ts#getCiStatus"],
+    toolsRequired: ["src/repository/githubReadOnlyClient.ts#getCiStatus", "src/skills/runtime.ts#knowledge_search(CI_STATUS)"],
     dependencies: [],
     inputSchemaRef: "src/repository/githubReadOnlyClient.ts#RepoRef",
     outputSchemaRef: "src/repository/githubReadOnlyClient.ts#CiStatusResult",
@@ -435,20 +437,19 @@ export const REAL_SKILL_CATALOG: readonly SkillDescriptor[] = Object.freeze([
     asyncSupported: false,
     timeoutMs: 15000,
     probeId: "probe.read_ci_status.known_sha",
-    testRefs: ["src/repository/githubReadOnlyClient.test.ts"],
-    proofRefs: [],
-    status: "MISSING",
-    remediationType: "CREATE_SKILL",
+    testRefs: ["src/repository/githubReadOnlyClient.test.ts", "src/skills/knowledgeSearch.test.ts"],
+    proofRefs: ["TEST:src/skills/knowledgeSearch.test.ts"],
+    status: "AVAILABLE",
     lastVerifiedAt: SKILL_CATALOG_AUDITED_AT,
   }),
   defineSkill({
     skillId: "read_main_protection",
-    skillName: "Lecture de la protection de branche (non câblée)",
-    skillVersion: "0.0.0",
-    description: "githubReadOnlyClient.getMainProtectionStatus() existe et est testé isolément mais AUCUN skill ne l'expose à l'agent — zéro appelant en production trouvé à l'audit. Gap réel, pas une supposition.",
+    skillName: "Lecture de la protection de branche",
+    skillVersion: "1.0.0",
+    description: "githubReadOnlyClient.getMainProtectionStatus() est exposé à l'agent via l'action MAIN_PROTECTION du skill knowledge_search (src/skills/runtime.ts) — câblé PR-G, plus un simple import isolé. Zéro appelant en production avant PR-G ; désormais un appel skill réel (knowledge_search{action:MAIN_PROTECTION,branch}) déclenche getMainProtectionStatus() de bout en bout, prouvé par un test d'intégration qui passe par le runtime réel et la boucle Agent, pas seulement la fonction unitaire.",
     serviceScope: { type: "TRANSVERSAL" },
     capabilitiesProvided: ["read_main_protection"],
-    toolsRequired: ["src/repository/githubReadOnlyClient.ts#getMainProtectionStatus"],
+    toolsRequired: ["src/repository/githubReadOnlyClient.ts#getMainProtectionStatus", "src/skills/runtime.ts#knowledge_search(MAIN_PROTECTION)"],
     dependencies: [],
     inputSchemaRef: "src/repository/githubReadOnlyClient.ts#RepoRef",
     outputSchemaRef: "src/repository/githubReadOnlyClient.ts#MainProtectionResult",
@@ -459,10 +460,9 @@ export const REAL_SKILL_CATALOG: readonly SkillDescriptor[] = Object.freeze([
     asyncSupported: false,
     timeoutMs: 15000,
     probeId: "probe.read_main_protection.branch",
-    testRefs: ["src/repository/githubReadOnlyClient.test.ts"],
-    proofRefs: [],
-    status: "MISSING",
-    remediationType: "CREATE_SKILL",
+    testRefs: ["src/repository/githubReadOnlyClient.test.ts", "src/skills/knowledgeSearch.test.ts"],
+    proofRefs: ["TEST:src/skills/knowledgeSearch.test.ts"],
+    status: "AVAILABLE",
     lastVerifiedAt: SKILL_CATALOG_AUDITED_AT,
   }),
 ]);

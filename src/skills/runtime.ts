@@ -120,7 +120,7 @@ export function createRuntimeSkills(orchestrator:ServiceOrchestrator,planner:Pla
     throw new Error("DOCUMENT_ACTION_INVALID");
   });
 
-  define("knowledge_search",schema({action:{type:"string",enum:["TREE","READ_FILE","READ_MULTIPLE_FILES","SEARCH_PATH","SEARCH_CODE","READ_PR","READ_PR_FILES","READ_PR_DIFF","READ_COMMIT","READ_DIFF","BUILD_CONTEXT","AUDIT"]},owner:{type:"string"},repo:{type:"string"},repoUrl:{type:"string"},ref:{type:"string"},path:{type:"string"},paths:{type:"array",items:{type:"string"}},query:{type:"string"},caseSensitive:{type:"boolean"},maxResults:{type:"integer"},extensions:{type:"array",items:{type:"string"}},prNumber:{type:"integer"},sha:{type:"string"},base:{type:"string"},head:{type:"string"}},["action"]),async i=>{
+  define("knowledge_search",schema({action:{type:"string",enum:["TREE","READ_FILE","READ_MULTIPLE_FILES","SEARCH_PATH","SEARCH_CODE","READ_PR","READ_PR_FILES","READ_PR_DIFF","READ_COMMIT","READ_DIFF","BUILD_CONTEXT","AUDIT","CI_STATUS","MAIN_PROTECTION"]},owner:{type:"string"},repo:{type:"string"},repoUrl:{type:"string"},ref:{type:"string"},path:{type:"string"},paths:{type:"array",items:{type:"string"}},query:{type:"string"},caseSensitive:{type:"boolean"},maxResults:{type:"integer"},extensions:{type:"array",items:{type:"string"}},prNumber:{type:"integer"},sha:{type:"string"},base:{type:"string"},head:{type:"string"},branch:{type:"string"}},["action"]),async i=>{
     const target=resolveRepoTarget(i);
     switch(i.action){
       case"TREE":{const ref=await resolveRepositoryRef(repositoryClient,target,i.ref);return JSON.stringify(await browseTree(repositoryClient,target,ref));}
@@ -135,6 +135,8 @@ export function createRuntimeSkills(orchestrator:ServiceOrchestrator,planner:Pla
       case"READ_DIFF":return JSON.stringify(await readDiffBetweenVersions(repositoryClient,target,String(i.base??""),String(i.head??"")));
       case"BUILD_CONTEXT":{const ref=await resolveRepositoryRef(repositoryClient,target,i.ref);return JSON.stringify(await buildRepositoryContext(repositoryClient,target,ref,String(i.query??"")));}
       case"AUDIT":return JSON.stringify(await auditRepository(repositoryClient,target,{ref:i.ref as string|undefined,prNumber:i.prNumber as number|undefined}));
+      case"CI_STATUS":{if(!nonEmpty(i.sha))throw new Error("CI_STATUS_SHA_REQUIRED");return JSON.stringify(await repositoryClient.getCiStatus(target,i.sha));}
+      case"MAIN_PROTECTION":{const branch=await resolveRepositoryRef(repositoryClient,target,i.branch);return JSON.stringify(await repositoryClient.getMainProtectionStatus(target,branch));}
       default:throw new Error("REPOSITORY_ACTION_INVALID");
     }
   });
