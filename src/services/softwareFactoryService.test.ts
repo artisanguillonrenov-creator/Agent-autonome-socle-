@@ -2578,3 +2578,258 @@ test("run_build/run_tests/run_lint/run_typecheck : un timeout est traité comme 
     config.softwareFactorySandbox.buildCommand = previous;
   }
 });
+
+// ---------------------------------------------------------------------------
+// delete_file / branch_from_exact_sha (tâche 5 sous-priorité 4, brief JARVIS-00) : capacités
+// jusqu'ici MISSING dans gapAnalysis.ts. Testé via le chemin d'appel réel (TaskRequest ->
+// handleTaskRequest -> executeWorkflow), comme rollback/surgical_edit avant elles.
+// ---------------------------------------------------------------------------
+
+function mockOctokitForDeleteAndBranchFromShaFlow(overrides: {
+  calls?: string[];
+  existingContent?: string;
+  deleteFileHandler?: () => Promise<unknown>;
+  getCommitHandler?: () => Promise<unknown>;
+} = {}): Octokit {
+  const calls = overrides.calls;
+  const record = (c: string) => { if (calls) calls.push(c); };
+  return {
+    rest: {
+      repos: {
+        get: async () => { record("repos.get"); return { data: { default_branch: "main" } }; },
+        getContent: async ({ ref }: { ref: string }) => {
+          record(`repos.getContent:${ref}`);
+          if (overrides.existingContent === undefined) throw new Error("404 Not Found");
+          return { data: { type: "file", content: Buffer.from(overrides.existingContent, "utf-8").toString("base64"), encoding: "base64", sha: "existing-file-sha" } };
+        },
+        deleteFile: overrides.deleteFileHandler ?? (async () => { record("repos.deleteFile"); return { data: { commit: { sha: "sha-after-delete" } } }; }),
+        createOrUpdateFileContents: async () => { record("repos.createOrUpdateFileContents"); return { data: { commit: { sha: "sha-after-write" } } }; },
+        compareCommits: async () => { record("repos.compareCommits"); return { data: { files: [{ filename: "docs/runtime.md", status: "removed" }] } }; },
+      },
+      git: {
+        getRef: async ({ ref }: { ref: string }) => {
+          record(`git.getRef:${ref}`);
+          if (ref.startsWith("heads/jarvis/")) throw new Error("404 Not Found");
+          return { data: { object: { sha: "base-sha" } } };
+        },
+        createRef: async ({ sha }: { sha: string }) => { record(`git.createRef:${sha}`); return { data: {} }; },
+        getCommit: overrides.getCommitHandler ?? (async () => { record("git.getCommit"); return { data: { sha: "deadbeef1234567" } }; }),
+      },
+      pulls: {
+        list: async () => { record("pulls.list"); return { data: [] }; },
+        create: async () => { record("pulls.create"); return { data: { html_url: "https://github.com/org/repo/pull/99", number: 99 } }; },
+      },
+    },
+  } as unknown as Octokit;
+}
+
+test("delete_file — supprime un fichier existant dans une nouvelle PR, sans jamais appeler createOrUpdateFileContents", async () => {
+  const calls: string[] = [];
+  const octokit = mockOctokitForDeleteAndBranchFromShaFlow({ calls, existingContent: "contenu à supprimer" });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const req = baseTaskRequest({ filePath: "docs/obsolete.md", instructions: "Fichier obsolète", deleteFile: true }, "task-delete-basic");
+  const events = await service.handleTaskRequest(req);
+  const completed = events.find((e) => e.type === "TASK_COMPLETED");
+  assert.ok(completed, "TASK_COMPLETED doit être émis");
+  assert.equal(completed?.payload.pr_number, 99);
+  assert.ok(calls.includes("repos.deleteFile"));
+  assert.equal(calls.includes("repos.createOrUpdateFileContents"), false, "une suppression ne doit jamais appeler createOrUpdateFileContents");
+});
+
+test("delete_file — refuse de supprimer un fichier qui n'existe pas, avant toute écriture GitHub", async () => {
+  const calls: string[] = [];
+  const octokit = mockOctokitForDeleteAndBranchFromShaFlow({ calls });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const req = baseTaskRequest({ filePath: "docs/nope.md", instructions: "x", deleteFile: true }, "task-delete-not-found");
+  const events = await service.handleTaskRequest(req);
+  const failed = events.find((e) => e.type === "TASK_FAILED");
+  assert.equal(failed?.payload.error_code, "DELETE_FILE_NOT_FOUND");
+  assert.equal(failed?.payload.replannable, true);
+  assert.equal(calls.includes("repos.deleteFile"), false);
+  assert.equal(calls.includes("git.createRef:base-sha"), false, "aucune branche ne doit être créée pour une suppression refusée");
+});
+
+test("delete_file — refuse un filePath hors du périmètre autorisé par la mission (expectedFilePath), avant toute écriture GitHub", async () => {
+  const calls: string[] = [];
+  const octokit = mockOctokitForDeleteAndBranchFromShaFlow({ calls, existingContent: "contenu" });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const req = baseTaskRequest({ filePath: "docs/a.md", instructions: "x", deleteFile: true, expectedFilePath: "docs/b.md" }, "task-delete-expected-path");
+  const events = await service.handleTaskRequest(req);
+  const failed = events.find((e) => e.type === "TASK_FAILED");
+  assert.equal(failed?.payload.error_code, "DIFF_FIDELITY_FAILED");
+  assert.equal(calls.includes("repos.deleteFile"), false);
+});
+
+test("delete_file — rejeté avant tout accès réseau si combiné à une source de contenu ou à createIfMissing", () => {
+  for (const conflictingCtx of [
+    { deleteFile: true, exactContent: "x" },
+    { deleteFile: true, oldString: "a", newString: "b" },
+    { deleteFile: true, revertPrNumber: 42 },
+    { deleteFile: true, createIfMissing: true },
+  ]) {
+    assert.throws(
+      () => extractTaskParams(baseTaskRequest({ filePath: "docs/a.md", instructions: "x", ...conflictingCtx }, "task-delete-conflict")),
+      (err: unknown) => err instanceof Error && err.message.includes("DELETE_FILE_CONTENT_CONFLICT"),
+      JSON.stringify(conflictingCtx),
+    );
+  }
+});
+
+test("delete_file — un deleteFile qui n'est pas un booléen est rejeté avant tout accès réseau", () => {
+  assert.throws(
+    () => extractTaskParams(baseTaskRequest({ filePath: "docs/a.md", instructions: "x", deleteFile: "true" }, "task-delete-invalid-type")),
+    (err: unknown) => err instanceof Error && err.message.includes("DELETE_FILE_INVALID"),
+  );
+});
+
+test("Agent : un tool call software_development avec deleteFile atteint bien TaskRequest.context (schéma du skill câblé)", async () => {
+  const { Agent } = await import("../core/agent.js");
+  const { LocalHashingEmbeddingProvider } = await import("../llm/embeddings.js");
+  const { ServiceOrchestrator } = await import("../orchestration/serviceOrchestrator.js");
+  const { ServiceAdapter } = await import("../orchestration/serviceAdapter.js");
+  config.db.path = ":memory:";
+  config.autonomy.globalRiskLevel = "HIGH";
+  config.autonomy.permissionMatrix = "EXECUTE";
+  const { closeDb, getDb } = await import("../persistence/db.js");
+  closeDb();
+  getDb();
+
+  class RecordingAdapter extends ServiceAdapter {
+    readonly factoryCalls: TaskRequest[] = [];
+    override async dispatchTask(value: unknown, request: TaskRequest) {
+      const serviceId = typeof value === "string" ? value : (value as { id: string }).id;
+      if (serviceId !== "software_factory") return super.dispatchTask(value as never, request);
+      this.factoryCalls.push(request);
+      return {
+        success: true,
+        events: [{
+          schema_version: "1.0", event_id: `evt-${request.task_id}`, task_id: request.task_id, trace_id: request.trace_id,
+          service: "software_factory", sequence: 1, type: "TASK_COMPLETED" as const, timestamp: Date.now(),
+          payload: { status: "COMPLETED", branch: "jarvis/delete", commit_sha: "abc", pr_number: 1, pr_url: "https://github.com/org/repo/pull/1", filePath: request.context.filePath, summary: "Delete" },
+        }],
+        transportDurationMs: 0,
+      };
+    }
+  }
+  const adapter = new RecordingAdapter();
+  const orchestrator = new ServiceOrchestrator({ adapter });
+  let call = 0;
+  const llm = {
+    name: "delete-schema-test",
+    async complete(_messages: unknown, _options: unknown) {
+      call += 1;
+      if (call === 1) {
+        return { content: null, toolCalls: [{ id: "call-delete", type: "function", function: { name: "software_development", arguments: JSON.stringify({ objective: "Supprime le fichier obsolète", filePath: "docs/obsolete.md", instructions: "Fichier obsolète", deleteFile: true }) } }] };
+      }
+      return { content: "Fichier supprimé" };
+    },
+  };
+  const agent = new Agent({ llm: llm as any, embeddings: new LocalHashingEmbeddingProvider(), orchestrator });
+  (agent.skillSelector as any).select = async () => [agent.skills.get("software_development")!];
+  await agent.step("supprime docs/obsolete.md, ce fichier n'a plus lieu d'être");
+  assert.equal(adapter.factoryCalls.length, 1);
+  assert.equal(adapter.factoryCalls[0].context.deleteFile, true);
+});
+
+test("branch_from_exact_sha — crée la branche depuis le SHA fourni (pas le HEAD courant) et lit le contenu à ce SHA", async () => {
+  const calls: string[] = [];
+  const octokit = mockOctokitForDeleteAndBranchFromShaFlow({ calls, existingContent: "contenu à ce sha précis" });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const req = baseTaskRequest({ filePath: "docs/runtime.md", instructions: "x", exactContent: "nouveau contenu", branchFromSha: "deadbeef1234567" }, "task-branch-from-sha");
+  const events = await service.handleTaskRequest(req);
+  assert.ok(events.find((e) => e.type === "TASK_COMPLETED"));
+  assert.ok(calls.includes("git.getCommit"), "le SHA fourni doit être vérifié avant toute écriture");
+  assert.ok(calls.includes("git.createRef:deadbeef1234567"), "la branche doit être créée depuis le SHA fourni, pas le HEAD de la branche par défaut");
+  assert.ok(calls.includes("repos.getContent:deadbeef1234567"), "le contenu existant doit être lu à ce SHA précis, pas au HEAD de la branche par défaut");
+});
+
+test("branch_from_exact_sha — un SHA introuvable échoue proprement, de façon replannable, avant toute écriture GitHub", async () => {
+  const calls: string[] = [];
+  const octokit = mockOctokitForDeleteAndBranchFromShaFlow({
+    calls,
+    existingContent: "contenu",
+    getCommitHandler: async () => { calls.push("git.getCommit"); throw new Error("404 Not Found"); },
+  });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const req = baseTaskRequest({ filePath: "docs/runtime.md", instructions: "x", exactContent: "y", branchFromSha: "0000000deadbeef" }, "task-branch-from-sha-missing");
+  const events = await service.handleTaskRequest(req);
+  const failed = events.find((e) => e.type === "TASK_FAILED");
+  assert.equal(failed?.payload.error_code, "BRANCH_FROM_SHA_NOT_FOUND");
+  assert.equal(failed?.payload.replannable, true);
+  assert.equal(calls.includes("git.createRef:0000000deadbeef"), false);
+});
+
+test("branch_from_exact_sha — combiné à TARGET_BRANCH/TARGET_PR est rejeté avant tout accès réseau (une branche/PR existante a déjà sa propre base)", () => {
+  assert.throws(
+    () => extractTaskParams(baseTaskRequest({ filePath: "docs/a.md", instructions: "TARGET_PR=7", branchFromSha: "1234567890abcdef" }, "task-branch-from-sha-conflict-pr")),
+    (err: unknown) => err instanceof Error && err.message.includes("BRANCH_FROM_SHA_TARGET_CONFLICT"),
+  );
+  assert.throws(
+    () => extractTaskParams(baseTaskRequest({ filePath: "docs/a.md", instructions: "TARGET_BRANCH=jarvis/existing", branchFromSha: "1234567890abcdef" }, "task-branch-from-sha-conflict-branch")),
+    (err: unknown) => err instanceof Error && err.message.includes("BRANCH_FROM_SHA_TARGET_CONFLICT"),
+  );
+});
+
+test("branch_from_exact_sha — un SHA mal formé est rejeté avant tout accès réseau", () => {
+  for (const invalid of ["not-a-sha", "abc", "", "  "]) {
+    assert.throws(
+      () => extractTaskParams(baseTaskRequest({ filePath: "docs/a.md", instructions: "x", branchFromSha: invalid }, "task-branch-from-sha-invalid")),
+      (err: unknown) => err instanceof Error && /BRANCH_FROM_SHA_INVALID/.test(err.message),
+      JSON.stringify(invalid),
+    );
+  }
+});
+
+test("Agent : un tool call software_development avec branchFromSha atteint bien TaskRequest.context (schéma du skill câblé)", async () => {
+  const { Agent } = await import("../core/agent.js");
+  const { LocalHashingEmbeddingProvider } = await import("../llm/embeddings.js");
+  const { ServiceOrchestrator } = await import("../orchestration/serviceOrchestrator.js");
+  const { ServiceAdapter } = await import("../orchestration/serviceAdapter.js");
+  config.db.path = ":memory:";
+  config.autonomy.globalRiskLevel = "HIGH";
+  config.autonomy.permissionMatrix = "EXECUTE";
+  const { closeDb, getDb } = await import("../persistence/db.js");
+  closeDb();
+  getDb();
+
+  class RecordingAdapter extends ServiceAdapter {
+    readonly factoryCalls: TaskRequest[] = [];
+    override async dispatchTask(value: unknown, request: TaskRequest) {
+      const serviceId = typeof value === "string" ? value : (value as { id: string }).id;
+      if (serviceId !== "software_factory") return super.dispatchTask(value as never, request);
+      this.factoryCalls.push(request);
+      return {
+        success: true,
+        events: [{
+          schema_version: "1.0", event_id: `evt-${request.task_id}`, task_id: request.task_id, trace_id: request.trace_id,
+          service: "software_factory", sequence: 1, type: "TASK_COMPLETED" as const, timestamp: Date.now(),
+          payload: { status: "COMPLETED", branch: "jarvis/from-sha", commit_sha: "abc", pr_number: 1, pr_url: "https://github.com/org/repo/pull/1", filePath: request.context.filePath, summary: "From sha" },
+        }],
+        transportDurationMs: 0,
+      };
+    }
+  }
+  const adapter = new RecordingAdapter();
+  const orchestrator = new ServiceOrchestrator({ adapter });
+  let call = 0;
+  const llm = {
+    name: "branch-from-sha-schema-test",
+    async complete(_messages: unknown, _options: unknown) {
+      call += 1;
+      if (call === 1) {
+        return { content: null, toolCalls: [{ id: "call-branch-from-sha", type: "function", function: { name: "software_development", arguments: JSON.stringify({ objective: "Reproduit un état antérieur", filePath: "docs/runtime.md", instructions: "x", exactContent: "y", branchFromSha: "1234567890abcdef" }) } }] };
+      }
+      return { content: "Branche créée depuis ce SHA" };
+    },
+  };
+  const agent = new Agent({ llm: llm as any, embeddings: new LocalHashingEmbeddingProvider(), orchestrator });
+  (agent.skillSelector as any).select = async () => [agent.skills.get("software_development")!];
+  await agent.step("recrée docs/runtime.md depuis le commit 1234567890abcdef");
+  assert.equal(adapter.factoryCalls.length, 1);
+  assert.equal(adapter.factoryCalls[0].context.branchFromSha, "1234567890abcdef");
+});

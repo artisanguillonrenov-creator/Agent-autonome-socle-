@@ -109,14 +109,11 @@ test("le rapport de gap analysis assemble matrice, doublons, chevauchements conn
   assert.deepEqual(report.missingCapabilities, ["capacite_totalement_absente"]);
 });
 
-test("SOFTWARE_FACTORY_CAPABILITY_AUDIT documente les gaps réels (delete_file/branch_from_exact_sha absents)", () => {
-  const capIds = SOFTWARE_FACTORY_CAPABILITY_AUDIT.map((r) => r.capability);
-  for (const expectedGap of ["delete_file", "branch_from_exact_sha"]) {
-    const row = SOFTWARE_FACTORY_CAPABILITY_AUDIT.find((r) => r.capability === expectedGap);
-    assert.ok(row, `${expectedGap} doit être audité`);
-    assert.equal(row!.status, "MISSING");
-    assert.equal(row!.gap, "MISSING");
-  }
+test("SOFTWARE_FACTORY_CAPABILITY_AUDIT documente le gap réel restant (resume, décision de conception à trancher)", () => {
+  const row = SOFTWARE_FACTORY_CAPABILITY_AUDIT.find((r) => r.capability === "resume");
+  assert.ok(row, "resume doit être audité");
+  assert.equal(row!.status, "MISSING");
+  assert.equal(row!.gap, "MISSING");
 });
 
 // run_build/run_tests/run_lint/run_typecheck (tâche 5 sous-priorité 3, câblés) : ne sont plus
@@ -124,6 +121,19 @@ test("SOFTWARE_FACTORY_CAPABILITY_AUDIT documente les gaps réels (delete_file/b
 // leur propre preuve.
 test("SOFTWARE_FACTORY_CAPABILITY_AUDIT reflète run_build/run_tests/run_lint/run_typecheck comme câblés (AVAILABLE, plus MISSING)", () => {
   for (const capability of ["run_build", "run_tests", "run_lint", "run_typecheck"]) {
+    const row = SOFTWARE_FACTORY_CAPABILITY_AUDIT.find((r) => r.capability === capability);
+    assert.ok(row, `${capability} doit être audité`);
+    assert.equal(row!.status, "AVAILABLE", capability);
+    assert.equal(row!.gap, "SERVICE_INTERNAL", capability);
+    assert.ok(row!.proof, `${capability} AVAILABLE doit citer une preuve réelle`);
+  }
+});
+
+// delete_file/branch_from_exact_sha (tâche 5 sous-priorité 4, câblés) : ne sont plus des gaps —
+// dernière sous-priorité de la tâche 5 du brief JARVIS-00, vérifiés ici comme AVAILABLE avec
+// leur propre preuve.
+test("SOFTWARE_FACTORY_CAPABILITY_AUDIT reflète delete_file/branch_from_exact_sha comme câblés (AVAILABLE, plus MISSING)", () => {
+  for (const capability of ["delete_file", "branch_from_exact_sha"]) {
     const row = SOFTWARE_FACTORY_CAPABILITY_AUDIT.find((r) => r.capability === capability);
     assert.ok(row, `${capability} doit être audité`);
     assert.equal(row!.status, "AVAILABLE", capability);
