@@ -2190,3 +2190,223 @@ test("surgical_edit — ni oldString ni newString fournis : comportement histori
   const params = extractTaskParams(baseTaskRequest({ filePath: "docs/runtime.md", instructions: "x" }, "task-no-surgical"));
   assert.equal(params.surgicalEdit, undefined);
 });
+
+// ---------------------------------------------------------------------------
+// rollback / generate_revert_pr (tâche 5, sous-priorité 2 du brief JARVIS-00) :
+// annuler proprement une PR mono-fichier de la Software Factory plutôt que d'en
+// empiler une nouvelle par-dessus un chantier raté. Testé via le chemin d'appel
+// réel (TaskRequest -> handleTaskRequest -> executeWorkflow).
+// ---------------------------------------------------------------------------
+
+function mockOctokitForRevertFlow(overrides: {
+  calls?: string[];
+  targetPrFiles?: Array<{ filename: string }>;
+  contentBeforeTargetPr?: string | null;
+  currentContent?: string;
+  targetPrMerged?: boolean;
+} = {}): Octokit {
+  const calls = overrides.calls;
+  const record = (c: string) => { if (calls) calls.push(c); };
+  const targetPrFiles = overrides.targetPrFiles ?? [{ filename: "docs/reverted.md" }];
+  const currentContent = overrides.currentContent ?? "contenu actuel (la mauvaise version)";
+  const targetPrMerged = overrides.targetPrMerged ?? true;
+  return {
+    rest: {
+      repos: {
+        get: async () => { record("repos.get"); return { data: { default_branch: "main" } }; },
+        getContent: async ({ ref }: { ref: string }) => {
+          record(`repos.getContent:${ref}`);
+          if (ref === "sha-before-target-pr") {
+            if (overrides.contentBeforeTargetPr === null) throw new Error("404 Not Found");
+            return { data: { type: "file", content: Buffer.from(overrides.contentBeforeTargetPr ?? "contenu d'avant la PR annulée", "utf-8").toString("base64"), encoding: "base64", sha: "sha-old" } };
+          }
+          return { data: { type: "file", content: Buffer.from(currentContent, "utf-8").toString("base64"), encoding: "base64", sha: "sha-current" } };
+        },
+        createOrUpdateFileContents: async () => { record("repos.createOrUpdateFileContents"); return { data: { commit: { sha: "sha-after-revert" } } }; },
+        compareCommits: async () => { record("repos.compareCommits"); return { data: { files: [{ filename: "docs/reverted.md", status: "modified" }] } }; },
+      },
+      git: {
+        getRef: async ({ ref }: { ref: string }) => {
+          record(`git.getRef:${ref}`);
+          if (ref.startsWith("heads/jarvis/")) throw new Error("404 Not Found");
+          return { data: { object: { sha: "base-sha" } } };
+        },
+        createRef: async () => { record("git.createRef"); return { data: {} }; },
+      },
+      pulls: {
+        get: async ({ pull_number }: { pull_number: number }) => {
+          record(`pulls.get:${pull_number}`);
+          return { data: { base: { sha: "sha-before-target-pr" }, title: "PR à annuler", merged: targetPrMerged } };
+        },
+        listFiles: async ({ pull_number }: { pull_number: number }) => { record(`pulls.listFiles:${pull_number}`); return { data: targetPrFiles }; },
+        list: async () => { record("pulls.list"); return { data: [] }; },
+        create: async () => { record("pulls.create"); return { data: { html_url: "https://github.com/org/repo/pull/88", number: 88 } }; },
+      },
+    },
+  } as unknown as Octokit;
+}
+
+test("rollback — annule une PR mono-fichier en restaurant le contenu d'avant cette PR, dans une nouvelle PR propre", async () => {
+  const calls: string[] = [];
+  const octokit = mockOctokitForRevertFlow({ calls, contentBeforeTargetPr: "contenu d'avant la PR annulée" });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+  service.generateCodeUpdate = async () => { throw new Error("generateCodeUpdate ne doit PAS être appelé pour un rollback !"); };
+
+  const req = baseTaskRequest(
+    { filePath: "docs/reverted.md", instructions: "Annule ce chantier raté", revertPrNumber: 42 },
+    "task-rollback-basic",
+  );
+  const events = await service.handleTaskRequest(req);
+  const completed = events.find((e) => e.type === "TASK_COMPLETED");
+  assert.ok(completed, "TASK_COMPLETED doit être émis");
+  assert.equal(completed?.payload.pr_number, 88, "une PR distincte (propre) est ouverte pour le revert, pas un nouveau commit empilé");
+  assert.ok(calls.includes("pulls.get:42"), "la PR ciblée doit être lue");
+  assert.ok(calls.includes("pulls.listFiles:42"), "les fichiers de la PR ciblée doivent être listés");
+  assert.ok(calls.includes("repos.getContent:sha-before-target-pr"), "le contenu doit être lu au base_sha de la PR ciblée, jamais fourni par l'appelant");
+  assert.ok(calls.includes("repos.createOrUpdateFileContents"));
+});
+
+test("rollback — le contenu committé est exactement celui d'avant la PR ciblée", async () => {
+  let writtenContent = "";
+  const octokit = mockOctokitForRevertFlow({ contentBeforeTargetPr: "VERSION_ORIGINALE_A_RESTAURER" });
+  (octokit.rest.repos as unknown as { createOrUpdateFileContents: (args: { content: string }) => Promise<{ data: { commit: { sha: string } } }> }).createOrUpdateFileContents =
+    async ({ content }) => { writtenContent = Buffer.from(content, "base64").toString("utf-8"); return { data: { commit: { sha: "sha-after-revert" } } }; };
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const req = baseTaskRequest({ filePath: "docs/reverted.md", instructions: "Annule", revertPrNumber: 42 }, "task-rollback-content");
+  await service.handleTaskRequest(req);
+  assert.equal(writtenContent, "VERSION_ORIGINALE_A_RESTAURER");
+});
+
+test("rollback — refuse une PR ciblée qui modifie plusieurs fichiers, avant toute écriture GitHub", async () => {
+  const calls: string[] = [];
+  const octokit = mockOctokitForRevertFlow({ calls, targetPrFiles: [{ filename: "docs/a.md" }, { filename: "docs/b.md" }] });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const req = baseTaskRequest({ filePath: "docs/a.md", instructions: "Annule", revertPrNumber: 42 }, "task-rollback-multifile");
+  const events = await service.handleTaskRequest(req);
+  const failed = events.find((e) => e.type === "TASK_FAILED");
+  assert.equal(failed?.payload.error_code, "REVERT_MULTI_FILE_UNSUPPORTED");
+  assert.equal(calls.includes("repos.createOrUpdateFileContents"), false);
+});
+
+test("rollback — refuse un filePath qui ne correspond pas au fichier réellement modifié par la PR ciblée", async () => {
+  const calls: string[] = [];
+  const octokit = mockOctokitForRevertFlow({ calls, targetPrFiles: [{ filename: "docs/autre-fichier.md" }] });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const req = baseTaskRequest({ filePath: "docs/reverted.md", instructions: "Annule", revertPrNumber: 42 }, "task-rollback-mismatch");
+  const events = await service.handleTaskRequest(req);
+  const failed = events.find((e) => e.type === "TASK_FAILED");
+  assert.equal(failed?.payload.error_code, "REVERT_FILE_MISMATCH");
+  assert.equal(calls.includes("repos.createOrUpdateFileContents"), false);
+});
+
+test("rollback — refuse d'annuler une PR qui a créé le fichier (exigerait une suppression, non supportée)", async () => {
+  const calls: string[] = [];
+  const octokit = mockOctokitForRevertFlow({ calls, contentBeforeTargetPr: null });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const req = baseTaskRequest({ filePath: "docs/reverted.md", instructions: "Annule", revertPrNumber: 42 }, "task-rollback-creation");
+  const events = await service.handleTaskRequest(req);
+  const failed = events.find((e) => e.type === "TASK_FAILED");
+  assert.equal(failed?.payload.error_code, "REVERT_REQUIRES_DELETE");
+  assert.equal(calls.includes("repos.createOrUpdateFileContents"), false);
+});
+
+test("rollback — la PR ciblée introuvable échoue proprement, de façon replannable", async () => {
+  const octokit = mockOctokitForRevertFlow();
+  (octokit.rest.pulls as unknown as { get: () => Promise<never> }).get = async () => { throw new Error("404 Not Found"); };
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const req = baseTaskRequest({ filePath: "docs/reverted.md", instructions: "Annule", revertPrNumber: 999 }, "task-rollback-not-found");
+  const events = await service.handleTaskRequest(req);
+  const failed = events.find((e) => e.type === "TASK_FAILED");
+  assert.equal(failed?.payload.error_code, "REVERT_PR_NOT_FOUND");
+  assert.equal(failed?.payload.replannable, true);
+});
+
+test("rollback — refuse d'annuler une PR ciblée qui n'a jamais été fusionnée, avant toute écriture GitHub", async () => {
+  const calls: string[] = [];
+  const octokit = mockOctokitForRevertFlow({ calls, targetPrMerged: false });
+  const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
+
+  const req = baseTaskRequest({ filePath: "docs/reverted.md", instructions: "Annule", revertPrNumber: 42 }, "task-rollback-not-merged");
+  const events = await service.handleTaskRequest(req);
+  const failed = events.find((e) => e.type === "TASK_FAILED");
+  assert.equal(failed?.payload.error_code, "REVERT_PR_NOT_MERGED");
+  assert.equal(calls.includes("pulls.listFiles:42"), false, "aucun autre appel GitHub après le constat de non-fusion");
+  assert.equal(calls.includes("repos.createOrUpdateFileContents"), false);
+});
+
+test("rollback — revertPrNumber combiné à TARGET_PR/TARGET_BRANCH est rejeté avant tout accès réseau (l'annulation doit toujours ouvrir une PR propre)", () => {
+  assert.throws(
+    () => extractTaskParams(baseTaskRequest({ filePath: "docs/reverted.md", instructions: "TARGET_PR=7", revertPrNumber: 42 }, "task-rollback-conflict-pr")),
+    (err: unknown) => err instanceof Error && err.message.includes("REVERT_TARGET_CONFLICT"),
+  );
+  assert.throws(
+    () => extractTaskParams(baseTaskRequest({ filePath: "docs/reverted.md", instructions: "TARGET_BRANCH=jarvis/existing", revertPrNumber: 42 }, "task-rollback-conflict-branch")),
+    (err: unknown) => err instanceof Error && err.message.includes("REVERT_TARGET_CONFLICT"),
+  );
+});
+
+test("rollback — un revertPrNumber invalide est rejeté avant tout accès réseau", () => {
+  for (const revertPrNumber of [0, -1, 1.5, "42"]) {
+    assert.throws(
+      () => extractTaskParams(baseTaskRequest({ filePath: "docs/reverted.md", instructions: "x", revertPrNumber }, "task-rollback-invalid")),
+      (err: unknown) => err instanceof Error && err.message.includes("REVERT_PR_NUMBER_INVALID"),
+      JSON.stringify(revertPrNumber),
+    );
+  }
+});
+
+test("Agent : un tool call software_development avec revertPrNumber atteint bien TaskRequest.context (schéma du skill câblé)", async () => {
+  const { Agent } = await import("../core/agent.js");
+  const { LocalHashingEmbeddingProvider } = await import("../llm/embeddings.js");
+  const { ServiceOrchestrator } = await import("../orchestration/serviceOrchestrator.js");
+  const { ServiceAdapter } = await import("../orchestration/serviceAdapter.js");
+  config.db.path = ":memory:";
+  // software_development est classé HIGH (impact réel sur le code source) : le plafond de
+  // risque global doit couvrir HIGH pour que dispatchCapability atteigne réellement le service.
+  config.autonomy.globalRiskLevel = "HIGH";
+  config.autonomy.permissionMatrix = "EXECUTE";
+  const { closeDb, getDb } = await import("../persistence/db.js");
+  closeDb();
+  getDb();
+
+  class RecordingAdapter extends ServiceAdapter {
+    readonly factoryCalls: TaskRequest[] = [];
+    override async dispatchTask(value: unknown, request: TaskRequest) {
+      const serviceId = typeof value === "string" ? value : (value as { id: string }).id;
+      if (serviceId !== "software_factory") return super.dispatchTask(value as never, request);
+      this.factoryCalls.push(request);
+      return {
+        success: true,
+        events: [{
+          schema_version: "1.0", event_id: `evt-${request.task_id}`, task_id: request.task_id, trace_id: request.trace_id,
+          service: "software_factory", sequence: 1, type: "TASK_COMPLETED" as const, timestamp: Date.now(),
+          payload: { status: "COMPLETED", branch: "jarvis/revert", commit_sha: "abc", pr_number: 1, pr_url: "https://github.com/org/repo/pull/1", filePath: request.context.filePath, summary: "Revert" },
+        }],
+        transportDurationMs: 0,
+      };
+    }
+  }
+  const adapter = new RecordingAdapter();
+  const orchestrator = new ServiceOrchestrator({ adapter });
+  let call = 0;
+  const llm = {
+    name: "revert-schema-test",
+    async complete(_messages: unknown, _options: unknown) {
+      call += 1;
+      if (call === 1) {
+        return { content: null, toolCalls: [{ id: "call-revert", type: "function", function: { name: "software_development", arguments: JSON.stringify({ objective: "Annule la PR #77", filePath: "docs/reverted.md", instructions: "Annule un chantier raté", revertPrNumber: 77 }) } }] };
+      }
+      return { content: "PR de revert créée" };
+    },
+  };
+  const agent = new Agent({ llm: llm as any, embeddings: new LocalHashingEmbeddingProvider(), orchestrator });
+  (agent.skillSelector as any).select = async () => [agent.skills.get("software_development")!];
+  await agent.step("annule la PR #77, ce chantier a mal tourné");
+  assert.equal(adapter.factoryCalls.length, 1);
+  assert.equal(adapter.factoryCalls[0].context.revertPrNumber, 77);
+});

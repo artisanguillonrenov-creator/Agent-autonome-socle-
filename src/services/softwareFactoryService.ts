@@ -99,6 +99,13 @@ export interface ParsedSoftwareTask {
    * priorité — comportement historique inchangé pour tout appelant existant).
    */
   surgicalEdit?: SurgicalEditRequest;
+  /**
+   * Rollback (tâche 5) : numéro d'une PR à annuler proprement plutôt que d'empiler un
+   * nouveau chantier par-dessus un précédent raté. `filePath` doit correspondre au fichier
+   * unique modifié par cette PR (vérifié avant toute écriture, `REVERT_FILE_MISMATCH` sinon)
+   * — le contenu à restaurer est lu au `base.sha` de cette PR, jamais fourni par l'appelant.
+   */
+  revertPrNumber?: number;
   targetBranch?: string;
   targetPr?: number;
   /** Autorisation explicite de créer le fichier s'il n'existe pas. */
@@ -204,6 +211,13 @@ export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
   const objectiveStr = String(taskReq.objective || "").trim();
   const instructionsStr = String(ctx.instructions || "").trim();
   const createIfMissing = ctx.createIfMissing === true;
+  let revertPrNumber: number | undefined = undefined;
+  if (ctx.revertPrNumber !== undefined) {
+    if (!Number.isSafeInteger(ctx.revertPrNumber) || (ctx.revertPrNumber as number) <= 0) {
+      throw new Error("REVERT_PR_NUMBER_INVALID: revertPrNumber doit être un entier positif.");
+    }
+    revertPrNumber = ctx.revertPrNumber as number;
+  }
 
   // Champs de fidélité/sécurité (PR-B/PR-D) : lus et validés strictement ici,
   // avant tout accès réseau, pour que le chemin runtime réel
@@ -232,6 +246,10 @@ export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
 
   if (targetBranchMatch && !targetBranch) {
     throw new Error("TARGET_BRANCH_INVALID: TARGET_BRANCH ne peut pas être vide.");
+  }
+
+  if (revertPrNumber !== undefined && (targetBranch !== undefined || targetPr !== undefined)) {
+    throw new Error("REVERT_TARGET_CONFLICT: revertPrNumber ne peut pas être combiné avec TARGET_BRANCH/TARGET_PR : une annulation doit toujours ouvrir une nouvelle PR propre, jamais réutiliser une branche/PR existante.");
   }
   const textToSearch = instructionsStr ? `${objectiveStr}\n${instructionsStr}` : objectiveStr;
 
@@ -313,6 +331,7 @@ export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
     instructions,
     exactContent,
     surgicalEdit,
+    revertPrNumber,
     targetBranch,
     targetPr,
     createIfMissing,
@@ -623,13 +642,78 @@ export class SoftwareFactoryService {
       );
     }
 
+    // 3b. Rollback (tâche 5) : lit le contenu à restaurer depuis la PR ciblée — jamais fourni
+    // par l'appelant. Refuse avant toute écriture si la PR touche plus d'un fichier (hors
+    // périmètre : cette Factory ne sait produire qu'un changement mono-fichier), si filePath
+    // ne correspond pas au fichier réellement modifié par cette PR, ou si la PR a créé le
+    // fichier (l'annuler exigerait une suppression — capacité delete_file non encore implémentée,
+    // gapAnalysis.ts sous-priorité 4).
+    let revertContent: string | undefined;
+    if (params.revertPrNumber !== undefined) {
+      onStep?.("REVERT_READING_TARGET_PR", { prNumber: params.revertPrNumber });
+      let targetPr;
+      try {
+        targetPr = await this.octokit.rest.pulls.get({ owner, repo, pull_number: params.revertPrNumber });
+      } catch (error: unknown) {
+        if (isNotFoundError(error)) {
+          throw new SoftwareFactoryWorkflowError("REVERT_PR_NOT_FOUND", `La Pull Request #${params.revertPrNumber} à annuler est introuvable.`, true, "none");
+        }
+        throw error;
+      }
+      if (!targetPr.data.merged) {
+        throw new SoftwareFactoryWorkflowError(
+          "REVERT_PR_NOT_MERGED",
+          `La PR #${params.revertPrNumber} n'est pas fusionnée : ses changements ne sont jamais arrivés sur la branche par défaut, donc rien à en annuler (une PR ouverte ou fermée sans fusion doit être fermée directement, pas annulée).`,
+          false,
+          "none",
+        );
+      }
+      const revertFiles = await this.octokit.rest.pulls.listFiles({ owner, repo, pull_number: params.revertPrNumber, per_page: 2 });
+      if (revertFiles.data.length !== 1) {
+        throw new SoftwareFactoryWorkflowError(
+          "REVERT_MULTI_FILE_UNSUPPORTED",
+          `La PR #${params.revertPrNumber} modifie ${revertFiles.data.length} fichier(s) ; l'annulation automatique n'est prise en charge que pour une PR mono-fichier (comme tout ce que cette Factory sait produire).`,
+          false,
+          "none",
+        );
+      }
+      if (revertFiles.data[0].filename !== filePath) {
+        throw new SoftwareFactoryWorkflowError(
+          "REVERT_FILE_MISMATCH",
+          `filePath ('${filePath}') ne correspond pas au fichier réellement modifié par la PR #${params.revertPrNumber} ('${revertFiles.data[0].filename}').`,
+          true,
+          "none",
+        );
+      }
+      try {
+        const beforeRes = await this.octokit.rest.repos.getContent({ owner, repo, path: filePath, ref: targetPr.data.base.sha });
+        if ("content" in beforeRes.data && typeof beforeRes.data.content === "string") {
+          revertContent = Buffer.from(beforeRes.data.content, "base64").toString("utf-8");
+        }
+      } catch (error: unknown) {
+        if (!isNotFoundError(error)) throw error;
+      }
+      if (revertContent === undefined) {
+        throw new SoftwareFactoryWorkflowError(
+          "REVERT_REQUIRES_DELETE",
+          `La PR #${params.revertPrNumber} a créé '${filePath}' (absent avant cette PR) : l'annuler exigerait de supprimer le fichier, capacité non encore implémentée.`,
+          false,
+          "none",
+        );
+      }
+      onStep?.("REVERT_TARGET_PR_READ", { prNumber: params.revertPrNumber, filePath });
+    }
+
     // 4. Générer ou utiliser le code exact — toujours avant toute mutation GitHub.
     // surgicalEdit (tâche 5) produit lui aussi un `updatedCode` = contenu complet du
     // fichier après édition, exactement comme exactContent/génération LLM : le secret
     // guard (4b) et le contrôle de fidélité (4c) ci-dessous continuent de s'appliquer
     // au fichier entier résultant sans aucune adaptation.
     let updatedCode: string;
-    if (typeof params.exactContent === "string") {
+    if (revertContent !== undefined) {
+      onStep?.("USING_REVERT_CONTENT", { filePath, prNumber: params.revertPrNumber });
+      updatedCode = revertContent;
+    } else if (typeof params.exactContent === "string") {
       onStep?.("USING_EXACT_CONTENT", { filePath });
       updatedCode = params.exactContent;
     } else if (params.surgicalEdit) {
@@ -676,7 +760,12 @@ export class SoftwareFactoryService {
       expectedChangeType: params.expectedChangeType,
       originalContent: existingContent,
       updatedContent: updatedCode,
-      allowFullRewrite: params.allowFullRewrite,
+      // Un rollback restaure délibérément le contenu d'avant la PR ciblée, qui peut
+      // légitimement ne garder presque aucune ligne du contenu actuel (le changement
+      // qu'on annule) — l'heuristique "réécriture complète suspecte" ne s'applique pas
+      // à ce cas précis. Les autres garde-fous (secret guard, périmètre de fichier)
+      // restent pleinement actifs.
+      allowFullRewrite: revertContent !== undefined ? true : params.allowFullRewrite,
     });
     if (diffFidelity.fidelityStatus === "FAIL") {
       throw new SoftwareFactoryWorkflowError(
@@ -850,10 +939,14 @@ export class SoftwareFactoryService {
           const prRes = await this.octokit.rest.pulls.create({
             owner,
             repo,
-            title: `[Jarvis Software Factory] Patch for ${filePath} (${cleanTaskId})`,
+            title: params.revertPrNumber !== undefined
+              ? `[Jarvis Software Factory] Revert PR #${params.revertPrNumber} : ${filePath} (${cleanTaskId})`
+              : `[Jarvis Software Factory] Patch for ${filePath} (${cleanTaskId})`,
             head: branchName,
             base: defaultBranch,
-            body: `## Modifications apportées par Jarvis Software Factory\n\n- **Tâche**: \`${taskId}\`\n- **Fichier**: \`${filePath}\`\n- **Instructions**: ${instructions}\n\n*Généré automatiquement par Jarvis Software Factory.*`,
+            body: params.revertPrNumber !== undefined
+              ? `## Annulation de la PR #${params.revertPrNumber} par Jarvis Software Factory\n\n- **Tâche**: \`${taskId}\`\n- **Fichier**: \`${filePath}\`\n- **Restauré au contenu d'avant la PR #${params.revertPrNumber}**.\n- **Motif**: ${instructions}\n\n*Généré automatiquement par Jarvis Software Factory.*`
+              : `## Modifications apportées par Jarvis Software Factory\n\n- **Tâche**: \`${taskId}\`\n- **Fichier**: \`${filePath}\`\n- **Instructions**: ${instructions}\n\n*Généré automatiquement par Jarvis Software Factory.*`,
           });
           prUrl = prRes.data.html_url;
           prNumber = prRes.data.number;
