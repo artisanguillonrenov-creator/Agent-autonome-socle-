@@ -49,6 +49,24 @@ function isUncertainMutationError(error: unknown): boolean {
   return /timeout|timed out|network|socket|econnreset|etimedout|fetch failed|aborted/i.test(errorMessage(error));
 }
 
+/**
+ * Découpe un gabarit de commande sandbox (`%FILE%` remplacé par le chemin réel) en argv, en
+ * respectant les guillemets simples/doubles — un simple `.split(/\s+/)` corromprait un chemin
+ * contenant un espace ou un argument explicitement mis entre guillemets dans le gabarit (review
+ * Codex #114, finding P2 : `node --check "%FILE%"` avec un chemin contenant un espace devenait
+ * plusieurs arguments invalides).
+ */
+function parseSandboxCommandTemplate(template: string, filePath: string): string[] {
+  const expanded = template.replaceAll("%FILE%", filePath);
+  const tokens: string[] = [];
+  const tokenPattern = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = tokenPattern.exec(expanded)) !== null) {
+    tokens.push(match[1] ?? match[2] ?? match[3]);
+  }
+  return tokens;
+}
+
 const REPLANNABLE_PRE_MUTATION_CODES = new Set([
   "FILE_PATH_MISSING",
   "FILE_NOT_FOUND",
@@ -493,7 +511,7 @@ export class SoftwareFactoryService {
   async runSandboxedValidation(filePath: string, content: string): Promise<ExecutionResult | null> {
     const template = config.softwareFactorySandbox.validationCommand.trim();
     if (!template) return null;
-    const command = template.replace("%FILE%", filePath).split(/\s+/).filter(Boolean);
+    const command = parseSandboxCommandTemplate(template, filePath);
     const result = await this.sandboxRunner({ [filePath]: content }, command, config.softwareFactorySandbox.timeoutMs);
     return result;
   }
@@ -501,14 +519,20 @@ export class SoftwareFactoryService {
   /**
    * Vérifications nommées build/test/lint/typecheck (tâche 5 sous-priorité 3, gapAnalysis.ts) :
    * même mécanisme que `runSandboxedValidation` (fichier patché seul monté, jamais le dépôt
-   * hôte), juste distinctes par commande/config — pour que la Factory puisse détecter une
-   * régression introduite par son propre patch avant d'ouvrir la PR, indépendamment de
-   * validationCommand. Chacune désactivée par défaut.
+   * hôte, jamais npm install/git clone) — pour que la Factory puisse détecter une régression
+   * introduite par son propre patch avant d'ouvrir la PR, indépendamment de validationCommand.
+   * Chacune désactivée par défaut. Ce périmètre mono-fichier est délibéré (review Codex #114) :
+   * la commande configurée doit être un contrôle AUTONOME sur le fichier seul (ex. `node --check
+   * %FILE%`, `tsc --noEmit %FILE%`, un lint sans config projet) — jamais un script de projet
+   * complet type `npm run build`/`npm test`, qui échouerait systématiquement ici faute de
+   * package.json/dépendances/reste du dépôt (absents par conception : les monter exigerait un
+   * accès réseau ou le montage du dépôt hôte, une extension de la surface d'automatisation non
+   * supervisée non tranchée — cf. corps de la PR-Q).
    */
   private async runNamedSandboxCheck(template: string, filePath: string, content: string): Promise<ExecutionResult | null> {
     const trimmed = template.trim();
     if (!trimmed) return null;
-    const command = trimmed.replace("%FILE%", filePath).split(/\s+/).filter(Boolean);
+    const command = parseSandboxCommandTemplate(trimmed, filePath);
     return this.sandboxRunner({ [filePath]: content }, command, config.softwareFactorySandbox.timeoutMs);
   }
 

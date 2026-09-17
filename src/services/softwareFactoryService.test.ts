@@ -2483,6 +2483,48 @@ test("run_build/run_tests/run_lint/run_typecheck : chacune configurée et réuss
   }
 });
 
+// review Codex #114, finding P2 : un simple split(/\s+/) corrompait un %FILE% contenant un
+// espace ou un argument explicitement mis entre guillemets dans le gabarit de commande.
+test("run_build : un filePath contenant un espace, entouré de guillemets dans le gabarit, atteint le sandbox comme un seul argument (pas coupé sur l'espace)", async () => {
+  const calls: SandboxRunnerCall[] = [];
+  const previous = config.softwareFactorySandbox.buildCommand;
+  config.softwareFactorySandbox.buildCommand = 'node --check "%FILE%"';
+  try {
+    const octokit = mockOctokitForTaskRequestFlow({ existingContent: "old content" });
+    const service = new SoftwareFactoryService({
+      githubToken: "test-token",
+      octokitClient: octokit,
+      sandboxRunner: fakeSandboxRunner({ node: { exitCode: 0 } }, calls),
+    });
+
+    const req = baseTaskRequest({ filePath: "docs/my file.md", instructions: "x", exactContent: "new content" }, "task-checks-quoted-path");
+    await service.handleTaskRequest(req);
+    assert.deepEqual(calls[0]?.command, ["node", "--check", "docs/my file.md"], "le chemin avec espace doit rester un seul argument, jamais coupé");
+  } finally {
+    config.softwareFactorySandbox.buildCommand = previous;
+  }
+});
+
+test("validationCommand (mécanisme pré-existant) partage le même correctif de découpage que build/test/lint/typecheck", async () => {
+  const calls: SandboxRunnerCall[] = [];
+  const previous = config.softwareFactorySandbox.validationCommand;
+  config.softwareFactorySandbox.validationCommand = 'node --check "%FILE%"';
+  try {
+    const octokit = mockOctokitForTaskRequestFlow({ existingContent: "old content" });
+    const service = new SoftwareFactoryService({
+      githubToken: "test-token",
+      octokitClient: octokit,
+      sandboxRunner: fakeSandboxRunner({ node: { exitCode: 0 } }, calls),
+    });
+
+    const req = baseTaskRequest({ filePath: "docs/my file.md", instructions: "x", exactContent: "new content" }, "task-validation-quoted-path");
+    await service.handleTaskRequest(req);
+    assert.deepEqual(calls[0]?.command, ["node", "--check", "docs/my file.md"]);
+  } finally {
+    config.softwareFactorySandbox.validationCommand = previous;
+  }
+});
+
 for (const [kind, configField, errorCode] of [
   ["build", "buildCommand", "SANDBOX_BUILD_FAILED"],
   ["test", "testCommand", "SANDBOX_TEST_FAILED"],

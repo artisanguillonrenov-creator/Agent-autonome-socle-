@@ -278,6 +278,12 @@ export const config = {
    * 3) sont des vérifications NOMMÉES distinctes de validationCommand — même mécanisme
    * (runCommandInSandbox, uniquement le fichier patché monté, jamais le dépôt hôte), chacune
    * indépendamment configurable et désactivée par défaut.
+   *
+   * IMPORTANT (scope, review Codex #114) : la commande configurée doit être un contrôle
+   * AUTONOME sur le fichier seul (ex. "node --check %FILE%", "tsc --noEmit %FILE%", un lint
+   * sans config projet) — jamais un script de projet complet ("npm run build", "npm test"),
+   * qui échouerait systématiquement (pas de package.json/node_modules/reste du dépôt dans le
+   * sandbox : par conception, jamais le dépôt hôte ni un accès réseau).
    */
   softwareFactorySandbox: {
     validationCommand: process.env.SOFTWARE_FACTORY_SANDBOX_VALIDATION_COMMAND || "",
