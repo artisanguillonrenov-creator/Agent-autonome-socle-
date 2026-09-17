@@ -272,9 +272,25 @@ export const config = {
     dockerNanoCpus: int(process.env.SANDBOX_DOCKER_NANO_CPUS, 1_000_000_000),
     dockerNetworkEnabled: process.env.SANDBOX_DOCKER_NETWORK_ENABLED === "true",
   },
-  /** Software Factory : validation optionnelle en sandbox isolée avant commit (désactivée par défaut, aucun changement de comportement). */
+  /**
+   * Software Factory : validation optionnelle en sandbox isolée avant commit (désactivée par
+   * défaut, aucun changement de comportement). build/test/lint/typecheck (tâche 5 sous-priorité
+   * 3) sont des vérifications NOMMÉES distinctes de validationCommand — même mécanisme
+   * (runCommandInSandbox, uniquement le fichier patché monté, jamais le dépôt hôte), chacune
+   * indépendamment configurable et désactivée par défaut.
+   *
+   * IMPORTANT (scope, review Codex #114) : la commande configurée doit être un contrôle
+   * AUTONOME sur le fichier seul (ex. "node --check %FILE%", "tsc --noEmit %FILE%", un lint
+   * sans config projet) — jamais un script de projet complet ("npm run build", "npm test"),
+   * qui échouerait systématiquement (pas de package.json/node_modules/reste du dépôt dans le
+   * sandbox : par conception, jamais le dépôt hôte ni un accès réseau).
+   */
   softwareFactorySandbox: {
     validationCommand: process.env.SOFTWARE_FACTORY_SANDBOX_VALIDATION_COMMAND || "",
+    buildCommand: process.env.SOFTWARE_FACTORY_SANDBOX_BUILD_COMMAND || "",
+    testCommand: process.env.SOFTWARE_FACTORY_SANDBOX_TEST_COMMAND || "",
+    lintCommand: process.env.SOFTWARE_FACTORY_SANDBOX_LINT_COMMAND || "",
+    typecheckCommand: process.env.SOFTWARE_FACTORY_SANDBOX_TYPECHECK_COMMAND || "",
     timeoutMs: int(process.env.SOFTWARE_FACTORY_SANDBOX_TIMEOUT_MS, 60_000),
   },
   /**
