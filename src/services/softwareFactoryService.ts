@@ -159,6 +159,22 @@ export interface ParsedSoftwareTask {
   expectedChangeType?: "create" | "update";
   /** Autorise explicitement une réécriture qui ne conserverait presque aucune ligne d'origine (sinon bloquée par le garde-fou de fidélité). */
   allowFullRewrite?: boolean;
+  /**
+   * Suppression du fichier (tâche 5 sous-priorité 4) : capacité HIGH RISK (gapAnalysis.ts),
+   * opt-in explicite uniquement — jamais déduit des instructions. Mutuellement exclusif avec
+   * exactContent/oldString+newString/revertPrNumber/createIfMissing (aucun contenu à produire,
+   * aucune création possible pour une suppression) — rejeté avant tout accès réseau sinon
+   * (`DELETE_FILE_CONTENT_CONFLICT`). Le fichier doit exister (`DELETE_FILE_NOT_FOUND` sinon).
+   */
+  deleteFile?: boolean;
+  /**
+   * Crée la branche depuis un SHA précis plutôt que le HEAD courant de la branche par défaut
+   * (tâche 5 sous-priorité 4) — ex. reproduire un état antérieur exact. Doit exister dans le
+   * dépôt (`BRANCH_FROM_SHA_NOT_FOUND` sinon). Incompatible avec targetBranch/targetPr (une
+   * branche/PR existante a déjà sa propre base) — rejeté avant tout accès réseau
+   * (`BRANCH_FROM_SHA_TARGET_CONFLICT`).
+   */
+  branchFromSha?: string;
 }
 
 /**
@@ -252,6 +268,11 @@ export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
   const expectedFilePath = optionalNonEmptyString(ctx, "expectedFilePath", "EXPECTED_FILE_PATH_INVALID");
   const expectedChangeType = optionalChangeType(ctx);
   const allowFullRewrite = optionalBoolean(ctx, "allowFullRewrite", "ALLOW_FULL_REWRITE_INVALID");
+  const deleteFile = optionalBoolean(ctx, "deleteFile", "DELETE_FILE_INVALID");
+  const branchFromSha = optionalNonEmptyString(ctx, "branchFromSha", "BRANCH_FROM_SHA_INVALID");
+  if (branchFromSha !== undefined && !/^[0-9a-f]{7,40}$/i.test(branchFromSha)) {
+    throw new Error("BRANCH_FROM_SHA_INVALID: branchFromSha doit être un SHA hexadécimal (7 à 40 caractères).");
+  }
   const targetBranchMatch = instructionsStr.match(/^\s*TARGET_BRANCH\s*=\s*(.*?)\s*$/im);
   const targetPrMatch = instructionsStr.match(/^\s*TARGET_PR\s*=\s*(.*?)\s*$/im);
   const targetBranch = targetBranchMatch?.[1]?.trim();
@@ -274,6 +295,10 @@ export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
 
   if (revertPrNumber !== undefined && (targetBranch !== undefined || targetPr !== undefined)) {
     throw new Error("REVERT_TARGET_CONFLICT: revertPrNumber ne peut pas être combiné avec TARGET_BRANCH/TARGET_PR : une annulation doit toujours ouvrir une nouvelle PR propre, jamais réutiliser une branche/PR existante.");
+  }
+
+  if (branchFromSha !== undefined && (targetBranch !== undefined || targetPr !== undefined)) {
+    throw new Error("BRANCH_FROM_SHA_TARGET_CONFLICT: branchFromSha ne peut pas être combiné avec TARGET_BRANCH/TARGET_PR : une branche/PR existante a déjà sa propre base, il n'y a rien à créer depuis un SHA précis.");
   }
   const textToSearch = instructionsStr ? `${objectiveStr}\n${instructionsStr}` : objectiveStr;
 
@@ -346,6 +371,10 @@ export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
     }
   }
 
+  if (deleteFile === true && (exactContent !== undefined || surgicalEdit !== undefined || revertPrNumber !== undefined || createIfMissing)) {
+    throw new Error("DELETE_FILE_CONTENT_CONFLICT: deleteFile ne peut pas être combiné avec exactContent/oldString+newString/revertPrNumber/createIfMissing : une suppression ne produit aucun contenu et ne peut pas créer de fichier.");
+  }
+
   const instructions = (instructionsStr || objectiveStr || "Mettre à jour le code selon la spécification").trim();
 
   return {
@@ -359,6 +388,8 @@ export function extractTaskParams(taskReq: TaskRequest): ParsedSoftwareTask {
     targetBranch,
     targetPr,
     createIfMissing,
+    deleteFile,
+    branchFromSha,
     expectedBaseSha,
     expectedFilePath,
     expectedChangeType,
@@ -673,6 +704,37 @@ export class SoftwareFactoryService {
       }
     }
 
+    // 2c. branch_from_exact_sha (tâche 5 sous-priorité 4, gapAnalysis.ts) : crée la branche
+    // depuis un SHA précis plutôt que le HEAD courant de la branche par défaut — vérifié avant
+    // toute lecture de contenu ou écriture. Incompatible avec une branche/PR existante (déjà
+    // rejeté dans extractTaskParams, BRANCH_FROM_SHA_TARGET_CONFLICT) : usesExistingTarget est
+    // donc toujours false ici quand branchFromSha est fourni.
+    let branchSourceSha = baseSha;
+    // Ref utilisée pour la lecture du contenu courant (3.) et la création de branche (5.) quand
+    // aucune branche/PR existante n'est ciblée. Reste `defaultBranch` (nom de branche, ex. "main")
+    // par défaut — comportement historique inchangé pour tout appelant qui ne fournit pas
+    // branchFromSha — plutôt qu'un SHA littéral (même sémantiquement équivalent au HEAD courant
+    // juste lu) pour ne rien changer d'observable à ce chemin déjà en production.
+    let readRef = defaultBranch;
+    if (params.branchFromSha !== undefined) {
+      onStep?.("VERIFYING_BRANCH_FROM_SHA", { sha: params.branchFromSha });
+      try {
+        await this.octokit.rest.git.getCommit({ owner, repo, commit_sha: params.branchFromSha });
+      } catch (error: unknown) {
+        if (isNotFoundError(error)) {
+          throw new SoftwareFactoryWorkflowError(
+            "BRANCH_FROM_SHA_NOT_FOUND",
+            `Le commit '${params.branchFromSha}' est introuvable dans ce dépôt.`,
+            true,
+            "none",
+          );
+        }
+        throw error;
+      }
+      branchSourceSha = params.branchFromSha;
+      readRef = params.branchFromSha;
+    }
+
     // 3. Lire le fichier courant. Seul un vrai 404 signifie "fichier absent".
     let existingContent = "";
     let existingSha: string | undefined = undefined;
@@ -683,7 +745,7 @@ export class SoftwareFactoryService {
         owner,
         repo,
         path: filePath,
-        ref: usesExistingTarget ? branchName : defaultBranch,
+        ref: usesExistingTarget ? branchName : readRef,
       });
 
       if ("content" in fileRes.data && typeof fileRes.data.content === "string") {
@@ -695,10 +757,32 @@ export class SoftwareFactoryService {
       fileExists = false;
     }
 
+    // 3a. delete_file (tâche 5 sous-priorité 4, gapAnalysis.ts) : capacité HIGH RISK, opt-in
+    // explicite uniquement (jamais déduit des instructions, jamais combiné à une source de
+    // contenu — déjà rejeté dans extractTaskParams, DELETE_FILE_CONTENT_CONFLICT).
+    const isDelete = params.deleteFile === true;
+
     if (!fileExists && !allowCreate) {
+      // Le fichier doit exister pour une suppression : on ne peut pas supprimer ce qui
+      // n'existe déjà pas (DELETE_FILE_NOT_FOUND, plus précis que FILE_NOT_FOUND ici).
       throw new SoftwareFactoryWorkflowError(
-        "FILE_NOT_FOUND",
-        `Le fichier '${filePath}' n'existe pas. Inspecte le dépôt et fournis le bon filePath, ou utilise createIfMissing=true pour une création volontaire.`,
+        isDelete ? "DELETE_FILE_NOT_FOUND" : "FILE_NOT_FOUND",
+        isDelete
+          ? `Le fichier '${filePath}' n'existe pas : rien à supprimer.`
+          : `Le fichier '${filePath}' n'existe pas. Inspecte le dépôt et fournis le bon filePath, ou utilise createIfMissing=true pour une création volontaire.`,
+        true,
+        "none",
+      );
+    }
+
+    if (isDelete && params.expectedFilePath !== undefined && params.expectedFilePath !== filePath) {
+      // Même vérification que checkDiffFidelity (règle 1) : une suppression reste soumise au
+      // périmètre de fichier autorisé par la mission. checkDiffFidelity lui-même n'est pas
+      // appelable pour une suppression (sa règle "vidage de contenu jamais silencieux" rejette
+      // systématiquement un updatedContent vide, quel que soit allowFullRewrite).
+      throw new SoftwareFactoryWorkflowError(
+        "DIFF_FIDELITY_FAILED",
+        `fichier inattendu : la mission autorise '${params.expectedFilePath}', l'exécution cible '${filePath}'.`,
         true,
         "none",
       );
@@ -770,110 +854,128 @@ export class SoftwareFactoryService {
     // surgicalEdit (tâche 5) produit lui aussi un `updatedCode` = contenu complet du
     // fichier après édition, exactement comme exactContent/génération LLM : le secret
     // guard (4b) et le contrôle de fidélité (4c) ci-dessous continuent de s'appliquer
-    // au fichier entier résultant sans aucune adaptation.
-    let updatedCode: string;
-    if (revertContent !== undefined) {
-      onStep?.("USING_REVERT_CONTENT", { filePath, prNumber: params.revertPrNumber });
-      updatedCode = revertContent;
-    } else if (typeof params.exactContent === "string") {
-      onStep?.("USING_EXACT_CONTENT", { filePath });
-      updatedCode = params.exactContent;
-    } else if (params.surgicalEdit) {
-      onStep?.("APPLYING_SURGICAL_EDIT", { filePath });
-      try {
-        updatedCode = applySurgicalEdit(existingContent, params.surgicalEdit);
-      } catch (error: unknown) {
-        throw asWorkflowFailure(error, "none", true);
-      }
+    // au fichier entier résultant sans aucune adaptation. Une suppression (isDelete) ne
+    // produit aucun contenu : ce bloc entier (génération, secret guard, fidélité,
+    // validations sandboxées) est sans objet et remplacé par un DiffFidelityResult
+    // "deleted" construit directement (checkDiffFidelity rejette systématiquement un
+    // contenu vide, quel que soit allowFullRewrite — cf. commentaire 3a ci-dessus).
+    let updatedCode: string = "";
+    let diffFidelity: DiffFidelityResult;
+    if (isDelete) {
+      onStep?.("PREPARING_DELETE", { filePath });
+      const originalLineCount = existingContent.length ? existingContent.split("\n").length : 0;
+      diffFidelity = {
+        files: [{ path: filePath, changeType: "deleted", additions: 0, deletions: originalLineCount }],
+        additions: 0,
+        deletions: originalLineCount,
+        unexpectedFiles: [],
+        fidelityStatus: "PASS",
+        reason: null,
+      };
     } else {
-      onStep?.("GENERATING_CODE_UPDATE", { filePath });
-      updatedCode = await this.generateCodeUpdate(existingContent, filePath, instructions);
-    }
+      if (revertContent !== undefined) {
+        onStep?.("USING_REVERT_CONTENT", { filePath, prNumber: params.revertPrNumber });
+        updatedCode = revertContent;
+      } else if (typeof params.exactContent === "string") {
+        onStep?.("USING_EXACT_CONTENT", { filePath });
+        updatedCode = params.exactContent;
+      } else if (params.surgicalEdit) {
+        onStep?.("APPLYING_SURGICAL_EDIT", { filePath });
+        try {
+          updatedCode = applySurgicalEdit(existingContent, params.surgicalEdit);
+        } catch (error: unknown) {
+          throw asWorkflowFailure(error, "none", true);
+        }
+      } else {
+        onStep?.("GENERATING_CODE_UPDATE", { filePath });
+        updatedCode = await this.generateCodeUpdate(existingContent, filePath, instructions);
+      }
 
-    // 4b. Secret guard — avant TOUTE écriture GitHub (branche, commit, PR), pas
-    // seulement avant le commit du fichier. Inspecte le contenu créé/modifié
-    // (updatedCode couvre aussi le diff : ce dépôt remplace le fichier entier,
-    // donc tout secret introduit par le diff est nécessairement présent dans
-    // updatedCode) ainsi que le texte destiné au message de commit et au corps
-    // de la PR (instructions). Le secret détecté n'est jamais logué en clair :
-    // seul le compte d'occurrences apparaît dans le message d'erreur.
-    onStep?.("SECRET_SCAN", { filePath });
-    const secretScan = scanForSecrets(updatedCode, instructions);
-    if (secretScan.detected) {
-      throw new SoftwareFactoryWorkflowError(
-        "SECRET_DETECTED",
-        `Un secret potentiel a été détecté dans le contenu destiné à GitHub (${secretScan.redactedCount} occurrence(s) masquée(s)). Écriture bloquée avant toute branche/commit/PR.`,
-        false,
-        "none",
-      );
-    }
-
-    // 4c. Diff/fidelity control — avant TOUTE écriture GitHub, comme le secret
-    // guard ci-dessus. Couvre en un seul appel : fichier hors périmètre de la
-    // mission, création qui remplacerait silencieusement un fichier existant
-    // (et son symétrique), vidage de contenu non demandé, et réécriture qui ne
-    // conserverait presque aucune ligne d'origine (cf. src/services/diffFidelity.ts
-    // pour la logique complète, pure et testée indépendamment).
-    onStep?.("DIFF_FIDELITY_CHECK", { filePath });
-    const diffFidelity = checkDiffFidelity({
-      filePath,
-      expectedFilePath: params.expectedFilePath,
-      fileExistedBefore: fileExists,
-      expectedChangeType: params.expectedChangeType,
-      originalContent: existingContent,
-      updatedContent: updatedCode,
-      // Un rollback restaure délibérément le contenu d'avant la PR ciblée, qui peut
-      // légitimement ne garder presque aucune ligne du contenu actuel (le changement
-      // qu'on annule) — l'heuristique "réécriture complète suspecte" ne s'applique pas
-      // à ce cas précis. Les autres garde-fous (secret guard, périmètre de fichier)
-      // restent pleinement actifs.
-      allowFullRewrite: revertContent !== undefined ? true : params.allowFullRewrite,
-    });
-    if (diffFidelity.fidelityStatus === "FAIL") {
-      throw new SoftwareFactoryWorkflowError(
-        "DIFF_FIDELITY_FAILED",
-        diffFidelity.reason ?? "contrôle de fidélité du diff échoué.",
-        false,
-        "none",
-      );
-    }
-
-    // 4d. Validation sandboxée optionnelle — avant toute écriture GitHub, comme les gardes
-    // ci-dessus. Désactivée par défaut (config.softwareFactorySandbox.validationCommand vide) :
-    // n'affecte alors jamais le comportement historique.
-    if (config.softwareFactorySandbox.validationCommand.trim()) {
-      onStep?.("SANDBOX_VALIDATION", { filePath });
-      const validation = await this.runSandboxedValidation(filePath, updatedCode);
-      if (validation && (validation.timedOut || (validation.exitCode !== undefined && validation.exitCode !== 0))) {
+      // 4b. Secret guard — avant TOUTE écriture GitHub (branche, commit, PR), pas
+      // seulement avant le commit du fichier. Inspecte le contenu créé/modifié
+      // (updatedCode couvre aussi le diff : ce dépôt remplace le fichier entier,
+      // donc tout secret introduit par le diff est nécessairement présent dans
+      // updatedCode) ainsi que le texte destiné au message de commit et au corps
+      // de la PR (instructions). Le secret détecté n'est jamais logué en clair :
+      // seul le compte d'occurrences apparaît dans le message d'erreur.
+      onStep?.("SECRET_SCAN", { filePath });
+      const secretScan = scanForSecrets(updatedCode, instructions);
+      if (secretScan.detected) {
         throw new SoftwareFactoryWorkflowError(
-          "SANDBOX_VALIDATION_FAILED",
-          `La validation sandboxée a échoué pour '${filePath}' : ${validation.timedOut ? "timeout" : `code de sortie ${validation.exitCode}`}. stderr: ${validation.stderr.slice(0, 500)}`,
-          true,
+          "SECRET_DETECTED",
+          `Un secret potentiel a été détecté dans le contenu destiné à GitHub (${secretScan.redactedCount} occurrence(s) masquée(s)). Écriture bloquée avant toute branche/commit/PR.`,
+          false,
           "none",
         );
       }
-    }
 
-    // 4e. Vérifications nommées build/test/lint/typecheck optionnelles (tâche 5 sous-priorité 3) —
-    // mêmes garanties que 4d (désactivées par défaut, aucun impact sur le workflow historique),
-    // chacune indépendante pour que l'échec pointe précisément vers la vérification en cause.
-    const namedChecks: Array<{ kind: "BUILD" | "TEST" | "LINT" | "TYPECHECK"; command: string; run: () => Promise<ExecutionResult | null> }> = [
-      { kind: "BUILD", command: config.softwareFactorySandbox.buildCommand, run: () => this.runBuildCheck(filePath, updatedCode) },
-      { kind: "TEST", command: config.softwareFactorySandbox.testCommand, run: () => this.runTestCheck(filePath, updatedCode) },
-      { kind: "LINT", command: config.softwareFactorySandbox.lintCommand, run: () => this.runLintCheck(filePath, updatedCode) },
-      { kind: "TYPECHECK", command: config.softwareFactorySandbox.typecheckCommand, run: () => this.runTypecheckCheck(filePath, updatedCode) },
-    ];
-    for (const check of namedChecks) {
-      if (!check.command.trim()) continue;
-      onStep?.(`SANDBOX_${check.kind}`, { filePath });
-      const result = await check.run();
-      if (result && (result.timedOut || (result.exitCode !== undefined && result.exitCode !== 0))) {
+      // 4c. Diff/fidelity control — avant TOUTE écriture GitHub, comme le secret
+      // guard ci-dessus. Couvre en un seul appel : fichier hors périmètre de la
+      // mission, création qui remplacerait silencieusement un fichier existant
+      // (et son symétrique), vidage de contenu non demandé, et réécriture qui ne
+      // conserverait presque aucune ligne d'origine (cf. src/services/diffFidelity.ts
+      // pour la logique complète, pure et testée indépendamment).
+      onStep?.("DIFF_FIDELITY_CHECK", { filePath });
+      diffFidelity = checkDiffFidelity({
+        filePath,
+        expectedFilePath: params.expectedFilePath,
+        fileExistedBefore: fileExists,
+        expectedChangeType: params.expectedChangeType,
+        originalContent: existingContent,
+        updatedContent: updatedCode,
+        // Un rollback restaure délibérément le contenu d'avant la PR ciblée, qui peut
+        // légitimement ne garder presque aucune ligne du contenu actuel (le changement
+        // qu'on annule) — l'heuristique "réécriture complète suspecte" ne s'applique pas
+        // à ce cas précis. Les autres garde-fous (secret guard, périmètre de fichier)
+        // restent pleinement actifs.
+        allowFullRewrite: revertContent !== undefined ? true : params.allowFullRewrite,
+      });
+      if (diffFidelity.fidelityStatus === "FAIL") {
         throw new SoftwareFactoryWorkflowError(
-          `SANDBOX_${check.kind}_FAILED`,
-          `La vérification ${check.kind.toLowerCase()} sandboxée a échoué pour '${filePath}' : ${result.timedOut ? "timeout" : `code de sortie ${result.exitCode}`}. stderr: ${result.stderr.slice(0, 500)}`,
-          true,
+          "DIFF_FIDELITY_FAILED",
+          diffFidelity.reason ?? "contrôle de fidélité du diff échoué.",
+          false,
           "none",
         );
+      }
+
+      // 4d. Validation sandboxée optionnelle — avant toute écriture GitHub, comme les gardes
+      // ci-dessus. Désactivée par défaut (config.softwareFactorySandbox.validationCommand vide) :
+      // n'affecte alors jamais le comportement historique.
+      if (config.softwareFactorySandbox.validationCommand.trim()) {
+        onStep?.("SANDBOX_VALIDATION", { filePath });
+        const validation = await this.runSandboxedValidation(filePath, updatedCode);
+        if (validation && (validation.timedOut || (validation.exitCode !== undefined && validation.exitCode !== 0))) {
+          throw new SoftwareFactoryWorkflowError(
+            "SANDBOX_VALIDATION_FAILED",
+            `La validation sandboxée a échoué pour '${filePath}' : ${validation.timedOut ? "timeout" : `code de sortie ${validation.exitCode}`}. stderr: ${validation.stderr.slice(0, 500)}`,
+            true,
+            "none",
+          );
+        }
+      }
+
+      // 4e. Vérifications nommées build/test/lint/typecheck optionnelles (tâche 5 sous-priorité 3) —
+      // mêmes garanties que 4d (désactivées par défaut, aucun impact sur le workflow historique),
+      // chacune indépendante pour que l'échec pointe précisément vers la vérification en cause.
+      const namedChecks: Array<{ kind: "BUILD" | "TEST" | "LINT" | "TYPECHECK"; command: string; run: () => Promise<ExecutionResult | null> }> = [
+        { kind: "BUILD", command: config.softwareFactorySandbox.buildCommand, run: () => this.runBuildCheck(filePath, updatedCode) },
+        { kind: "TEST", command: config.softwareFactorySandbox.testCommand, run: () => this.runTestCheck(filePath, updatedCode) },
+        { kind: "LINT", command: config.softwareFactorySandbox.lintCommand, run: () => this.runLintCheck(filePath, updatedCode) },
+        { kind: "TYPECHECK", command: config.softwareFactorySandbox.typecheckCommand, run: () => this.runTypecheckCheck(filePath, updatedCode) },
+      ];
+      for (const check of namedChecks) {
+        if (!check.command.trim()) continue;
+        onStep?.(`SANDBOX_${check.kind}`, { filePath });
+        const result = await check.run();
+        if (result && (result.timedOut || (result.exitCode !== undefined && result.exitCode !== 0))) {
+          throw new SoftwareFactoryWorkflowError(
+            `SANDBOX_${check.kind}_FAILED`,
+            `La vérification ${check.kind.toLowerCase()} sandboxée a échoué pour '${filePath}' : ${result.timedOut ? "timeout" : `code de sortie ${result.exitCode}`}. stderr: ${result.stderr.slice(0, 500)}`,
+            true,
+            "none",
+          );
+        }
       }
     }
 
@@ -894,7 +996,7 @@ export class SoftwareFactoryService {
             owner,
             repo,
             ref: `refs/heads/${branchName}`,
-            sha: baseSha,
+            sha: branchSourceSha,
           });
           sideEffectState = "partial";
         } catch (error: unknown) {
@@ -927,28 +1029,37 @@ export class SoftwareFactoryService {
       }
       if (!allowCreate) {
         throw new SoftwareFactoryWorkflowError(
-          "FILE_NOT_FOUND",
-          `Le fichier '${filePath}' n'existe plus sur la branche '${branchName}'.`,
+          isDelete ? "DELETE_FILE_NOT_FOUND" : "FILE_NOT_FOUND",
+          `Le fichier '${filePath}' n'existe plus sur la branche '${branchName}'${isDelete ? " : rien à supprimer" : ""}.`,
           false,
           sideEffectState,
         );
       }
     }
 
-    onStep?.("GITHUB_UPDATING_FILE", { path: filePath, branch: branchName });
+    onStep?.(isDelete ? "GITHUB_DELETING_FILE" : "GITHUB_UPDATING_FILE", { path: filePath, branch: branchName });
     let updateRes;
     try {
-      updateRes = await this.octokit.rest.repos.createOrUpdateFileContents({
-        owner,
-        repo,
-        path: filePath,
-        message: existingContent
-          ? `feat(jarvis): update ${filePath} - ${instructions.slice(0, 50)}`
-          : `feat(jarvis): create ${filePath} - ${instructions.slice(0, 50)}`,
-        content: Buffer.from(updatedCode, "utf-8").toString("base64"),
-        branch: branchName,
-        sha: targetBranchFileSha,
-      });
+      updateRes = isDelete
+        ? await this.octokit.rest.repos.deleteFile({
+            owner,
+            repo,
+            path: filePath,
+            message: `feat(jarvis): delete ${filePath} - ${instructions.slice(0, 50)}`,
+            branch: branchName,
+            sha: targetBranchFileSha!,
+          })
+        : await this.octokit.rest.repos.createOrUpdateFileContents({
+            owner,
+            repo,
+            path: filePath,
+            message: existingContent
+              ? `feat(jarvis): update ${filePath} - ${instructions.slice(0, 50)}`
+              : `feat(jarvis): create ${filePath} - ${instructions.slice(0, 50)}`,
+            content: Buffer.from(updatedCode, "utf-8").toString("base64"),
+            branch: branchName,
+            sha: targetBranchFileSha,
+          });
       sideEffectState = "partial";
     } catch (error: unknown) {
       const failedState = sideEffectState === "partial"
@@ -956,9 +1067,9 @@ export class SoftwareFactoryService {
         : isUncertainMutationError(error)
         ? "uncertain"
         : "none";
-      throw asWorkflowFailure(error, failedState, false, "GITHUB_FILE_UPDATE_FAILED");
+      throw asWorkflowFailure(error, failedState, false, isDelete ? "GITHUB_FILE_DELETE_FAILED" : "GITHUB_FILE_UPDATE_FAILED");
     }
-    onStep?.("GITHUB_FILE_UPDATED", { path: filePath, branch: branchName });
+    onStep?.(isDelete ? "GITHUB_FILE_DELETED" : "GITHUB_FILE_UPDATED", { path: filePath, branch: branchName });
 
     // Tout ce qui suit arrive après une écriture GitHub confirmée : un échec est
     // nécessairement au moins "partial" et ne doit jamais être rejoué aveuglément.
@@ -1024,12 +1135,16 @@ export class SoftwareFactoryService {
           const prRes = await this.octokit.rest.pulls.create({
             owner,
             repo,
-            title: params.revertPrNumber !== undefined
+            title: isDelete
+              ? `[Jarvis Software Factory] Delete ${filePath} (${cleanTaskId})`
+              : params.revertPrNumber !== undefined
               ? `[Jarvis Software Factory] Revert PR #${params.revertPrNumber} : ${filePath} (${cleanTaskId})`
               : `[Jarvis Software Factory] Patch for ${filePath} (${cleanTaskId})`,
             head: branchName,
             base: defaultBranch,
-            body: params.revertPrNumber !== undefined
+            body: isDelete
+              ? `## Suppression par Jarvis Software Factory\n\n- **Tâche**: \`${taskId}\`\n- **Fichier supprimé**: \`${filePath}\`\n- **Motif**: ${instructions}\n\n*Généré automatiquement par Jarvis Software Factory.*`
+              : params.revertPrNumber !== undefined
               ? `## Annulation de la PR #${params.revertPrNumber} par Jarvis Software Factory\n\n- **Tâche**: \`${taskId}\`\n- **Fichier**: \`${filePath}\`\n- **Restauré au contenu d'avant la PR #${params.revertPrNumber}**.\n- **Motif**: ${instructions}\n\n*Généré automatiquement par Jarvis Software Factory.*`
               : `## Modifications apportées par Jarvis Software Factory\n\n- **Tâche**: \`${taskId}\`\n- **Fichier**: \`${filePath}\`\n- **Instructions**: ${instructions}\n\n*Généré automatiquement par Jarvis Software Factory.*`,
           });
@@ -1044,7 +1159,9 @@ export class SoftwareFactoryService {
         commitSha,
         prUrl,
         prNumber,
-        summary: `Patch appliqué sur la branche unique '${branchName}' et Pull Request #${prNumber} ouverte (${prUrl}).`,
+        summary: isDelete
+          ? `Suppression de '${filePath}' sur la branche '${branchName}' et Pull Request #${prNumber} ouverte (${prUrl}).`
+          : `Patch appliqué sur la branche unique '${branchName}' et Pull Request #${prNumber} ouverte (${prUrl}).`,
         diffFidelity,
       };
     } catch (error: unknown) {
