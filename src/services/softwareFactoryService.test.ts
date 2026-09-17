@@ -2113,11 +2113,11 @@ test("surgical_edit — le contenu committé est le fichier entier après éditi
 
 test("surgical_edit — le secret guard bloque toujours un secret introduit par l'édition, exactement comme pour exactContent/génération LLM (invariant préservé sans adaptation)", async () => {
   const calls: string[] = [];
-  const octokit = mockOctokitForTaskRequestFlow({ calls, existingContent: "const token = 'placeholder';\n" });
+  const octokit = mockOctokitForTaskRequestFlow({ calls, existingContent: "const password = 'placeholder';\n" });
   const service = new SoftwareFactoryService({ githubToken: "test-token", octokitClient: octokit });
 
   const req = baseTaskRequest(
-    { filePath: "docs/runtime.md", instructions: "Mets à jour le token", oldString: "'placeholder'", newString: "'AKIAABCDEFGHIJKLMNOP'" },
+    { filePath: "docs/runtime.md", instructions: "Mets à jour le mot de passe", oldString: "'placeholder'", newString: "'not-a-real-value-but-secret-shaped'" },
     "task-surgical-edit-secret",
   );
   const events = await service.handleTaskRequest(req);
@@ -2409,4 +2409,130 @@ test("Agent : un tool call software_development avec revertPrNumber atteint bien
   await agent.step("annule la PR #77, ce chantier a mal tourné");
   assert.equal(adapter.factoryCalls.length, 1);
   assert.equal(adapter.factoryCalls[0].context.revertPrNumber, 77);
+});
+
+// ---------------------------------------------------------------------------
+// run_build / run_tests / run_lint / run_typecheck (tâche 5 sous-priorité 3, brief JARVIS-00) :
+// vérifications nommées optionnelles avant toute écriture GitHub — même mécanisme que la
+// validation sandboxée générique déjà existante (runSandboxedValidation/validationCommand),
+// juste distinctes par commande/config, désactivées par défaut. sandboxRunner est injecté
+// (jamais de vrai Docker en test — CLAUDE.md : aucun réseau ni fichier requis).
+// ---------------------------------------------------------------------------
+
+type SandboxRunnerCall = { files: Record<string, string>; command: string[]; timeoutMs: number };
+
+function fakeSandboxRunner(
+  results: Partial<Record<string, { exitCode?: number; timedOut?: boolean; stdout?: string; stderr?: string }>>,
+  calls?: SandboxRunnerCall[],
+) {
+  return async (files: Record<string, string>, command: string[], timeoutMs: number) => {
+    calls?.push({ files, command, timeoutMs });
+    const key = command[0] ?? "";
+    const outcome = results[key] ?? { exitCode: 0 };
+    return { stdout: outcome.stdout ?? "", stderr: outcome.stderr ?? "", timedOut: outcome.timedOut ?? false, exitCode: outcome.exitCode };
+  };
+}
+
+test("run_build/run_tests/run_lint/run_typecheck désactivés par défaut : aucune commande configurée, sandboxRunner jamais appelé", async () => {
+  const calls: SandboxRunnerCall[] = [];
+  const octokit = mockOctokitForTaskRequestFlow({ existingContent: "old content" });
+  const service = new SoftwareFactoryService({
+    githubToken: "test-token",
+    octokitClient: octokit,
+    sandboxRunner: fakeSandboxRunner({}, calls),
+  });
+
+  const req = baseTaskRequest({ filePath: "docs/runtime.md", instructions: "x", exactContent: "new content" }, "task-checks-disabled");
+  const events = await service.handleTaskRequest(req);
+  assert.ok(events.find((e) => e.type === "TASK_COMPLETED"), "TASK_COMPLETED doit être émis");
+  assert.equal(calls.length, 0, "aucune commande build/test/lint/typecheck configurée ne doit jamais invoquer le sandbox");
+});
+
+test("run_build/run_tests/run_lint/run_typecheck : chacune configurée et réussie laisse le workflow aboutir, dans cet ordre", async () => {
+  const calls: SandboxRunnerCall[] = [];
+  const previous = {
+    buildCommand: config.softwareFactorySandbox.buildCommand,
+    testCommand: config.softwareFactorySandbox.testCommand,
+    lintCommand: config.softwareFactorySandbox.lintCommand,
+    typecheckCommand: config.softwareFactorySandbox.typecheckCommand,
+  };
+  config.softwareFactorySandbox.buildCommand = "fake-build %FILE%";
+  config.softwareFactorySandbox.testCommand = "fake-test %FILE%";
+  config.softwareFactorySandbox.lintCommand = "fake-lint %FILE%";
+  config.softwareFactorySandbox.typecheckCommand = "fake-typecheck %FILE%";
+  try {
+    const octokit = mockOctokitForTaskRequestFlow({ existingContent: "old content" });
+    const service = new SoftwareFactoryService({
+      githubToken: "test-token",
+      octokitClient: octokit,
+      sandboxRunner: fakeSandboxRunner(
+        { "fake-build": { exitCode: 0 }, "fake-test": { exitCode: 0 }, "fake-lint": { exitCode: 0 }, "fake-typecheck": { exitCode: 0 } },
+        calls,
+      ),
+    });
+
+    const req = baseTaskRequest({ filePath: "docs/runtime.md", instructions: "x", exactContent: "new content" }, "task-checks-pass");
+    const events = await service.handleTaskRequest(req);
+    assert.ok(events.find((e) => e.type === "TASK_COMPLETED"), "TASK_COMPLETED doit être émis quand les 4 vérifications réussissent");
+    assert.deepEqual(calls.map((c) => c.command[0]), ["fake-build", "fake-test", "fake-lint", "fake-typecheck"], "build puis test puis lint puis typecheck, dans cet ordre");
+    for (const call of calls) {
+      assert.deepEqual(call.files, { "docs/runtime.md": "new content" }, "seul le fichier patché est monté, jamais le dépôt hôte");
+    }
+  } finally {
+    Object.assign(config.softwareFactorySandbox, previous);
+  }
+});
+
+for (const [kind, configField, errorCode] of [
+  ["build", "buildCommand", "SANDBOX_BUILD_FAILED"],
+  ["test", "testCommand", "SANDBOX_TEST_FAILED"],
+  ["lint", "lintCommand", "SANDBOX_LINT_FAILED"],
+  ["typecheck", "typecheckCommand", "SANDBOX_TYPECHECK_FAILED"],
+] as const) {
+  test(`run_${kind === "test" ? "tests" : kind} : un échec (code de sortie non-zéro) bloque le workflow avant toute écriture GitHub`, async () => {
+    const calls: SandboxRunnerCall[] = [];
+    const previous = config.softwareFactorySandbox[configField];
+    config.softwareFactorySandbox[configField] = `fake-${kind}-fail %FILE%`;
+    try {
+      const octokit = mockOctokitForTaskRequestFlow({ existingContent: "old content", calls: [] });
+      const writeCalls: string[] = [];
+      (octokit.rest.repos as unknown as { createOrUpdateFileContents: () => Promise<never> }).createOrUpdateFileContents =
+        async () => { writeCalls.push("write"); throw new Error("ne doit jamais être appelé"); };
+      const service = new SoftwareFactoryService({
+        githubToken: "test-token",
+        octokitClient: octokit,
+        sandboxRunner: fakeSandboxRunner({ [`fake-${kind}-fail`]: { exitCode: 1, stderr: "boom" } }, calls),
+      });
+
+      const req = baseTaskRequest({ filePath: "docs/runtime.md", instructions: "x", exactContent: "new content" }, `task-checks-${kind}-fail`);
+      const events = await service.handleTaskRequest(req);
+      const failed = events.find((e) => e.type === "TASK_FAILED");
+      assert.ok(failed, `TASK_FAILED doit être émis quand ${kind} échoue`);
+      assert.equal(failed?.payload.error_code, errorCode);
+      assert.equal(writeCalls.length, 0, "aucune écriture GitHub ne doit survenir après un échec de vérification sandboxée");
+    } finally {
+      config.softwareFactorySandbox[configField] = previous;
+    }
+  });
+}
+
+test("run_build/run_tests/run_lint/run_typecheck : un timeout est traité comme un échec, replannable", async () => {
+  const previous = config.softwareFactorySandbox.buildCommand;
+  config.softwareFactorySandbox.buildCommand = "fake-build-timeout %FILE%";
+  try {
+    const octokit = mockOctokitForTaskRequestFlow({ existingContent: "old content" });
+    const service = new SoftwareFactoryService({
+      githubToken: "test-token",
+      octokitClient: octokit,
+      sandboxRunner: fakeSandboxRunner({ "fake-build-timeout": { timedOut: true } }),
+    });
+
+    const req = baseTaskRequest({ filePath: "docs/runtime.md", instructions: "x", exactContent: "new content" }, "task-checks-timeout");
+    const events = await service.handleTaskRequest(req);
+    const failed = events.find((e) => e.type === "TASK_FAILED");
+    assert.equal(failed?.payload.error_code, "SANDBOX_BUILD_FAILED");
+    assert.equal(failed?.payload.replannable, true);
+  } finally {
+    config.softwareFactorySandbox.buildCommand = previous;
+  }
 });

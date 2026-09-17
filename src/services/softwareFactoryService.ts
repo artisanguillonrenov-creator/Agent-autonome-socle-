@@ -85,6 +85,12 @@ export interface SoftwareFactoryConfig {
   softwareFactoryModel?: string;
   softwareFactoryMaxTokens?: number;
   maxRetries?: number;
+  /**
+   * Exécuteur sandbox injectable (essentiellement pour les tests, qui n'ont ni Docker ni réseau
+   * — CLAUDE.md). Par défaut `runCommandInSandbox` réel (Docker), inchangé pour tout appelant
+   * qui ne fournit pas cette option.
+   */
+  sandboxRunner?: typeof runCommandInSandbox;
 }
 
 export interface ParsedSoftwareTask {
@@ -362,11 +368,13 @@ export class SoftwareFactoryService {
   private githubToken: string;
   private llmProvider: LLMProvider;
   private softwareFactoryMaxTokens: number;
+  private sandboxRunner: typeof runCommandInSandbox;
   public readonly maxRetries: number;
 
   constructor(configObj: SoftwareFactoryConfig = {}) {
     this.githubToken = process.env.GITHUB_FACTORY_TOKEN || configObj.githubToken || process.env.GITHUB_TOKEN || "";
     this.octokit = configObj.octokitClient || new Octokit({ auth: this.githubToken || undefined });
+    this.sandboxRunner = configObj.sandboxRunner || runCommandInSandbox;
 
     // Provider/modèle explicitement résolus ici : jamais laissés vides, donc createLLMProvider
     // ne retombe jamais sur le provider actif de Jarvis ni sur la sélection persistée
@@ -486,8 +494,38 @@ export class SoftwareFactoryService {
     const template = config.softwareFactorySandbox.validationCommand.trim();
     if (!template) return null;
     const command = template.replace("%FILE%", filePath).split(/\s+/).filter(Boolean);
-    const result = await runCommandInSandbox({ [filePath]: content }, command, config.softwareFactorySandbox.timeoutMs);
+    const result = await this.sandboxRunner({ [filePath]: content }, command, config.softwareFactorySandbox.timeoutMs);
     return result;
+  }
+
+  /**
+   * Vérifications nommées build/test/lint/typecheck (tâche 5 sous-priorité 3, gapAnalysis.ts) :
+   * même mécanisme que `runSandboxedValidation` (fichier patché seul monté, jamais le dépôt
+   * hôte), juste distinctes par commande/config — pour que la Factory puisse détecter une
+   * régression introduite par son propre patch avant d'ouvrir la PR, indépendamment de
+   * validationCommand. Chacune désactivée par défaut.
+   */
+  private async runNamedSandboxCheck(template: string, filePath: string, content: string): Promise<ExecutionResult | null> {
+    const trimmed = template.trim();
+    if (!trimmed) return null;
+    const command = trimmed.replace("%FILE%", filePath).split(/\s+/).filter(Boolean);
+    return this.sandboxRunner({ [filePath]: content }, command, config.softwareFactorySandbox.timeoutMs);
+  }
+
+  async runBuildCheck(filePath: string, content: string): Promise<ExecutionResult | null> {
+    return this.runNamedSandboxCheck(config.softwareFactorySandbox.buildCommand, filePath, content);
+  }
+
+  async runTestCheck(filePath: string, content: string): Promise<ExecutionResult | null> {
+    return this.runNamedSandboxCheck(config.softwareFactorySandbox.testCommand, filePath, content);
+  }
+
+  async runLintCheck(filePath: string, content: string): Promise<ExecutionResult | null> {
+    return this.runNamedSandboxCheck(config.softwareFactorySandbox.lintCommand, filePath, content);
+  }
+
+  async runTypecheckCheck(filePath: string, content: string): Promise<ExecutionResult | null> {
+    return this.runNamedSandboxCheck(config.softwareFactorySandbox.typecheckCommand, filePath, content);
   }
 
   /**
@@ -786,6 +824,29 @@ export class SoftwareFactoryService {
         throw new SoftwareFactoryWorkflowError(
           "SANDBOX_VALIDATION_FAILED",
           `La validation sandboxée a échoué pour '${filePath}' : ${validation.timedOut ? "timeout" : `code de sortie ${validation.exitCode}`}. stderr: ${validation.stderr.slice(0, 500)}`,
+          true,
+          "none",
+        );
+      }
+    }
+
+    // 4e. Vérifications nommées build/test/lint/typecheck optionnelles (tâche 5 sous-priorité 3) —
+    // mêmes garanties que 4d (désactivées par défaut, aucun impact sur le workflow historique),
+    // chacune indépendante pour que l'échec pointe précisément vers la vérification en cause.
+    const namedChecks: Array<{ kind: "BUILD" | "TEST" | "LINT" | "TYPECHECK"; command: string; run: () => Promise<ExecutionResult | null> }> = [
+      { kind: "BUILD", command: config.softwareFactorySandbox.buildCommand, run: () => this.runBuildCheck(filePath, updatedCode) },
+      { kind: "TEST", command: config.softwareFactorySandbox.testCommand, run: () => this.runTestCheck(filePath, updatedCode) },
+      { kind: "LINT", command: config.softwareFactorySandbox.lintCommand, run: () => this.runLintCheck(filePath, updatedCode) },
+      { kind: "TYPECHECK", command: config.softwareFactorySandbox.typecheckCommand, run: () => this.runTypecheckCheck(filePath, updatedCode) },
+    ];
+    for (const check of namedChecks) {
+      if (!check.command.trim()) continue;
+      onStep?.(`SANDBOX_${check.kind}`, { filePath });
+      const result = await check.run();
+      if (result && (result.timedOut || (result.exitCode !== undefined && result.exitCode !== 0))) {
+        throw new SoftwareFactoryWorkflowError(
+          `SANDBOX_${check.kind}_FAILED`,
+          `La vérification ${check.kind.toLowerCase()} sandboxée a échoué pour '${filePath}' : ${result.timedOut ? "timeout" : `code de sortie ${result.exitCode}`}. stderr: ${result.stderr.slice(0, 500)}`,
           true,
           "none",
         );

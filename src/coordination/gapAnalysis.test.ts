@@ -109,13 +109,26 @@ test("le rapport de gap analysis assemble matrice, doublons, chevauchements conn
   assert.deepEqual(report.missingCapabilities, ["capacite_totalement_absente"]);
 });
 
-test("SOFTWARE_FACTORY_CAPABILITY_AUDIT documente les gaps réels (run_build/run_tests/delete_file absents)", () => {
+test("SOFTWARE_FACTORY_CAPABILITY_AUDIT documente les gaps réels (delete_file/branch_from_exact_sha absents)", () => {
   const capIds = SOFTWARE_FACTORY_CAPABILITY_AUDIT.map((r) => r.capability);
-  for (const expectedGap of ["run_build", "run_tests", "run_lint", "run_typecheck", "delete_file", "branch_from_exact_sha"]) {
+  for (const expectedGap of ["delete_file", "branch_from_exact_sha"]) {
     const row = SOFTWARE_FACTORY_CAPABILITY_AUDIT.find((r) => r.capability === expectedGap);
     assert.ok(row, `${expectedGap} doit être audité`);
     assert.equal(row!.status, "MISSING");
     assert.equal(row!.gap, "MISSING");
+  }
+});
+
+// run_build/run_tests/run_lint/run_typecheck (tâche 5 sous-priorité 3, câblés) : ne sont plus
+// des gaps — sortis de la liste "encore manquant" ci-dessus, vérifiés ici comme AVAILABLE avec
+// leur propre preuve.
+test("SOFTWARE_FACTORY_CAPABILITY_AUDIT reflète run_build/run_tests/run_lint/run_typecheck comme câblés (AVAILABLE, plus MISSING)", () => {
+  for (const capability of ["run_build", "run_tests", "run_lint", "run_typecheck"]) {
+    const row = SOFTWARE_FACTORY_CAPABILITY_AUDIT.find((r) => r.capability === capability);
+    assert.ok(row, `${capability} doit être audité`);
+    assert.equal(row!.status, "AVAILABLE", capability);
+    assert.equal(row!.gap, "SERVICE_INTERNAL", capability);
+    assert.ok(row!.proof, `${capability} AVAILABLE doit citer une preuve réelle`);
   }
 });
 
